@@ -220,6 +220,23 @@ if (($settings['Platform'] == "Linux") && (file_exists('/usr/include/X11/Xlib.h'
             return str;
         }
 
+        function GetColorOrderSelect(currentValue, attr) {
+            var options = [
+                "RGB", "RBG", "GRB", "GBR", "BRG", "BGR",
+                "RGBW", "RBGW", "GRBW", "GBRW", "BRGW", "BGRW"
+            ];
+            if (!currentValue) currentValue = "RGB";
+            var str = "<select class='colorOrder'" + attr + ">";
+            for (var i = 0; i < options.length; i++) {
+                str += "<option value='" + options[i] + "'";
+                if (currentValue == options[i])
+                    str += " selected";
+                str += ">" + options[i] + "</option>";
+            }
+            str += "</select>";
+            return str;
+        }
+
         function GetStartingCornerInput(currentValue, attr) {
             var options = {
                 TL: "Top Left",
@@ -317,10 +334,12 @@ if (($settings['Platform'] == "Linux") && (file_exists('/usr/include/X11/Xlib.h'
 
                 switch (model.Type) {
                     case "Channel":
+                        var colorOrder = model.ColorOrder || "RGB";
                         postr += "<td><span class='hidden type'>" + model.Type + "</span>" + model.Type + "</td>" +
                             "<td><input class='start' type='text' size='6' maxlength='6' value='" + model.StartChannel + "'" + attr + "></td>" +
                             "<td><input class='cnt' type='text' size='6' maxlength='6' value='" + model.ChannelCount + "'" + attr + "></td>" +
                             "<td><input class='cpn' type='number' min='1' max='4' value='" + ChannelCountPerNode + "'" + attr + "></td>" +
+                            "<td>" + GetColorOrderSelect(colorOrder, attr) + "</td>" +
                             "<td style=\"white-space: nowrap;\">" + GetOrientationInput(model.Orientation + orientationDetails(model), attr) + "</td>";
                         if (model.Orientation != "custom") {
                             postr += "<td>" + GetStartingCornerInput(model.StartCorner, attr) + "</td>" +
@@ -561,6 +580,7 @@ if (($settings['Platform'] == "Linux") && (file_exists('/usr/include/X11/Xlib.h'
                             model.StringCount = parseInt($this.find("input.strcnt").val());
                             model.StrandsPerString = parseInt($this.find("input.strands").val());
                             model.ChannelCountPerNode = parseInt($this.find("input.cpn").val());
+                            model.ColorOrder = $this.find("select.colorOrder").val();
                             model.xLights = $this.find("input.xlights").is(':checked');
 
                             if ((model.StartChannel > 0) &&
@@ -634,10 +654,11 @@ if (($settings['Platform'] == "Linux") && (file_exists('/usr/include/X11/Xlib.h'
                 "<td class='center' valign='middle'><div class='rowGrip'><i class='rowGripIcon fpp-icon-grip'></i></div></td>" +
                 "<td><input class='blk' type='text' size='31' maxlength='31' value=''></td>" +
                 "<td><span class='hidden type'>Channel</span>Channel</td>" +
-                "<td><input class='start' type='text' size='7' maxlength='7' value=''></td>" +
-                "<td><input class='cnt' type='text' size='6' maxlength='6' value=''></td>" +
+                "<td><input class='start' type='text' size='6' maxlength='6' value='1'></td>" +
+                "<td><input class='cnt' type='text' size='6' maxlength='6' value='150'></td>" +
                 "<td><input class='cpn' type='number' min='1' max='4' value='3'></td>" +
-                "<td>" + GetOrientationInput('') + "</td>" +
+                "<td>" + GetColorOrderSelect("RGB", "") + "</td>" +
+                "<td>" + GetOrientationInput("", "") + "</td>" +
                 "<td>" + GetStartingCornerInput('') + "</td>" +
                 "<td><input class='strcnt' type='text' size='3' maxlength='3' value='1'></td>" +
                 "<td><input class='strands' type='text' size='2' maxlength='2' value='1'></td>" +
@@ -1021,6 +1042,7 @@ if (($settings['Platform'] == "Linux") && (file_exists('/usr/include/X11/Xlib.h'
                                     <th><span title='Start Channel'>Start Ch.</span></th>
                                     <th><span title='Channel Count'>Ch. Count</span></th>
                                     <th><span title='Chan Per Node'>Ch./Node</span></th>
+                                    <th><span title='Color Order (RGB, RGBW, etc.)'>Color Order</span></th>
                                     <th><span title='String Orientation'>Orientation</span></th>
                                     <th><span title='Starting Corner'>Start Corner</span></th>
                                     <th><span title='Number of Strings or Width of FB/X11/Sub-Model'>Strings</span></th>
@@ -1055,6 +1077,7 @@ if (($settings['Platform'] == "Linux") && (file_exists('/usr/include/X11/Xlib.h'
                                     <th><span title='Start Channel'>Start Ch.</span></th>
                                     <th><span title='Channel Count'>Ch. Count</span></th>
                                     <th><span title='Chan Per Node'>Ch./Node</span></th>
+                                    <th><span title='Color Order (RGB, RGBW, etc.)'>Color Order</span></th>
                                     <th><span title='String Orientation'>Orientation</span></th>
                                     <th><span title='Starting Corner'>Start Corner</span></th>
                                     <th><span title='Number of Strings or Width of FB/X11/Sub-Model'>Strings</span></th>

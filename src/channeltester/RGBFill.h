@@ -31,4 +31,5 @@ private:
     char m_color1;
     char m_color2;
     char m_color3;
+    char m_color4;
 };

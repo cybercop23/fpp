@@ -1361,7 +1361,7 @@ void PixelOverlayManager::RegisterCommands() {
 void PixelOverlayManager::addAutoOverlayModel(const std::string& name,
                                               uint32_t startChannel, uint32_t channelCount, uint32_t channelPerNode,
                                               const std::string& orientation, const std::string& startLocation,
-                                              uint32_t strings, uint32_t strands) {
+                                              uint32_t strings, uint32_t strands, const std::string& colorOrder) {
     Json::Value val;
     val["Name"] = name;
     val["Type"] = "Channel";
@@ -1372,6 +1372,7 @@ void PixelOverlayManager::addAutoOverlayModel(const std::string& name,
     val["Orientation"] = orientation;
     val["StartCorner"] = startLocation;
     val["ChannelCountPerNode"] = channelPerNode;
+    val["ColorOrder"] = colorOrder;
     val["autoCreated"] = true;
 
     addModel(val);

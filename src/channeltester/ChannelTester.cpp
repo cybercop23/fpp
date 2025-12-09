@@ -87,6 +87,18 @@ public:
         if (m == "R-G-B-All-None") {
             return "RGBAN";
         }
+        if (m == "R-G-B-W") {
+            return "RGBW";
+        }
+        if (m == "R-G-B-W-All") {
+            return "RGBWA";
+        }
+        if (m == "R-G-B-W-None") {
+            return "RGBWN";
+        }
+        if (m == "R-G-B-W-All-None") {
+            return "RGBWAN";
+        }
         return "RGB";
     }
     std::string mapPattern(const std::string& m) {
@@ -97,6 +109,18 @@ public:
             return "FF000000FF000000FF000000";
         }
         if (m == "R-G-B-All-None") {
+            return "FF000000FF000000FFFFFFFF000000";
+        }
+        if (m == "R-G-B-W") {
+            return "FF000000FF000000FFFF";
+        }
+        if (m == "R-G-B-W-All") {
+            return "FF000000FF000000FFFFFFFF";
+        }
+        if (m == "R-G-B-W-None") {
+            return "FF000000FF000000FFFF000000";
+        }
+        if (m == "R-G-B-W-All-None") {
             return "FF000000FF000000FFFFFFFF000000";
         }
         return "FF000000FF000000FF";
@@ -130,10 +154,21 @@ public:
             config["colorPattern"] = args[3];
         } else if (effect == "RGB Single Color") {
             config["mode"] = "RGBFill";
-            int v = std::stoi(args[3].substr(1), nullptr, 16);
-            config["color3"] = v & 0xFF;
-            config["color2"] = (v >> 8) & 0xFF;
-            config["color1"] = (v >> 16) & 0xFF;
+            std::string hexStr = args[3].substr(1); // Remove # prefix
+            int v = std::stoi(hexStr, nullptr, 16);
+            
+            if (hexStr.length() == 8) {
+                // RGBW format (8 hex digits)
+                config["color4"] = v & 0xFF;          // W
+                config["color3"] = (v >> 8) & 0xFF;   // B
+                config["color2"] = (v >> 16) & 0xFF;  // G
+                config["color1"] = (v >> 24) & 0xFF;  // R
+            } else {
+                // RGB format (6 hex digits)
+                config["color3"] = v & 0xFF;          // B
+                config["color2"] = (v >> 8) & 0xFF;   // G
+                config["color1"] = (v >> 16) & 0xFF;  // R
+            }
         } else if (effect == "Single Channel Chase") {
             config["mode"] = "SingleChase";
             int v = std::stoi(args[3], nullptr, 10);
@@ -244,9 +279,13 @@ HttpResponsePtr ChannelTester::render_GET(const HttpRequestPtr& req) {
             v["optional"] = false;
             v["type"] = "string";
             v["contents"].append("R-G-B");
+            v["contents"].append("R-G-B-W");
             v["contents"].append("R-G-B-All");
+            v["contents"].append("R-G-B-W-All");
             v["contents"].append("R-G-B-None");
+            v["contents"].append("R-G-B-W-None");
             v["contents"].append("R-G-B-All-None");
+            v["contents"].append("R-G-B-W-All-None");
             result["args"].append(v);
         } else if (effect == "RGB Cycle") {
             Json::Value v;
@@ -255,9 +294,13 @@ HttpResponsePtr ChannelTester::render_GET(const HttpRequestPtr& req) {
             v["optional"] = false;
             v["type"] = "string";
             v["contents"].append("R-G-B");
+            v["contents"].append("R-G-B-W");
             v["contents"].append("R-G-B-All");
+            v["contents"].append("R-G-B-W-All");
             v["contents"].append("R-G-B-None");
+            v["contents"].append("R-G-B-W-None");
             v["contents"].append("R-G-B-All-None");
+            v["contents"].append("R-G-B-W-All-None");
             result["args"].append(v);
         } else if (effect == "Custom Chase") {
             Json::Value v;

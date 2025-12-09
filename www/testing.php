@@ -162,6 +162,14 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 			StringsChanged();
 		}
 
+		function UpdateIncrementFromColorOrder() {
+			var colorOrder = $('#colorOrder').val();
+			// 4-channel color orders end with 'W', 3-channel do not
+			var increment = colorOrder.length >= 4 && colorOrder.endsWith('W') ? 4 : 3;
+			$('#channelIncrement').val(increment);
+			SetButtonIncrements();
+		}
+
 		function UpdateStartEndFromModel() {
 			var val = $('#modelName').val();
 			if (val.indexOf(',') != -1) {
@@ -176,6 +184,11 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 				$('#testModeStartChannel').val(modelInfos[id].StartChannel);
 				$('#testModeEndChannel').val(modelInfos[id].EndChannel);
 
+				// Set color order from model
+				if (modelInfos[id].ColorOrder) {
+					$('#colorOrder').val(modelInfos[id].ColorOrder);
+				}
+
 				if (modelInfos[id].StringCount > 1) {
 					$('#startString').attr('max', modelInfos[id].StringCount);
 					$('#startString').val(1);
@@ -184,7 +197,9 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 					$('#channelIncrement').val(modelInfos[id].ChannelsPerString);
 					$('.stringRow').show();
 				} else {
-					$('#channelIncrement').val(3);
+					// Use ChannelCountPerNode if available (supports RGBW = 4 channels)
+					var channelsPerPixel = modelInfos[id].ChannelCountPerNode || 3;
+					$('#channelIncrement').val(channelsPerPixel);
 					$('.stringRow').hide();
 				}
 				SetButtonIncrements();
@@ -277,6 +292,7 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 			var colorR = parseInt($('#testModeColorRText').html());
 			var colorG = parseInt($('#testModeColorGText').html());
 			var colorB = parseInt($('#testModeColorBText').html());
+			var colorW = parseInt($('#testModeColorWText').html());
 			var color1;
 			var color2;
 			var color3;
@@ -332,6 +348,48 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 				strR = "0000FF";
 				strG = "00FF00";
 				strB = "FF0000";
+			} else if (colorOrder == "RGBW") {
+				color1 = colorR;
+				color2 = colorG;
+				color3 = colorB;
+				strR = "FF0000";
+				strG = "00FF00";
+				strB = "0000FF";
+			} else if (colorOrder == "RBGW") {
+				color1 = colorR;
+				color3 = colorG;
+				color2 = colorB;
+				strR = "FF0000";
+				strG = "0000FF";
+				strB = "00FF00";
+			} else if (colorOrder == "GRBW") {
+				color2 = colorR;
+				color1 = colorG;
+				color3 = colorB;
+				strR = "00FF00";
+				strG = "FF0000";
+				strB = "0000FF";
+			} else if (colorOrder == "GBRW") {
+				color3 = colorR;
+				color1 = colorG;
+				color2 = colorB;
+				strR = "0000FF";
+				strG = "FF0000";
+				strB = "00FF00";
+			} else if (colorOrder == "BRGW") {
+				color2 = colorR;
+				color3 = colorG;
+				color1 = colorB;
+				strR = "00FF00";
+				strG = "0000FF";
+				strB = "FF0000";
+			} else if (colorOrder == "BGRW") {
+				color3 = colorR;
+				color2 = colorG;
+				color1 = colorB;
+				strR = "0000FF";
+				strG = "00FF00";
+				strB = "FF0000";
 			}
 
 			if (startChannel < 1 || startChannel > maxChannel || isNaN(startChannel)) {
@@ -380,12 +438,20 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 						data["args"].push(channelSet);
 						if (mode == "RGBChase-RGB") {
 							data["args"].push("R-G-B");
-						} else if (mode == "RGBChase-RGBN") {
-							data["args"].push("R-G-B-None");
+						} else if (mode == "RGBChase-RGBW") {
+							data["args"].push("R-G-B-W");
 						} else if (mode == "RGBChase-RGBA") {
 							data["args"].push("R-G-B-All");
+						} else if (mode == "RGBChase-RGBWA") {
+							data["args"].push("R-G-B-W-All");
+						} else if (mode == "RGBChase-RGBN") {
+							data["args"].push("R-G-B-None");
+						} else if (mode == "RGBChase-RGBWN") {
+							data["args"].push("R-G-B-W-None");
 						} else if (mode == "RGBChase-RGBAN") {
 							data["args"].push("R-G-B-All-None");
+						} else if (mode == "RGBChase-RGBWAN") {
+							data["args"].push("R-G-B-W-All-None");
 						}
 					}
 				} else if (mode.substring(0, 9) == "RGBCycle-") {
@@ -398,12 +464,20 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 						data["args"].push(channelSet);
 						if (mode == "RGBCycle-RGB") {
 							data["args"].push("R-G-B");
-						} else if (mode == "RGBCycle-RGBN") {
-							data["args"].push("R-G-B-None");
+						} else if (mode == "RGBCycle-RGBW") {
+							data["args"].push("R-G-B-W");
 						} else if (mode == "RGBCycle-RGBA") {
 							data["args"].push("R-G-B-All");
+						} else if (mode == "RGBCycle-RGBWA") {
+							data["args"].push("R-G-B-W-All");
+						} else if (mode == "RGBCycle-RGBN") {
+							data["args"].push("R-G-B-None");
+						} else if (mode == "RGBCycle-RGBWN") {
+							data["args"].push("R-G-B-W-None");
 						} else if (mode == "RGBCycle-RGBAN") {
 							data["args"].push("R-G-B-All-None");
+						} else if (mode == "RGBCycle-RGBWAN") {
+							data["args"].push("R-G-B-W-All-None");
 						}
 					}
 				} else if (mode == "SingleFill") {
@@ -414,7 +488,11 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 					data["args"].push("RGB Single Color");
 					data["args"].push(channelSet);
 					var c = (color1 << 16) + (color2 << 8) + color3;
-					data["args"].push("#" + c.toString(16)); //color
+					var hexColor = c.toString(16).padStart(6, '0');
+					if (colorW > 0) {
+						hexColor += colorW.toString(16).padStart(2, '0');
+					}
+					data["args"].push("#" + hexColor); //color
 				}
 
 				if (!enabled) {
@@ -579,6 +657,10 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 			$('#testModeColorGText').html(rgb.g);
 			$('#testModeColorBText').html(rgb.b);
 			$('.color-box').colpickSetColor($.colpick.rgbToHex(rgb));
+		}
+		function UpdateTestModeFillColorW() {
+			var w = parseInt($('#testModeColorW').val());
+			$('#testModeColorWText').html(w);
 		}
 
 		/////////////////////////////////////////////////////////////////////////////
@@ -949,6 +1031,10 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 						if (modelInfos[i].StartChannel > 0) {
 							modelInfos[i].EndChannel = modelInfos[i].StartChannel + modelInfos[i].ChannelCount - 1;
 							modelInfos[i].ChannelsPerString = parseInt(modelInfos[i].ChannelCount / modelInfos[i].StringCount);
+							// Store ColorOrder if present, default to RGB
+							modelInfos[i].ColorOrder = modelInfos[i].ColorOrder || 'RGB';
+							// Store ChannelCountPerNode (for RGBW support), default to 3
+							modelInfos[i].ChannelCountPerNode = modelInfos[i].ChannelCountPerNode || 3;
 							var option = "<option value='" + i + "'>" + modelInfos[i].Name + "</option>\n";
 							$('#modelName').append(option);
 							// Populate the Channel Fader model dropdown too, but
@@ -1076,6 +1162,20 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 				SetTestMode();
 			});
 
+			$('#testModeColorW').on('input', function () {
+				UpdateTestModeFillColorW();
+			}).on('change', function () {
+				UpdateTestModeFillColorW();
+				SetTestMode();
+			});
+
+			$('#testModeColorW').on('input', function () {
+				UpdateTestModeFillColorW();
+			}).on('change', function () {
+				UpdateTestModeFillColorW();
+				SetTestMode();
+			});
+
 			$('.color-box').colpick({
 				layout: 'rgbhex',
 				color: 'ff00ff',
@@ -1118,6 +1218,10 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 
 		#testModeColorB::-webkit-slider-thumb {
 			background-color: #0000FF;
+		}
+
+		#testModeColorW::-webkit-slider-thumb {
+			background-color: #FFFFFF;
 		}
 
 		#testModeColorR::-moz-range-thumb {
@@ -1228,6 +1332,10 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 			margin: 8px auto 0 auto;
 			text-align: center;
 		}
+
+		#testModeColorW::-moz-range-thumb {
+			background-color: #FFFFFF;
+		}
 	</style>
 
 	<div id="bodyWrapper">
@@ -1271,9 +1379,10 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 								aria-labelledby="interface-settings-tab">
 
 
-								<div class="row">
-									<div class="col-md-3">
-										<div class="backdrop-dark">
+								<!-- Page-Wide Settings -->
+								<div class="backdrop-dark mb-3">
+									<div class="row">
+										<div class="col-md-6">
 											<label for="testModeEnabled" class="mb-0 d-block">
 												<div><b>Enable Test Mode:</b>&nbsp;<input type='checkbox' class="ms-1"
 														id='testModeEnabled' onClick='SetTestMode();'></div>
@@ -1281,102 +1390,44 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 														id='multisyncEnabled' onClick='SetTestMode();'></div>
 											</label>
 										</div>
-										<div class="backdrop-dark mt-3">
+										<div class="col-md-6">
+											<div><b>Update Interval:</b></div>
+											<div>
+												<input id="testModeCycleMS" type="range" min="100" max="5000"
+													value="1000" step="100" />
+												<small class="form-text text-muted">
+													<span id='testModeCycleMSText'>1000</span><span> ms</span>
+												</small>
+											</div>
+										</div>
+									</div>
+								</div>
 
+								<div class="row">
+									<div class="col-md-3">
+										
+										<!-- Model Testing Section -->
+										<div class="backdrop-dark">
+											<h4 class="mb-3">Model Testing</h4>
 											<div class="form-group">
-												<div><b>Model Name:</b></div>
-												<div>
-													<select onChange='UpdateStartEndFromModel();' id='modelName'>
-														<option value='1,<?= $testEndChannel ?>'>-- All Local Channels
-															--
-														</option>
-														<option value='1,<?= FPPD_MAX_CHANNELS ?>'>-- All Channels --
-														</option>
-													</select>
-												</div>
-											</div>
-
-											<div class="mb-1"><b>Channel Range to Test</b><small
-													class="form-text text-muted">(1-<? echo FPPD_MAX_CHANNELS; ?>)
-												</small></div>
-
-											<div class="row">
-												<div class="col-6 form-group">
-													<label for="testModeStartChannel">Start Channel:</label>
-													<input class="form-control" type='number' min='1'
-														max='<? echo FPPD_MAX_CHANNELS; ?>'
-														value='<?= $testStartChannel ?>' id='testModeStartChannel'
-														onChange='SetTestMode();' onkeypress='this.onchange();'
-														onpaste='this.onchange();' oninput='this.onchange();'>
-												</div>
-												<div class="col-6 form-group">
-													<label for="testModeEndChannel">End Channel:</label>
-													<input class="form-control" type='number' min='1'
-														max='<? echo FPPD_MAX_CHANNELS; ?>'
-														value='<?= $testEndChannel ?>' id='testModeEndChannel'
-														onChange='SetTestMode();' onkeypress='this.onchange();'
-														onpaste='this.onchange();' oninput='this.onchange();'>
-												</div>
-											</div>
-
-											<div class="mb-1"><b>Adjust Start/End Channels</b></div>
-											<div class='row'>
-												<div class="col-6 form-group">
-													<label for='channelIncrement'>Increment:</label>
-												</div>
-												<div class="col-6 form-group">
-													<input class="form-control" type='number' min='1'
-														max='<? echo FPPD_MAX_CHANNELS; ?>' value='3'
-														id='channelIncrement' onChange='SetButtonIncrements();'
-														onkeypress='this.onchange();' onpaste='this.onchange();'
-														oninput='this.onchange();'>
-												</div>
-											</div>
-
-											<div class='row'>
-												<div class="col-6 form-group">
-													<label>Start Channel:</label>
-												</div>
-												<div class="col-6 form-group">
-													<input type='button' class='buttons' value='-3' id='decStartButton'
-														onClick='adjustStartChannel(-1);'>
-													<input type='button' class='buttons' value='+3' id='incStartButton'
-														onClick='adjustStartChannel(1);'>
-												</div>
-											</div>
-											<div class='row'>
-												<div class="col-6 form-group">
-													<label>End Channel:</label>
-												</div>
-												<div class="col-6 form-group">
-													<input type='button' class='buttons' value='-3' id='decEndButton'
-														onClick='adjustEndChannel(-1);'>
-													<input type='button' class='buttons' value='+3' id='incEndButton'
-														onClick='adjustEndChannel(1);'>
-												</div>
-											</div>
-											<div class='row'>
-												<div class="col-6 form-group">
-													<label>Both Channels:</label>
-												</div>
-												<div class="col-6 form-group">
-													<input type='button' class='buttons' value='-3' id='decBothButton'
-														onClick='adjustBothChannels(-1);'>
-													<input type='button' class='buttons' value='+3' id='incBothButton'
-														onClick='adjustBothChannels(1);'>
-												</div>
+												<label for="modelName"><b>Model Name:</b></label>
+												<select class='form-control' onChange='UpdateStartEndFromModel();' id='modelName'>
+													<option value='1,<?= $testEndChannel ?>'>-- All Local Channels --</option>
+													<option value='1,<?= FPPD_MAX_CHANNELS ?>'>-- All Channels --</option>
+												</select>
 											</div>
 
 											<div class='row stringRow' style='display: none;'>
+												<div class="col-12 mb-2"><b>String Range:</b></div>
 												<div class="col-6 form-group">
-													<label for="testModeStartString">Start String:</label>
+													<label for="startString">Start String:</label>
 													<input class="form-control" type='number' min='1' max='1' value='1'
 														id='startString' onChange='StringsChanged();'
 														onkeypress='this.onchange();' onpaste='this.onchange();'
 														oninput='this.onchange();'>
 												</div>
 												<div class="col-6 form-group">
-													<label for="testModeEndString">End String:</label>
+													<label for="endString">End String:</label>
 													<input class="form-control" type='number' min='1' max='1' value='1'
 														id='endString' onChange='StringsChanged();'
 														onkeypress='this.onchange();' onpaste='this.onchange();'
@@ -1397,27 +1448,99 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 														onClick='AdjustEndString(1);'>
 												</div>
 											</div>
+										</div>
 
-											<div class="mt-2 mb-1">
-												<b>Update Interval: </b>
-												<input id="testModeCycleMS" type="range" min="100" max="5000"
-													value="1000" step="100" />
-												<small class="form-text text-muted">
-													<span id='testModeCycleMSText'>1000</span><span> ms</span>
-												</small>
+										<!-- Channel Testing Section -->
+										<div class="backdrop-dark mt-3">
+											<h4 class="mb-3">Channel Testing</h4>
+											
+											<div class="mb-2"><b>Channel Range</b><small
+													class="form-text text-muted">(1-<? echo FPPD_MAX_CHANNELS; ?>)
+												</small></div>
 
+											<div class="row">
+												<div class="col-6 form-group">
+													<label for="testModeStartChannel">Start:</label>
+													<input class="form-control" type='number' min='1'
+														max='<? echo FPPD_MAX_CHANNELS; ?>'
+														value='<?= $testStartChannel ?>' id='testModeStartChannel'
+														onChange='SetTestMode();' onkeypress='this.onchange();'
+														onpaste='this.onchange();' oninput='this.onchange();'>
+												</div>
+												<div class="col-6 form-group">
+													<label for="testModeEndChannel">End:</label>
+													<input class="form-control" type='number' min='1'
+														max='<? echo FPPD_MAX_CHANNELS; ?>'
+														value='<?= $testEndChannel ?>' id='testModeEndChannel'
+														onChange='SetTestMode();' onkeypress='this.onchange();'
+														onpaste='this.onchange();' oninput='this.onchange();'>
+												</div>
 											</div>
-											<div>
 
-												Color Order:
-												<select id='colorOrder' onChange='SetTestMode();'>
+											<div class="form-group mt-2">
+												<label for="colorOrder"><b>Color Order:</b></label>
+												<select id='colorOrder' class='form-control' onChange='UpdateIncrementFromColorOrder(); SetTestMode();'>
 													<option>RGB</option>
 													<option>RBG</option>
 													<option>GRB</option>
 													<option>GBR</option>
 													<option>BRG</option>
 													<option>BGR</option>
+													<option>RGBW</option>
+													<option>RBGW</option>
+													<option>GRBW</option>
+													<option>GBRW</option>
+													<option>BRGW</option>
+													<option>BGRW</option>
 												</select>
+											</div>
+
+											<div class="mb-2 mt-3"><b>Adjust Channels</b></div>
+											<div class='row'>
+												<div class="col-6 form-group">
+													<label for='channelIncrement'>Increment:</label>
+												</div>
+												<div class="col-6 form-group">
+													<input class="form-control" type='number' min='1'
+														max='<? echo FPPD_MAX_CHANNELS; ?>' value='3'
+														id='channelIncrement' onChange='SetButtonIncrements();'
+														onkeypress='this.onchange();' onpaste='this.onchange();'
+														oninput='this.onchange();'>
+												</div>
+											</div>
+
+											<div class='row'>
+												<div class="col-6 form-group">
+													<label>Start:</label>
+												</div>
+												<div class="col-6 form-group">
+													<input type='button' class='buttons' value='-3' id='decStartButton'
+														onClick='adjustStartChannel(-1);'>
+													<input type='button' class='buttons' value='+3' id='incStartButton'
+														onClick='adjustStartChannel(1);'>
+												</div>
+											</div>
+											<div class='row'>
+												<div class="col-6 form-group">
+													<label>End:</label>
+												</div>
+												<div class="col-6 form-group">
+													<input type='button' class='buttons' value='-3' id='decEndButton'
+														onClick='adjustEndChannel(-1);'>
+													<input type='button' class='buttons' value='+3' id='incEndButton'
+														onClick='adjustEndChannel(1);'>
+												</div>
+											</div>
+											<div class='row'>
+												<div class="col-6 form-group">
+													<label>Both:</label>
+												</div>
+												<div class="col-6 form-group">
+													<input type='button' class='buttons' value='-3' id='decBothButton'
+														onClick='adjustBothChannels(-1);'>
+													<input type='button' class='buttons' value='+3' id='incBothButton'
+														onClick='adjustBothChannels(1);'>
+												</div>
 											</div>
 										</div>
 
@@ -1426,9 +1549,7 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 
 										<h2>RGB Test Patterns</h2>
 										<div class="callout callout-primary">
-											<p><b>Note:</b> RGB patterns have NO knowledge of output setups, models,
-												etc... "R" is the first channel, "G" is the second, etc... If channels
-												do not line up, the colors displayed on pixels may not match.</p>
+											<p><b>Note:</b> When using Pixel Overlay Models, the RGB test patterns will honor the model's Color Order setting (RGB, RGBW, etc.). For manual channel ranges, you can select the Color Order from the dropdown above. Color Order determines how Red, Green, and Blue values map to channel data, including support for 4-channel RGBW pixels.</p>
 										</div>
 										<div class="row">
 											<div class="col-md-6">
@@ -1442,10 +1563,22 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 															R-G-B</label></div>
 													<div class="testPatternOptionRow custom-control custom-radio"><input
 															type='radio' class="custom-control-input"
+															name='testModeMode' value='RGBChase-RGBW' id='RGBChase-RGBW'
+															onChange='SetTestMode();'><label
+															class="custom-control-label" for='RGBChase-RGBW'>Chase:
+															R-G-B-W</label></div>
+													<div class="testPatternOptionRow custom-control custom-radio"><input
+															type='radio' class="custom-control-input"
 															name='testModeMode' value='RGBChase-RGBA' id='RGBChase-RGBA'
 															onChange='SetTestMode();'><label
 															class="custom-control-label" for='RGBChase-RGBA'>Chase:
 															R-G-B-All</label></div>
+													<div class="testPatternOptionRow custom-control custom-radio"><input
+															type='radio' class="custom-control-input"
+															name='testModeMode' value='RGBChase-RGBWA' id='RGBChase-RGBWA'
+															onChange='SetTestMode();'><label
+															class="custom-control-label" for='RGBChase-RGBWA'>Chase:
+															R-G-B-W-All</label></div>
 													<div class="testPatternOptionRow custom-control custom-radio"><input
 															type='radio' class="custom-control-input"
 															name='testModeMode' value='RGBChase-RGBN' id='RGBChase-RGBN'
@@ -1454,10 +1587,22 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 															R-G-B-None</label></div>
 													<div class="testPatternOptionRow custom-control custom-radio"><input
 															type='radio' class="custom-control-input"
+															name='testModeMode' value='RGBChase-RGBWN' id='RGBChase-RGBWN'
+															onChange='SetTestMode();'><label
+															class="custom-control-label" for='RGBChase-RGBWN'>Chase:
+															R-G-B-W-None</label></div>
+													<div class="testPatternOptionRow custom-control custom-radio"><input
+															type='radio' class="custom-control-input"
 															name='testModeMode' value='RGBChase-RGBAN'
 															id='RGBChase-RGBAN' onChange='SetTestMode();'><label
 															class="custom-control-label" for='RGBChase-RGBAN'>Chase:
 															R-G-B-All-None</label></div>
+													<div class="testPatternOptionRow custom-control custom-radio"><input
+															type='radio' class="custom-control-input"
+															name='testModeMode' value='RGBChase-RGBWAN'
+															id='RGBChase-RGBWAN' onChange='SetTestMode();'><label
+															class="custom-control-label" for='RGBChase-RGBWAN'>Chase:
+															R-G-B-W-All-None</label></div>
 													<div class="testPatternOptionRow custom-control custom-radio"><input
 															type='radio' class="custom-control-input"
 															name='testModeMode' value='RGBChase-RGBCustom'
@@ -1487,10 +1632,22 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 															R-G-B</label></div>
 													<div class="testPatternOptionRow custom-control custom-radio"><input
 															type='radio' class="custom-control-input"
+															name='testModeMode' value='RGBCycle-RGBW' id='RGBCycle-RGBW'
+															onChange='SetTestMode();'><label
+															class="custom-control-label" for='RGBCycle-RGBW'>Cycle:
+															R-G-B-W</label></div>
+													<div class="testPatternOptionRow custom-control custom-radio"><input
+															type='radio' class="custom-control-input"
 															name='testModeMode' value='RGBCycle-RGBA' id='RGBCycle-RGBA'
 															onChange='SetTestMode();'><label
 															class="custom-control-label" for='RGBCycle-RGBA'>Cycle:
 															R-G-B-All</label></div>
+													<div class="testPatternOptionRow custom-control custom-radio"><input
+															type='radio' class="custom-control-input"
+															name='testModeMode' value='RGBCycle-RGBWA' id='RGBCycle-RGBWA'
+															onChange='SetTestMode();'><label
+															class="custom-control-label" for='RGBCycle-RGBWA'>Cycle:
+															R-G-B-W-All</label></div>
 													<div class="testPatternOptionRow custom-control custom-radio"><input
 															type='radio' class="custom-control-input"
 															name='testModeMode' value='RGBCycle-RGBN' id='RGBCycle-RGBN'
@@ -1499,10 +1656,22 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 															R-G-B-None</label></div>
 													<div class="testPatternOptionRow custom-control custom-radio"><input
 															type='radio' class="custom-control-input"
+															name='testModeMode' value='RGBCycle-RGBWN' id='RGBCycle-RGBWN'
+															onChange='SetTestMode();'><label
+															class="custom-control-label" for='RGBCycle-RGBWN'>Cycle:
+															R-G-B-W-None</label></div>
+													<div class="testPatternOptionRow custom-control custom-radio"><input
+															type='radio' class="custom-control-input"
 															name='testModeMode' value='RGBCycle-RGBAN'
 															id='RGBCycle-RGBAN' onChange='SetTestMode();'><label
 															class="custom-control-label" for='RGBCycle-RGBAN'>Cycle:
 															R-G-B-All-None</label></div>
+													<div class="testPatternOptionRow custom-control custom-radio"><input
+															type='radio' class="custom-control-input"
+															name='testModeMode' value='RGBCycle-RGBWAN'
+															id='RGBCycle-RGBWAN' onChange='SetTestMode();'><label
+															class="custom-control-label" for='RGBCycle-RGBWAN'>Cycle:
+															R-G-B-W-All-None</label></div>
 													<div class="testPatternOptionRow custom-control custom-radio"><input
 															type='radio' class="custom-control-input"
 															name='testModeMode' value='RGBCycle-RGBCustom'
@@ -1547,18 +1716,22 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 											</div>
 											<div class="row">
 
-												<div class="col-sm-4 testModeColorRange"><span>R: </span><input
+												<div class="col-sm-3 testModeColorRange"><span>R: </span><input
 														id="testModeColorR" type="range" min="0" max="255" value="255"
 														step="1" /> <span
 														id='testModeColorRText'>255</span><span></span></div>
-												<div class="col-sm-4 testModeColorRange"><span>G: </span><input
+												<div class="col-sm-3 testModeColorRange"><span>G: </span><input
 														id="testModeColorG" type="range" min="0" max="255" value="0"
 														step="1" /> </span> <span
 														id='testModeColorGText'>0</span><span></span></div>
-												<div class="col-sm-4 testModeColorRange"><span>B: </span><input
+												<div class="col-sm-3 testModeColorRange"><span>B: </span><input
 														id="testModeColorB" type="range" min="0" max="255" value="255"
 														step="1" /> <span
 														id='testModeColorBText'>255</span><span></span></div>
+												<div class="col-sm-3 testModeColorRange"><span>W: </span><input
+														id="testModeColorW" type="range" min="0" max="255" value="0"
+														step="1" /> <span
+														id='testModeColorWText'>0</span><span></span></div>
 
 											</div>
 										</div>

@@ -24,7 +24,8 @@
 TestPatternRGBFill::TestPatternRGBFill() :
     m_color1(0),
     m_color2(0),
-    m_color3(0) {
+    m_color3(0),
+    m_color4(0) {
     LogExcess(VB_CHANNELOUT, "TestPatternRGBFill::TestPatternRGBFill()\n");
 
     m_testPatternName = "RGBFill";
@@ -58,6 +59,11 @@ int TestPatternRGBFill::Init(Json::Value config) {
         m_configChanged = 1;
     }
 
+    if (m_color4 != config["color4"].asInt()) {
+        m_color4 = config["color4"].asInt();
+        m_configChanged = 1;
+    }
+
     return TestPatternBase::Init(config);
 }
 
@@ -69,10 +75,23 @@ int TestPatternRGBFill::SetupTest(void) {
 
     char* c = m_testData;
     int offset = 0;
-    for (int i = 0; i < m_channelCount; i += 3) {
-        *(c++) = m_color1;
-        *(c++) = m_color2;
-        *(c++) = m_color3;
+    
+    // Check if we have a 4th color (White channel for RGBW)
+    if (m_color4 != 0) {
+        // RGBW mode - fill with 4 channels per pixel
+        for (int i = 0; i < m_channelCount; i += 4) {
+            *(c++) = m_color1;
+            *(c++) = m_color2;
+            *(c++) = m_color3;
+            *(c++) = m_color4;
+        }
+    } else {
+        // RGB mode - fill with 3 channels per pixel
+        for (int i = 0; i < m_channelCount; i += 3) {
+            *(c++) = m_color1;
+            *(c++) = m_color2;
+            *(c++) = m_color3;
+        }
     }
 
     return TestPatternBase::SetupTest();
@@ -86,6 +105,7 @@ void TestPatternRGBFill::DumpConfig(void) {
     LogDebug(VB_CHANNELOUT, "    color1 : %02x\n", m_color1);
     LogDebug(VB_CHANNELOUT, "    color2 : %02x\n", m_color2);
     LogDebug(VB_CHANNELOUT, "    color3 : %02x\n", m_color3);
+    LogDebug(VB_CHANNELOUT, "    color4 : %02x\n", m_color4);
 
     TestPatternBase::DumpConfig();
 }
