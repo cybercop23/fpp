@@ -618,6 +618,38 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 			SetTestMode();
 		}
 
+		function AppendColorPickerToCustom() {
+			var hexColor = $('#customPatternColorPicker').val();
+			// Remove the # from hex color
+			var colorTriplet = hexColor.substring(1).toUpperCase();
+
+			var currentValue = $('#testModeRGBCycleCustomPattern').val();
+			$('#testModeRGBCycleCustomPattern').val(currentValue + colorTriplet);
+
+			SetTestMode();
+		}
+
+		function ClearCustomPattern() {
+			$('#testModeRGBCycleCustomPattern').val('');
+			SetTestMode();
+		}
+
+		function AppendColorPickerToCustomChase() {
+			var hexColor = $('#customChasePatternColorPicker').val();
+			// Remove the # from hex color
+			var colorTriplet = hexColor.substring(1).toUpperCase();
+
+			var currentValue = $('#testModeRGBCustomPattern').val();
+			$('#testModeRGBCustomPattern').val(currentValue + colorTriplet);
+
+			SetTestMode();
+		}
+
+		function ClearCustomChasePattern() {
+			$('#testModeRGBCustomPattern').val('');
+			SetTestMode();
+		}
+
 		/////////////////////////////////////////////////////////////////////////////
 		/////////////////////////////////////////////////////////////////////////////
 		// Sequence Testing Functions
@@ -1547,14 +1579,42 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 									</div>
 									<div class="col-md-9">
 
-										<h2>RGB Test Patterns</h2>
-										<div class="callout callout-primary">
-											<p><b>Note:</b> When using Pixel Overlay Models, the RGB test patterns will honor the model's Color Order setting (RGB, RGBW, etc.). For manual channel ranges, you can select the Color Order from the dropdown above. Color Order determines how Red, Green, and Blue values map to channel data, including support for 4-channel RGBW pixels.</p>
-										</div>
-										<div class="row">
-											<div class="col-md-6">
-												<div class="backdrop">
-													<h3>Chase Patterns</h3>
+										<!-- Test Pattern Tabs -->
+										<ul class="nav nav-pills mb-3" role="tablist">
+											<li class="nav-item">
+												<a class="nav-link active" id="rgb-patterns-tab" data-bs-toggle="tab"
+													data-bs-target="#rgb-patterns" href="#rgb-patterns" role="tab"
+													aria-controls="rgb-patterns" aria-selected="true">
+													RGB Test Patterns
+												</a>
+											</li>
+											<li class="nav-item">
+												<a class="nav-link" id="solid-color-tab" data-bs-toggle="tab"
+													data-bs-target="#solid-color" href="#solid-color" role="tab"
+													aria-controls="solid-color" aria-selected="false">
+													Solid Color Fill
+												</a>
+											</li>
+											<li class="nav-item">
+												<a class="nav-link" id="single-channel-tab" data-bs-toggle="tab"
+													data-bs-target="#single-channel" href="#single-channel" role="tab"
+													aria-controls="single-channel" aria-selected="false">
+													Single Channel
+												</a>
+											</li>
+										</ul>
+
+										<div class="tab-content">
+											<!-- RGB Test Patterns Tab -->
+											<div class="tab-pane fade show active" id="rgb-patterns" role="tabpanel"
+												aria-labelledby="rgb-patterns-tab">
+												<div class="callout callout-primary">
+													<p><b>Note:</b> When using Pixel Overlay Models, the RGB test patterns will honor the model's Color Order setting (RGB, RGBW, etc.). For manual channel ranges, you can select the Color Order from the dropdown above. Color Order determines how Red, Green, and Blue values map to channel data, including support for 4-channel RGBW pixels.</p>
+												</div>
+												<div class="row">
+													<div class="col-md-6">
+														<div class="backdrop">
+															<h3>Chase Patterns</h3>
 													<div class="testPatternOptionRow custom-control custom-radio"><input
 															type='radio' class="custom-control-input"
 															name='testModeMode' value='RGBChase-RGB' id='RGBChase-RGB'
@@ -1610,6 +1670,14 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 															class="custom-control-label" for='RGBChase-RGBCustom'>Chase:
 															Custom Pattern: </label></div>
 													<div class="form-group">
+														<div class="mb-2">
+															<label for="customChasePatternColorPicker" class="form-label"><b>Add Color to Pattern:</b></label>
+															<div class="input-group" style="max-width: 300px;">
+																<input type="color" class="form-control form-control-color" id="customChasePatternColorPicker" value="#ff0000" title="Choose color">
+																<button type="button" class="btn btn-outline-secondary btn-sm" onclick="AppendColorPickerToCustomChase();">Add Color</button>
+																<button type="button" class="btn btn-outline-danger btn-sm" onclick="ClearCustomChasePattern();">Clear</button>
+															</div>
+														</div>
 
 														<input id='testModeRGBCustomPattern' size='36' maxlength='72'
 															type="text" value='FF000000FF000000FF'
@@ -1673,28 +1741,39 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 															class="custom-control-label" for='RGBCycle-RGBWAN'>Cycle:
 															R-G-B-W-All-None</label></div>
 													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBCycle-RGBCustom'
-															id='RGBCycle-RGBCustom' onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBCycle-RGBCustom'>Cycle:
-															Custom Pattern: </label> </div>
+												type='radio' class="custom-control-input"
+												name='testModeMode' value='RGBCycle-RGBCustom'
+												id='RGBCycle-RGBCustom' onChange='SetTestMode();'><label
+												class="custom-control-label" for='RGBCycle-RGBCustom'>Cycle:
+												Custom Pattern: </label> </div>
 
-													<div class="form-group">
-
-														<input id='testModeRGBCycleCustomPattern' size='36'
-															maxlength='72' type="text" value='FF000000FF000000FF'
-															onChange='SetTestMode();' onkeypress='this.onchange();'
-															onpaste='this.onchange();' oninput='this.onchange();'>
-														<small class="form-text text-muted">(6 hex digits per RGB
-															triplet) </small>
+											<div class="form-group">
+												<div class="mb-2">
+													<label for="customPatternColorPicker" class="form-label"><b>Add Color to Pattern:</b></label>
+													<div class="input-group" style="max-width: 300px;">
+														<input type="color" class="form-control form-control-color" id="customPatternColorPicker" value="#ff0000" title="Choose color">
+														<button type="button" class="btn btn-outline-secondary" onclick="AppendColorPickerToCustom();">Add Color</button>
+														<button type="button" class="btn btn-outline-danger" onclick="ClearCustomPattern();">Clear</button>
 													</div>
-
 												</div>
+
+												<input id='testModeRGBCycleCustomPattern' size='36'
+													maxlength='72' type="text" value='FF000000FF000000FF'
+													onChange='SetTestMode();' onkeypress='this.onchange();'
+													onpaste='this.onchange();' oninput='this.onchange();'>
+												<small class="form-text text-muted">(6 hex digits per RGB
+													triplet) </small>
+											</div>												</div>
 											</div>
 										</div>
+									</div>
 
-										<hr class="mt-4 mb-4">
-										<h2>Solid Color Test Pattern</h2>
+									<!-- Solid Color Tab -->
+									<div class="tab-pane fade" id="solid-color" role="tabpanel"
+										aria-labelledby="solid-color-tab">
+										<div class="callout callout-primary">
+											<p><b>Note:</b> Select a specific color to fill all channels (respects Color Order setting above).</p>
+										</div>
 										<div class="backdrop mt-3">
 											<div class="row">
 												<div class="col-auto displayTestingFillOptionBoxHeader">
@@ -1726,20 +1805,24 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 														id='testModeColorGText'>0</span><span></span></div>
 												<div class="col-sm-3 testModeColorRange"><span>B: </span><input
 														id="testModeColorB" type="range" min="0" max="255" value="255"
-														step="1" /> <span
-														id='testModeColorBText'>255</span><span></span></div>
-												<div class="col-sm-3 testModeColorRange"><span>W: </span><input
-														id="testModeColorW" type="range" min="0" max="255" value="0"
-														step="1" /> <span
-														id='testModeColorWText'>0</span><span></span></div>
+													step="1" /> <span
+													id='testModeColorBText'>255</span><span></span></div>
+											<div class="col-sm-3 testModeColorRange"><span>W: </span><input
+													id="testModeColorW" type="range" min="0" max="255" value="0"
+													step="1" /> <span
+													id='testModeColorWText'>0</span><span></span></div>
 
-											</div>
 										</div>
-										<hr class="mt-4 mb-4">
-										<h2>Single Channel Patterns:</h2>
-										<div class="backdrop">
+									</div>
+								</div>
 
-
+								<!-- Single Channel Tab -->
+								<div class="tab-pane fade" id="single-channel" role="tabpanel"
+									aria-labelledby="single-channel-tab">
+									<div class="callout callout-primary">
+										<p><b>Note:</b> Test individual channels with chase or fill patterns.</p>
+									</div>
+									<div class="backdrop">
 											<span><b>&nbsp;Channel Data Value: </b></span>
 
 											<div><input id="testModeColorS" type="range" min="0" max="255" value="255"
@@ -1789,10 +1872,6 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 										</div>
 									</div>
 								</div>
-
-
-
-
 							</div>
 							<div id='tab-dmx' class="tab-pane fade" role="tabpanel" aria-labelledby="tab-dmx-tab">
 								<div class="row">
