@@ -1866,6 +1866,8 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 													</div>
 												</div>
 											</div>
+										</div>
+									</div>
 
 
 
