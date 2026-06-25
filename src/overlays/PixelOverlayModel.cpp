@@ -55,7 +55,6 @@
 #include "PixelOverlay.h"
 #include "PixelOverlayEffects.h"
 #include "PixelOverlayModel.h"
-#include "../channeloutput/ColorOrder.h"
 
 static uint8_t* createChannelDataMemory(const std::string& dataName, uint32_t size) {
     mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
@@ -123,12 +122,9 @@ PixelOverlayModel::PixelOverlayModel(const Json::Value& c) :
     }
     bytesPerPixel = (channelsPerNode >= 4) ? 4 : 3;
 
-    // Parse color order from config, default to RGB
-    colorOrder = FPPColorOrder::kColorOrderRGB;
-    if (config.isMember("ColorOrder")) {
-        colorOrder = ColorOrderFromString(config["ColorOrder"].asString());
-    } else {
-        // Set default in config for API exposure
+    // Color order is consumed by the web UI (testing.php) via the model's JSON
+    // config; ensure it always has a value so the API exposes it.
+    if (!config.isMember("ColorOrder")) {
         config["ColorOrder"] = "RGB";
     }
 

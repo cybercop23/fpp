@@ -111,19 +111,24 @@ public:
         if (m == "R-G-B-All-None") {
             return "FF000000FF000000FFFFFFFF000000";
         }
+        // RGBW patterns use 4-channel (8 hex digit) groups: R, G, B, W, All, None
         if (m == "R-G-B-W") {
-            return "FF000000FF000000FFFF";
+            return "FF00000000FF00000000FF00000000FF";
         }
         if (m == "R-G-B-W-All") {
-            return "FF000000FF000000FFFFFFFF";
+            return "FF00000000FF00000000FF00000000FFFFFFFFFF";
         }
         if (m == "R-G-B-W-None") {
-            return "FF000000FF000000FFFF000000";
+            return "FF00000000FF00000000FF00000000FF00000000";
         }
         if (m == "R-G-B-W-All-None") {
-            return "FF000000FF000000FFFFFFFF000000";
+            return "FF00000000FF00000000FF00000000FFFFFFFFFF00000000";
         }
         return "FF000000FF000000FF";
+    }
+    // Number of channels per pixel implied by the chase/cycle type (4 for RGBW patterns, 3 otherwise)
+    int mapChannelsPerNode(const std::string& m) {
+        return (m.find("W") != std::string::npos) ? 4 : 3;
     }
 
     virtual std::unique_ptr<Result> run(const std::vector<std::string>& args) {
@@ -140,10 +145,12 @@ public:
             config["mode"] = "RGBChase";
             config["subMode"] = std::string("RGBChase-") + mapSubMode(args[3]);
             config["colorPattern"] = mapPattern(args[3]);
+            config["channelsPerNode"] = mapChannelsPerNode(args[3]);
         } else if (effect == "RGB Cycle") {
             config["mode"] = "RGBCycle";
             config["subMode"] = std::string("RGBCycle-") + mapSubMode(args[3]);
             config["colorPattern"] = mapPattern(args[3]);
+            config["channelsPerNode"] = mapChannelsPerNode(args[3]);
         } else if (effect == "Custom Chase") {
             config["mode"] = "RGBChase";
             config["subMode"] = "RGBChase-RGBCustom";
@@ -158,13 +165,15 @@ public:
             int v = std::stoi(hexStr, nullptr, 16);
             
             if (hexStr.length() == 8) {
-                // RGBW format (8 hex digits)
+                // RGBW format (8 hex digits) - 4 channels per pixel
+                config["channelsPerNode"] = 4;
                 config["color4"] = v & 0xFF;          // W
                 config["color3"] = (v >> 8) & 0xFF;   // B
                 config["color2"] = (v >> 16) & 0xFF;  // G
                 config["color1"] = (v >> 24) & 0xFF;  // R
             } else {
-                // RGB format (6 hex digits)
+                // RGB format (6 hex digits) - 3 channels per pixel
+                config["channelsPerNode"] = 3;
                 config["color3"] = v & 0xFF;          // B
                 config["color2"] = (v >> 8) & 0xFF;   // G
                 config["color1"] = (v >> 16) & 0xFF;  // R

@@ -32,4 +32,5 @@ private:
     char m_color2;
     char m_color3;
     char m_color4;
+    int m_channelsPerNode; // 3 for RGB, 4 for RGBW
 };

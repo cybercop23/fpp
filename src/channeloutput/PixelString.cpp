@@ -641,6 +641,7 @@ void PixelString::AutoCreateOverlayModels(const std::vector<PixelString*>& strin
             std::string orientation = "H";
             std::string startLocation = "BL";
             std::string colorOrder = "RGB"; // Default color order
+            bool colorOrderSet = false;
             uint32_t strings = vs.size();
             uint32_t strands = 1;
             uint32_t maxChan = 0;
@@ -651,9 +652,10 @@ void PixelString::AutoCreateOverlayModels(const std::vector<PixelString*>& strin
                     maxChan = a->startChannel + (a->pixelCount * a->channelsPerNode() / (a->groupCount ? a->groupCount : 1));
                     channelsPerNode = std::max(channelsPerNode, (uint32_t)a->channelsPerNode());
                     rn = std::max(rn, a->receiverNum);
-                    // Get color order from first valid virtual string
-                    if (colorOrder == "RGB") {
+                    // Use the color order from the first valid virtual string
+                    if (!colorOrderSet) {
                         colorOrder = ColorOrderToString(a->colorOrder);
+                        colorOrderSet = true;
                     }
                 } else {
                     --strings;

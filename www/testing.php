@@ -162,11 +162,27 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 			StringsChanged();
 		}
 
-		function UpdateIncrementFromColorOrder() {
+		// 4-channel (RGBW) color orders end with 'W', 3-channel do not
+		function ColorOrderIsRGBW() {
 			var colorOrder = $('#colorOrder').val();
-			// 4-channel color orders end with 'W', 3-channel do not
-			var increment = colorOrder.length >= 4 && colorOrder.endsWith('W') ? 4 : 3;
-			$('#channelIncrement').val(increment);
+			return colorOrder.length >= 4 && colorOrder.endsWith('W');
+		}
+
+		// The White channel slider only applies to 4-channel (RGBW) color orders.
+		// Disable and zero it for plain RGB orders so a stray W value can't change
+		// the channel stride sent to the backend.
+		function UpdateWhiteSliderState() {
+			var isRGBW = ColorOrderIsRGBW();
+			$('#testModeColorW').prop('disabled', !isRGBW);
+			if (!isRGBW) {
+				$('#testModeColorW').val(0);
+				$('#testModeColorWText').html(0);
+			}
+		}
+
+		function UpdateIncrementFromColorOrder() {
+			$('#channelIncrement').val(ColorOrderIsRGBW() ? 4 : 3);
+			UpdateWhiteSliderState();
 			SetButtonIncrements();
 		}
 
@@ -188,6 +204,7 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 				if (modelInfos[id].ColorOrder) {
 					$('#colorOrder').val(modelInfos[id].ColorOrder);
 				}
+				UpdateWhiteSliderState();
 
 				if (modelInfos[id].StringCount > 1) {
 					$('#startString').attr('max', modelInfos[id].StringCount);
@@ -489,7 +506,10 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 					data["args"].push(channelSet);
 					var c = (color1 << 16) + (color2 << 8) + color3;
 					var hexColor = c.toString(16).padStart(6, '0');
-					if (colorW > 0) {
+					// For RGBW color orders, always send the 4th (White) channel - even
+					// when W is 0 - so the backend fills with a 4-channel stride and the
+					// pixels stay aligned for pure colors.
+					if (ColorOrderIsRGBW()) {
 						hexColor += colorW.toString(16).padStart(2, '0');
 					}
 					data["args"].push("#" + hexColor); //color
@@ -1201,13 +1221,6 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 				SetTestMode();
 			});
 
-			$('#testModeColorW').on('input', function () {
-				UpdateTestModeFillColorW();
-			}).on('change', function () {
-				UpdateTestModeFillColorW();
-				SetTestMode();
-			});
-
 			$('.color-box').colpick({
 				layout: 'rgbhex',
 				color: 'ff00ff',
@@ -1233,6 +1246,7 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 			})
 				.css('background-color', '#ff00ff');
 
+			UpdateWhiteSliderState();
 			GetTestMode();
 			RebuildDMXSliders();
 		});
