@@ -154,11 +154,15 @@ private:
     int m_insertedPlaylistPosition;
     int m_insertedPlaylistEndPosition;
 
-    std::string startNewPlaylistFilename;
-    int startNewPlaylistPosition = 0;
-    int startNewPlaylistRepeat = 0;
-    int startNewPlaylistScheduleEntry = 0;
-    int startNewPlaylistEndPosition = 0;
+    // NOTE: the old startNewPlaylist* members (deferred re-entrant start
+    // requests) moved to file-scope state in Playlist.cpp — the request
+    // belongs to the player, not to one Playlist instance, since the active
+    // instance can be swapped/queued for cleanup between defer and replay.
+
+    // The body of Play(); public Play() defers re-entrant calls, PlayImpl
+    // executes.  Also called directly by SwitchToInsertedPlaylist(), which
+    // must start the inserted child inline within the parent's transition.
+    int PlayImpl(const std::string& filename, const int position, const int repeat, const int scheduleEntry, const int endPosition);
 
     std::recursive_mutex m_playlistMutex;
 

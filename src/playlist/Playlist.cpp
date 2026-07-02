@@ -18,6 +18,7 @@
 
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <functional>
 #include <time.h>
 
 #include "../Events.h"
@@ -57,6 +58,125 @@ static std::list<Playlist*> PL_CLEANUPS;
 // top of Process(), after the stack has unwound.  Mirrors PL_CLEANUPS.
 static std::list<PlaylistEntryBase*> PL_ENTRY_CLEANUPS;
 Playlist* playlist = NULL;
+
+// ──────────────────────────────────────────────────────────────────────────
+// Deferred notifications and deferred re-entrant starts.
+//
+// TriggerPreset() and PluginManager::playlistCallback() run arbitrary code
+// INLINE on the calling thread: preset commands can start/stop playlists,
+// native plugins can call any FPP API, and script plugins fork and block in
+// waitpid.  Historically these fired from inside Play()/Start()/StopNow()/
+// SetIdle()/Process() while m_playlistMutex (recursive) was held and while
+// this playlist's state was mid-transition.  The recursion "worked", but:
+//   - PLAYLIST_STARTED presets that start another playlist re-entered
+//     Play() on the same stack; chains (A starts B, B starts A) recursed
+//     without bound until stack overflow.
+//   - Presets/plugins observed and mutated half-updated playlist state
+//     (the PL_CLEANUPS / PL_ENTRY_CLEANUPS / deferred-start machinery is
+//     scar tissue from exactly this).
+//   - The mutex stayed held across fork/waitpid script runs, stalling the
+//     status API.
+//
+// The invariant now: a state transition COMPLETES before any preset or
+// playlist callback runs.  Notification sites queue a snapshot-capturing
+// closure via QueuePlaylistNotification(); every public transition method
+// holds a PlaylistTransitionGuard, and when the OUTERMOST guard on this
+// thread unwinds (mutex already released — the guard is declared before
+// the lock), the queue is drained iteratively.  A Play() triggered by a
+// drained notification runs inline at depth 1 and appends its own
+// notifications to the same queue, so chains flatten into iteration
+// instead of recursion; runaway chains hit MAX_NOTIFICATION_CASCADE and
+// stop with a warning instead of a stack overflow.
+//
+// Re-entrant Play() (depth > 1, e.g. a "Start Playlist" COMMAND ENTRY
+// executing inside its own StartPlaying() frame) is recorded in
+// s_pendingStart* and replayed by the same drain.  This generalizes the
+// old PlaylistEntryCommand/PlaylistEntryScript dynamic_cast special-case
+// in Play() to every re-entrant caller.
+// ──────────────────────────────────────────────────────────────────────────
+static thread_local int tl_transitionDepth = 0;
+static thread_local bool tl_drainingNotifications = false;
+static thread_local std::vector<std::function<void()>> tl_pendingNotifications;
+// One drain may legitimately fire a handful of chained events (playlist A's
+// STOPPED preset starts B, etc.).  Each start/stop cycle queues ~4-5
+// notifications, so 20 allows ~4 chained playlist switches — anything past
+// that is a preset loop (PLAYLIST_STARTED → Start Playlist → ...).
+static constexpr int MAX_NOTIFICATION_CASCADE = 20;
+
+// Pending re-entrant start request.  File-scope (not per-Playlist members)
+// because the active Playlist object can be swapped/queued for cleanup
+// between the defer and the drain (inserted playlists, SetIdle-to-parent) —
+// the request belongs to "the player", not to one instance.
+static std::mutex s_pendingStartMutex;
+static std::string s_pendingStartFilename;
+static int s_pendingStartPosition = 0;
+static int s_pendingStartRepeat = 0;
+static int s_pendingStartScheduleEntry = 0;
+static int s_pendingStartEndPosition = 0;
+
+static void QueuePlaylistNotification(std::function<void()>&& fn) {
+    if (tl_transitionDepth == 0) {
+        // Not inside a transition (shouldn't happen — all queue sites are in
+        // guarded methods) — fire directly rather than parking it on this
+        // thread's queue where it would only drain on some later transition.
+        fn();
+        return;
+    }
+    tl_pendingNotifications.push_back(std::move(fn));
+}
+
+namespace {
+class PlaylistTransitionGuard {
+public:
+    PlaylistTransitionGuard() { tl_transitionDepth++; }
+    ~PlaylistTransitionGuard() {
+        if (--tl_transitionDepth > 0 || tl_drainingNotifications) {
+            // Inner frame, or a frame created by the drain itself — the
+            // outermost/draining frame owns the queue.
+            return;
+        }
+        tl_drainingNotifications = true;
+        int fired = 0;
+        while (true) {
+            if (!tl_pendingNotifications.empty()) {
+                if (++fired > MAX_NOTIFICATION_CASCADE) {
+                    LogErr(VB_PLAYLIST, "Playlist notification cascade exceeded %d events — presets/plugins are starting playlists in a loop (e.g. PLAYLIST_STARTED -> Start Playlist -> PLAYLIST_STARTED). Dropping %d pending notifications.\n",
+                           MAX_NOTIFICATION_CASCADE, (int)tl_pendingNotifications.size());
+                    WarningHolder::AddWarningTimeout(300, 36, "Command preset loop detected: a playlist preset (e.g. PLAYLIST_STARTED) starts a playlist which re-triggers the preset. Fix the preset configuration.");
+                    tl_pendingNotifications.clear();
+                    std::lock_guard<std::mutex> l(s_pendingStartMutex);
+                    s_pendingStartFilename.clear();
+                    break;
+                }
+                std::function<void()> fn = std::move(tl_pendingNotifications.front());
+                tl_pendingNotifications.erase(tl_pendingNotifications.begin());
+                fn();
+                continue;
+            }
+            // Replay a deferred re-entrant start, if one was recorded.
+            std::string nm;
+            int pos, rep, sched, endPos;
+            {
+                std::lock_guard<std::mutex> l(s_pendingStartMutex);
+                if (s_pendingStartFilename.empty())
+                    break;
+                nm = s_pendingStartFilename;
+                s_pendingStartFilename.clear();
+                pos = s_pendingStartPosition;
+                rep = s_pendingStartRepeat;
+                sched = s_pendingStartScheduleEntry;
+                endPos = s_pendingStartEndPosition;
+            }
+            if (playlist) {
+                // Runs at depth 0 → executes inline; its notifications land
+                // back on this queue and the loop continues.
+                playlist->Play(nm, pos, rep, sched, endPos);
+            }
+        }
+        tl_drainingNotifications = false;
+    }
+};
+} // namespace
 /*
  *
  */
@@ -598,6 +718,7 @@ void Playlist::SwitchToLeadOut(void) {
 int Playlist::Start(void) {
     LogDebug(VB_PLAYLIST, "Playlist::Start()\n");
 
+    PlaylistTransitionGuard guard;
     std::unique_lock<std::recursive_mutex> lck(m_playlistMutex);
 
     if ((!m_leadIn.size()) &&
@@ -653,10 +774,17 @@ int Playlist::Start(void) {
         m_sectionPosition = 0;
     }
 
-    if (origCurState == "playing") {
-        PluginManager::INSTANCE.playlistCallback(GetInfo(), "playing", m_currentSectionStr, m_sectionPosition);
-    } else {
-        PluginManager::INSTANCE.playlistCallback(GetInfo(), "start", m_currentSectionStr, m_sectionPosition);
+    {
+        // Deferred — plugin callbacks run arbitrary code inline; snapshot the
+        // state now, deliver after the transition completes (see
+        // PlaylistTransitionGuard).
+        Json::Value info = GetInfo();
+        std::string action = (origCurState == "playing") ? "playing" : "start";
+        std::string sec = m_currentSectionStr;
+        int pos = m_sectionPosition;
+        QueuePlaylistNotification([info, action, sec, pos]() {
+            PluginManager::INSTANCE.playlistCallback(info, action, sec, pos);
+        });
     }
     Events::Publish("status", m_currentState);
     Events::Publish("playlist/section/status", m_currentSectionStr);
@@ -678,6 +806,8 @@ int Playlist::StopNow(int forceStop) {
         return 1;
     }
 
+    PlaylistTransitionGuard guard;
+
     // Stop background stream slots (2-5).  Slot 1 is stopped by the current
     // entry's Stop() below, which sends the MultiSync media stop packet
     // BEFORE the (slow) pipeline teardown — stopping slot 1 here first would
@@ -687,7 +817,11 @@ int Playlist::StopNow(int forceStop) {
     std::map<std::string, std::string> keywords;
     keywords["PLAYLIST_NAME"] = m_name;
     if (CommandManager::INSTANCE.HasPreset("PLAYLIST_STOPPING_NOW")) {
-        CommandManager::INSTANCE.TriggerPreset("PLAYLIST_STOPPING_NOW", keywords);
+        // Deferred — preset commands run inline and can re-enter the
+        // playlist; fired after this stop completes (PlaylistTransitionGuard).
+        QueuePlaylistNotification([keywords]() mutable {
+            CommandManager::INSTANCE.TriggerPreset("PLAYLIST_STOPPING_NOW", keywords);
+        });
     }
 
     std::unique_lock<std::recursive_mutex> lck(m_playlistMutex);
@@ -708,6 +842,7 @@ int Playlist::StopNow(int forceStop) {
 int Playlist::StopGracefully(int forceStop, int afterCurrentLoop) {
     LogDebug(VB_PLAYLIST, "Playlist::StopGracefully(%d, %d)\n", forceStop, afterCurrentLoop);
 
+    PlaylistTransitionGuard guard;
     if (m_status == FPP_STATUS_PLAYLIST_PAUSED && this == playlist) {
         Resume();
     }
@@ -718,13 +853,17 @@ int Playlist::StopGracefully(int forceStop, int afterCurrentLoop) {
 
     if (afterCurrentLoop) {
         if (CommandManager::INSTANCE.HasPreset("PLAYLIST_STOPPING_AFTER_LOOP")) {
-            CommandManager::INSTANCE.TriggerPreset("PLAYLIST_STOPPING_AFTER_LOOP", keywords);
+            QueuePlaylistNotification([keywords]() mutable {
+                CommandManager::INSTANCE.TriggerPreset("PLAYLIST_STOPPING_AFTER_LOOP", keywords);
+            });
         }
         m_status = FPP_STATUS_STOPPING_GRACEFULLY_AFTER_LOOP;
         m_currentState = "stoppingAfterLoop";
     } else {
         if (CommandManager::INSTANCE.HasPreset("PLAYLIST_STOPPING_GRACEFULLY")) {
-            CommandManager::INSTANCE.TriggerPreset("PLAYLIST_STOPPING_GRACEFULLY", keywords);
+            QueuePlaylistNotification([keywords]() mutable {
+                CommandManager::INSTANCE.TriggerPreset("PLAYLIST_STOPPING_GRACEFULLY", keywords);
+            });
         }
         m_status = FPP_STATUS_STOPPING_GRACEFULLY;
         m_currentState = "stoppingGracefully";
@@ -739,6 +878,7 @@ int Playlist::StopGracefully(int forceStop, int afterCurrentLoop) {
 
 void Playlist::Pause() {
     LogDebug(VB_PLAYLIST, "Playlist::Pause called on %s\n", m_filename.c_str());
+    PlaylistTransitionGuard guard;
     if (IsPlaying()) {
         std::unique_lock<std::recursive_mutex> lck(m_playlistMutex);
         if (m_currentSection && m_sectionPosition < m_currentSection->size() && m_currentSection->at(m_sectionPosition)->IsPlaying()) {
@@ -751,6 +891,7 @@ void Playlist::Pause() {
 }
 void Playlist::Resume() {
     LogDebug(VB_PLAYLIST, "Playlist::Resume called on %s\n", m_filename.c_str());
+    PlaylistTransitionGuard guard;
     if (IsPlaying()) {
         std::unique_lock<std::recursive_mutex> lck(m_playlistMutex);
         if (m_status == FPP_STATUS_PLAYLIST_PAUSED) {
@@ -762,7 +903,14 @@ void Playlist::Resume() {
             Events::Publish("status", m_currentState);
             Events::Publish("playlist/section/status", m_currentSectionStr);
             Events::Publish("playlist/sectionPosition/status", m_sectionPosition);
-            PluginManager::INSTANCE.playlistCallback(GetInfo(), "playing", m_currentSectionStr, m_sectionPosition);
+            {
+                Json::Value info = GetInfo();
+                std::string sec = m_currentSectionStr;
+                int pos = m_sectionPosition;
+                QueuePlaylistNotification([info, sec, pos]() {
+                    PluginManager::INSTANCE.playlistCallback(info, "playing", sec, pos);
+                });
+            }
         }
     }
 }
@@ -808,6 +956,8 @@ int Playlist::FileHasBeenModified(void) {
 int Playlist::Process(void) {
     static time_t lastCheckTime = time(nullptr);
     time_t procTime = time(nullptr);
+
+    PlaylistTransitionGuard guard;
 
     // Process any background stream slots (2-5) — fire-and-forget media on secondary streams
     StreamSlotManager::Instance().ProcessBackgroundSlots();
@@ -884,6 +1034,12 @@ int Playlist::Process(void) {
             }
         }
 
+        // "query_next" stays SYNCHRONOUS by design: it is the decision-point
+        // hook plugins use to insert the next item (InsertPlaylistAsNext)
+        // before the SwitchToInsertedPlaylist checks just below — deferring
+        // it would make the insertion miss this cycle.  Re-entrant Play()
+        // from the callback is safe now (Play() defers it), which was the
+        // only hazard of calling it inline.
         PluginManager::INSTANCE.playlistCallback(GetInfo(), "query_next", m_currentSectionStr, m_sectionPosition);
 
         if (m_status == FPP_STATUS_STOPPING_GRACEFULLY) {
@@ -1026,14 +1182,21 @@ int Playlist::Process(void) {
             StartPlayingWithGlobalPause(m_currentSection->at(m_sectionPosition));
         }
 
-        while (!startNewPlaylistFilename.empty()) {
-            StopNow(1);
-            std::string nm = startNewPlaylistFilename;
-            startNewPlaylistFilename = "";
-            Play(nm.c_str(), startNewPlaylistPosition, startNewPlaylistRepeat, startNewPlaylistScheduleEntry, startNewPlaylistEndPosition);
-        }
+        // NOTE: deferred "Start Playlist" requests recorded by re-entrant
+        // Play() calls are replayed by the outermost PlaylistTransitionGuard
+        // when this Process() frame unwinds — the drain loop that used to
+        // live here moved there so it also covers requests deferred during
+        // idle transitions (Process() stops running once the player goes
+        // idle, so a drain only here could strand them).
 
-        PluginManager::INSTANCE.playlistCallback(GetInfo(), "playing", m_currentSectionStr, m_sectionPosition);
+        {
+            Json::Value info = GetInfo();
+            std::string sec = m_currentSectionStr;
+            int pos = m_sectionPosition;
+            QueuePlaylistNotification([info, sec, pos]() {
+                PluginManager::INSTANCE.playlistCallback(info, "playing", sec, pos);
+            });
+        }
         Events::Publish("playlist/section/status", m_currentSectionStr);
         Events::Publish("playlist/sectionPosition/status", m_sectionPosition);
     }
@@ -1070,7 +1233,10 @@ Playlist* Playlist::SwitchToInsertedPlaylist(bool isStopping) {
             pl = new Playlist(this);
         }
         std::string plname = m_insertedPlaylist;
-        pl->Play(m_insertedPlaylist.c_str(), m_insertedPlaylistPosition, 0, m_scheduleEntry, m_insertedPlaylistEndPosition);
+        // PlayImpl, not Play: this runs inside the parent's transition
+        // (depth > 1) and the child MUST start inline as part of the switch —
+        // the public Play() would defer it.
+        pl->PlayImpl(m_insertedPlaylist.c_str(), m_insertedPlaylistPosition, 0, m_scheduleEntry, m_insertedPlaylistEndPosition);
         m_insertedPlaylist = "";
         if (pl->IsPlaying()) {
             LogDebug(VB_PLAYLIST, "Switching to inserted playlist '%s'\n", m_insertedPlaylist.c_str());
@@ -1097,6 +1263,7 @@ void Playlist::ProcessMedia(void) {
  *
  */
 void Playlist::SetIdle(bool exit) {
+    PlaylistTransitionGuard guard;
     m_status = FPP_STATUS_IDLE;
     m_currentState = "idle";
 
@@ -1105,13 +1272,28 @@ void Playlist::SetIdle(bool exit) {
         keywords["PLAYLIST_NAME"] = m_name;
     }
     Cleanup();
+    // Both deferred (see PlaylistTransitionGuard): a PLAYLIST_STOPPED preset
+    // that starts another playlist used to run here, mid-SetIdle — the rest
+    // of this function then continued tearing down state the preset's Play()
+    // had just replaced, and the trailing "idle" publishes lied about the
+    // actual (playing) state.  The "stop" callback snapshot keeps the OLD
+    // playlist's info, which is what the plugin is being told stopped.
     if (!keywords.empty()) {
         if (CommandManager::INSTANCE.HasPreset("PLAYLIST_STOPPED")) {
-            CommandManager::INSTANCE.TriggerPreset("PLAYLIST_STOPPED", keywords);
+            QueuePlaylistNotification([keywords]() mutable {
+                CommandManager::INSTANCE.TriggerPreset("PLAYLIST_STOPPED", keywords);
+            });
         }
     }
 
-    PluginManager::INSTANCE.playlistCallback(GetInfo(), "stop", m_currentSectionStr, m_sectionPosition);
+    {
+        Json::Value info = GetInfo();
+        std::string sec = m_currentSectionStr;
+        int pos = m_sectionPosition;
+        QueuePlaylistNotification([info, sec, pos]() {
+            PluginManager::INSTANCE.playlistCallback(info, "stop", sec, pos);
+        });
+    }
 
     bool publishIdle = true;
     if (m_parent && exit) {
@@ -1200,6 +1382,34 @@ int Playlist::Play(const std::string& filename, const int position, const int re
     if (filename.empty())
         return 0;
 
+    PlaylistTransitionGuard guard;
+    if (tl_transitionDepth > 1) {
+        // Re-entrant call: another transition on THIS thread is still on the
+        // stack — e.g. a "Start Playlist" command entry executing inside its
+        // own StartPlaying() frame, or a native plugin callback.  Executing
+        // inline would reload/clobber playlist state that the outer frames
+        // still reference (m_currentSection, positions), so record the
+        // request; the outermost PlaylistTransitionGuard replays it after
+        // the stack unwinds.  This replaces (and generalizes) the old
+        // PlaylistEntryCommand/PlaylistEntryScript dynamic_cast check that
+        // deferred via the startNewPlaylistFilename members.
+        LogDebug(VB_PLAYLIST, "Playlist::Play('%s') re-entrant (depth %d) — deferring until current transition completes\n",
+                 filename.c_str(), tl_transitionDepth);
+        std::lock_guard<std::mutex> l(s_pendingStartMutex);
+        s_pendingStartFilename = filename;
+        s_pendingStartPosition = position;
+        s_pendingStartRepeat = repeat;
+        s_pendingStartScheduleEntry = scheduleEntry;
+        s_pendingStartEndPosition = endPosition;
+        return 1;
+    }
+    return PlayImpl(filename, position, repeat, scheduleEntry, endPosition);
+}
+
+// The body of Play().  Called only from Play() (guarded, non-re-entrant) and
+// from SwitchToInsertedPlaylist(), which must start the inserted child
+// playlist inline as part of the parent's own transition.
+int Playlist::PlayImpl(const std::string& filename, const int position, const int repeat, const int scheduleEntry, const int endPosition) {
     LogDebug(VB_PLAYLIST, "Playlist::Play('%s', %d, %d, %d, %d)\n",
              filename.c_str(), position, repeat, scheduleEntry, endPosition);
 
@@ -1222,22 +1432,11 @@ int Playlist::Play(const std::string& filename, const int position, const int re
             Start();
             return 1;
         } else if (m_currentSection) {
-            PlaylistEntryCommand* pec = dynamic_cast<PlaylistEntryCommand*>(m_currentSection->at(m_sectionPosition));
-            PlaylistEntryScript* pes = dynamic_cast<PlaylistEntryScript*>(m_currentSection->at(m_sectionPosition));
-            if (pec || pes) {
-                // We cannot stop the current playlist and start a new one as the entry itself will be deleted
-                // while within a method of the entry.   Thus, we'll record the settings and then
-                // stop the playlist when safe to do so.
-                startNewPlaylistFilename = filename;
-                startNewPlaylistPosition = position;
-                startNewPlaylistRepeat = repeat;
-                startNewPlaylistScheduleEntry = scheduleEntry;
-                startNewPlaylistEndPosition = endPosition;
-                return 1;
-            } else {
-                StopNow(1);
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
+            // Re-entrant callers (command/script entries, plugin callbacks)
+            // never reach here — Play() deferred them — so it is safe to
+            // stop the current playlist and load the new one directly.
+            StopNow(1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
     m_scheduleEntry = scheduleEntry;
@@ -1293,7 +1492,13 @@ int Playlist::Play(const std::string& filename, const int position, const int re
         std::map<std::string, std::string> keywords;
         keywords["PLAYLIST_NAME"] = m_name;
         if (CommandManager::INSTANCE.HasPreset("PLAYLIST_STARTED")) {
-            CommandManager::INSTANCE.TriggerPreset("PLAYLIST_STARTED", keywords);
+            // Deferred: preset commands run arbitrary code inline (including
+            // "Start Playlist", which used to recurse into Play() under the
+            // lock).  Fires after this transition completes and the mutex is
+            // released — see PlaylistTransitionGuard.
+            QueuePlaylistNotification([keywords]() mutable {
+                CommandManager::INSTANCE.TriggerPreset("PLAYLIST_STARTED", keywords);
+            });
         }
     }
 
@@ -1389,6 +1594,7 @@ void Playlist::Dump(void) {
 
 void Playlist::RestartItem(void) {
     LogDebug(VB_PLAYLIST, "RestartItem called for '%s'\n", m_name.c_str());
+    PlaylistTransitionGuard guard;
     if (m_currentState == "idle") {
         return;
     }
@@ -1412,6 +1618,7 @@ void Playlist::RestartItem(void) {
 }
 void Playlist::NextItem(void) {
     LogDebug(VB_PLAYLIST, "NextItem called for '%s'\n", m_name.c_str());
+    PlaylistTransitionGuard guard;
     if (m_currentState == "idle") {
         return;
     }
@@ -1478,6 +1685,7 @@ void Playlist::NextItem(void) {
  */
 void Playlist::PrevItem(void) {
     LogDebug(VB_PLAYLIST, "PrevItem called for '%s'\n", m_name.c_str());
+    PlaylistTransitionGuard guard;
     if (m_currentState == "idle") {
         return;
     }
