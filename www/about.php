@@ -777,12 +777,14 @@
                         osUpgradeAvailable = checkForNewerOS();
                     }
                     checkUpgradeRecommendation();
+                    updateOSNoImages();
                 }).fail(function () {
                     // API failed - still show any locally downloaded OS files
                     if (!forceOsUpgradeTest) {
                         osUpgradeAvailable = checkForNewerOS();
                     }
                     checkUpgradeRecommendation();
+                    updateOSNoImages();
                 });
 
             <?php } ?>
@@ -1011,6 +1013,16 @@
         function syncOSCardEngaged() {
             var os = $('#osSelect').val();
             $('#osCard').toggleClass('is-engaged', os !== '' && os != null);
+        }
+
+        // Show an explanatory note when the dropdown has no selectable image (only
+        // the placeholder), so a blank select reads as "nothing available for this
+        // platform yet" instead of looking broken.
+        function updateOSNoImages() {
+            var selectable = $('#osSelect option').filter(function () {
+                return this.value !== '';
+            }).length;
+            $('#osNoImages').toggle(selectable === 0);
         }
 
         function initFaqAccordion() {
@@ -1407,6 +1419,16 @@
                                     onclick="ViewOSReleaseNotes();" disabled>
                                     <i class="fas fa-file-alt"></i> Release Notes
                                 </button>
+                            </div>
+
+                            <!-- Empty state: shown when no OS image matches this platform, so a
+                                 blank dropdown reads as an explanation instead of a dead end. -->
+                            <div id="osNoImages"
+                                class="fpp-alert fpp-alert--info fpp-alert--compact fpp-alert--mb-md"
+                                style="display: none;">
+                                <i class="fas fa-info-circle"></i>
+                                <span>No compatible OS image was found for this platform right now. New
+                                    images appear here once a release is available for your board.</span>
                             </div>
 
                             <?php if (isset($settings['uiLevel']) && $settings['uiLevel'] >= 1) { ?>
