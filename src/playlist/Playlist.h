@@ -163,6 +163,8 @@ private:
     // executes.  Also called directly by SwitchToInsertedPlaylist(), which
     // must start the inserted child inline within the parent's transition.
     int PlayImpl(const std::string& filename, const int position, const int repeat, const int scheduleEntry, const int endPosition);
+    // The body of StopNow(); same public-defers / Impl-executes split.
+    int StopNowImpl(int forceStop = 0);
 
     std::recursive_mutex m_playlistMutex;
 

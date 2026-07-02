@@ -18,6 +18,7 @@
 
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <algorithm>
 #include <functional>
 #include <time.h>
 
@@ -800,6 +801,38 @@ int Playlist::Start(void) {
  *
  */
 int Playlist::StopNow(int forceStop) {
+    if (m_status == FPP_STATUS_IDLE) {
+        return 1;
+    }
+
+    PlaylistTransitionGuard guard;
+    if (tl_transitionDepth > 1) {
+        // Re-entrant stop — e.g. a "Stop Now" (or "Start Playlist At Item",
+        // which pre-stops) command executing from inside a playlist entry's
+        // own StartPlaying frame.  Running inline would tear the playlist
+        // stack out from under the frames above us: with inserted (nested)
+        // playlists, SetIdle() switches the global `playlist` to the parent
+        // and condemns levels to PL_CLEANUPS while SwitchToInsertedPlaylist/
+        // Start frames still reference them.  Queue it; the outermost
+        // transition drains it (before any deferred start — queue order is
+        // preserved), targeting whatever playlist is current at that point.
+        LogDebug(VB_PLAYLIST, "Playlist::StopNow(%d) re-entrant (depth %d) — deferring until current transition completes\n",
+                 forceStop, tl_transitionDepth);
+        QueuePlaylistNotification([forceStop]() {
+            if (playlist) {
+                playlist->StopNowImpl(forceStop);
+            }
+        });
+        return 1;
+    }
+    return StopNowImpl(forceStop);
+}
+
+// The body of StopNow().  Called from StopNow() (non-re-entrant), from the
+// deferred-stop drain closure, and directly by internal orchestration
+// (PlayImpl's stop-before-load, Process()'s invalid-section bail-out) that
+// must stop inline as part of its own transition.
+int Playlist::StopNowImpl(int forceStop) {
     LogDebug(VB_PLAYLIST, "Playlist::StopNow(%d)\n", forceStop);
 
     if (m_status == FPP_STATUS_IDLE) {
@@ -985,7 +1018,7 @@ int Playlist::Process(void) {
     if (m_currentSection == nullptr || m_sectionPosition >= m_currentSection->size()) {
         LogErr(VB_PLAYLIST, "Section position %d is outside of section %s\n",
                m_sectionPosition, m_currentSectionStr.c_str());
-        StopNow();
+        StopNowImpl();
         return 0;
     }
 
@@ -1296,16 +1329,33 @@ void Playlist::SetIdle(bool exit) {
     }
 
     bool publishIdle = true;
-    if (m_parent && exit) {
-        playlist = m_parent;
-        if (m_parent->getPlaylistStatus() == FPP_STATUS_PLAYLIST_PAUSED) {
-            m_parent->Resume();
+    // Walk up past parents that are already condemned to PL_CLEANUPS — handing
+    // the global `playlist` pointer to one would resurrect an object the next
+    // Process() tick deletes (crash), or double-play it.  A parent can be
+    // condemned while we're exiting when a re-entrant stop tore down an
+    // intermediate level of an inserted-playlist stack.
+    Playlist* par = m_parent;
+    while (par && std::find(PL_CLEANUPS.begin(), PL_CLEANUPS.end(), par) != PL_CLEANUPS.end()) {
+        par = par->m_parent;
+    }
+    if (par && exit) {
+        playlist = par;
+        if (par->getPlaylistStatus() == FPP_STATUS_PLAYLIST_PAUSED) {
+            par->Resume();
         }
         PL_CLEANUPS.push_back(this);
 
-        if (m_parent->getPlaylistStatus() != FPP_STATUS_IDLE)
+        if (par->getPlaylistStatus() != FPP_STATUS_IDLE)
             publishIdle = false;
     } else if (exit) {
+        if (m_parent) {
+            // Whole remaining chain was condemned — the global `playlist`
+            // still points at us, so we must NOT be condemned too (the
+            // PL_CLEANUPS drain deletes unconditionally).  We become the
+            // resident idle playlist, like any top-level SetIdle; just drop
+            // the dangling pointer into the condemned chain.
+            m_parent = nullptr;
+        }
         sequence->SendBlankingData();
     }
 
@@ -1435,8 +1485,22 @@ int Playlist::PlayImpl(const std::string& filename, const int position, const in
             // Re-entrant callers (command/script entries, plugin callbacks)
             // never reach here — Play() deferred them — so it is safe to
             // stop the current playlist and load the new one directly.
-            StopNow(1);
+            StopNowImpl(1);
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (playlist != this) {
+                // This was an inserted (nested) playlist: StopNow's SetIdle
+                // unwound ONE level — the global `playlist` now points at
+                // our parent (resumed), and `this` is already queued on
+                // PL_CLEANUPS.  Loading the new playlist into `this` would
+                // start it on a condemned object the player never processes
+                // and the next Process() tick deletes (the historical
+                // "started a playlist from inside nested playlists and it
+                // blipped and vanished while the outer playlist resumed"
+                // bug).  Delegate to the now-active level instead; this
+                // repeats per level until the stack is flat and the root
+                // object (which IS the global) performs the load.
+                return playlist->PlayImpl(filename, position, repeat, scheduleEntry, endPosition);
+            }
         }
     }
     m_scheduleEntry = scheduleEntry;
