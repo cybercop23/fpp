@@ -31,6 +31,47 @@ emit_event() {
     esac
 }
 
+# Usage: emit_event_details ID LABEL ICON STATUS MESSAGE DETAILS_JSON
+# Same as emit_event but appends an expandable "details" JSON array (may be empty).
+emit_event_details() {
+    local id="$1"
+    local label="$2"
+    local icon="$3"
+    local status="$4"
+    local message="$5"
+    local details_json="$6"
+
+    message=$(echo "$message" | sed 's/"/\\"/g')
+
+    if [ -n "$details_json" ] && [ "$details_json" != "[]" ]; then
+        echo "data: {\"id\":\"$id\",\"label\":\"$label\",\"icon\":\"$icon\",\"status\":\"$status\",\"message\":\"$message\",\"details\":$details_json}"
+    else
+        echo "data: {\"id\":\"$id\",\"label\":\"$label\",\"icon\":\"$icon\",\"status\":\"$status\",\"message\":\"$message\"}"
+    fi
+    echo ""
+
+    case "$status" in
+        pass) PASS_COUNT=$((PASS_COUNT + 1)) ;;
+        warn) WARN_COUNT=$((WARN_COUNT + 1)) ;;
+        fail) FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+    esac
+}
+
+# Build a JSON string array from the given arguments, escaping each element.
+build_json_array() {
+    local out="" item first=1
+    for item in "$@"; do
+        item=$(printf '%s' "$item" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        if [ $first -eq 1 ]; then
+            out="\"$item\""
+            first=0
+        else
+            out="${out},\"$item\""
+        fi
+    done
+    echo "[${out}]"
+}
+
 # Health Check Functions: each outputs one SSE event
 
 HC_FPPD() {
@@ -333,6 +374,64 @@ HC_MediaDisk() {
     emit_event "mediadisk" "Media Partition" "fa-folder" "$status" "$message"
 }
 
+HC_PipeWire() {
+    local status="pass"
+    local message=""
+    local down=()
+
+    local svc st
+    for svc in fpp-pipewire fpp-wireplumber fpp-pipewire-pulse; do
+        st=$(systemctl is-active "${svc}.service" 2>/dev/null)
+        if [ "x${st}" != "xactive" ]; then
+            down+=("${svc}.service: ${st:-unknown}")
+        fi
+    done
+
+    if [ ${#down[@]} -eq 0 ]; then
+        status="pass"
+        message="All services active"
+        emit_event "pipewire" "PipeWire Audio" "fa-volume-high" "$status" "$message"
+    elif [ ${#down[@]} -lt 3 ]; then
+        status="warn"
+        message="${#down[@]} service(s) not active"
+        emit_event_details "pipewire" "PipeWire Audio" "fa-volume-high" "$status" "$message" "$(build_json_array "${down[@]}")"
+    else
+        status="fail"
+        message="PipeWire not running"
+        emit_event_details "pipewire" "PipeWire Audio" "fa-volume-high" "$status" "$message" "$(build_json_array "${down[@]}")"
+    fi
+}
+
+HC_GStreamer() {
+    local status="pass"
+    local message=""
+
+    if ! command -v gst-inspect-1.0 &>/dev/null; then
+        emit_event "gstreamer" "GStreamer" "fa-film" "fail" "gst-inspect-1.0 not found"
+        return
+    fi
+
+    # Elements FPP relies on for media playback / PipeWire routing. pipewiresink
+    # and pipewiresrc are required; the rest degrade playback if missing.
+    local missing=()
+    local element
+    for element in pipewiresink pipewiresrc audioconvert audioresample volume appsink decodebin; do
+        if ! gst-inspect-1.0 "${element}" &>/dev/null; then
+            missing+=("Missing element: ${element}")
+        fi
+    done
+
+    if [ ${#missing[@]} -eq 0 ]; then
+        status="pass"
+        message="All required elements available"
+        emit_event "gstreamer" "GStreamer" "fa-film" "$status" "$message"
+    else
+        status="warn"
+        message="${#missing[@]} element(s) missing"
+        emit_event_details "gstreamer" "GStreamer" "fa-film" "$status" "$message" "$(build_json_array "${missing[@]}")"
+    fi
+}
+
 # Run all health checks in logical order the javaScript routes each check to left or right column based on ID
 
 # FPP Core
@@ -369,6 +468,12 @@ HC_DateTime
 # Storage
 HC_RootDisk
 HC_MediaDisk
+
+# Media stack (PipeWire + GStreamer) - not applicable on macOS
+if [ "x${FPPPLATFORM}" != "xMacOS" ]; then
+    HC_PipeWire
+    HC_GStreamer
+fi
 
 # Conditional
 MODE=$(getSetting fppMode)

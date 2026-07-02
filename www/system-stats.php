@@ -122,6 +122,7 @@ if (isset($_GET['cpu'])) {
                 { id: 'hostname', label: 'Unique Hostname', icon: 'fa-server', static: true },
                 { id: 'rootdisk', label: 'Root Filesystem', icon: 'fa-hdd', static: true },
                 { id: 'ntp', label: 'Time Sync (NTP)', icon: 'fa-clock', static: true },
+                { id: 'pipewire', label: 'PipeWire Audio', icon: 'fa-volume-high', static: false },
                 { id: 'scheduler', label: 'Scheduler', icon: 'fa-calendar-alt', static: false }
             ],
             right: [
@@ -130,12 +131,13 @@ if (isset($_GET['cpu'])) {
                 { id: 'internet', label: 'Internet Access', icon: 'fa-globe', static: true },
                 { id: 'dns', label: 'DNS Resolution', icon: 'fa-search', static: true },
                 { id: 'datetime', label: 'Browser Time Sync', icon: 'fa-clock', static: true },
+                { id: 'gstreamer', label: 'GStreamer', icon: 'fa-film', static: false },
                 { id: 'mediadisk', label: 'Media Partition', icon: 'fa-folder', static: false }
             ]
         };
 
-        // Only these two checks may not be emitted at all
-        var conditionalChecks = ['scheduler', 'mediadisk'];
+        // Checks that may not be emitted at all (hidden until a result arrives)
+        var conditionalChecks = ['scheduler', 'mediadisk', 'pipewire', 'gstreamer'];
 
         function renderPlaceholder(check) {
             var hiddenStyle = check.static ? '' : ' style="display: none;"';
