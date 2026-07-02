@@ -469,15 +469,10 @@
     color: #fbbf24;
 }
 
-/* FAQ accordion */
+/* FAQ accordion: flat divider list (matches the light-theme restyle) rather
+   than carded rows -- only the bottom divider is themed. */
 [data-bs-theme="dark"] .fpp-faq__item {
-    background: var(--bs-secondary-bg);
-    border-color: var(--bs-border-color);
-}
-
-[data-bs-theme="dark"] .fpp-faq__item--open {
-    border-color: var(--bs-primary);
-    background: var(--bs-tertiary-bg);
+    border-bottom-color: var(--bs-border-color);
 }
 
 /* ------------------------------------------------------------- */

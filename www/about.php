@@ -1423,7 +1423,7 @@
                         <h4 class="fpp-info-panel__title"><i class="fas fa-question-circle"></i> Frequently Asked
                             Questions</h4>
                         <div class="fpp-faq" id="upgradeFaq">
-                            <div class="fpp-faq__item">
+                            <div class="fpp-faq__item fpp-faq__item--open">
                                 <div class="fpp-faq__question">
                                     Which upgrade should I choose?
                                     <i class="fas fa-chevron-down"></i>

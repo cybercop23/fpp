@@ -1568,31 +1568,22 @@
 .fpp-faq {
 	display: flex;
 	flex-direction: column;
-	gap: var(--fpp-sp-sm);
 }
 
+/* Flat divider list (matches the upgrade mockup) rather than carded rows. */
 .fpp-faq__item {
-	border: 1px solid var(--fpp-border-light);
-	border-radius: var(--fpp-radius-lg);
-	overflow: hidden;
-	transition: all var(--fpp-transition-normal);
-	background: var(--fpp-bg-card);
+	border-bottom: 1px solid var(--fpp-border-light);
 }
 
-.fpp-faq__item:hover {
-	border-color: var(--fpp-border-dark);
-}
-
-.fpp-faq__item--open {
-	border-color: var(--fpp-primary);
-	background: var(--fpp-info-light);
+.fpp-faq__item:last-child {
+	border-bottom: none;
 }
 
 .fpp-faq__question {
-	padding: var(--fpp-sp-sm) var(--fpp-sp-md);
-	font-size: var(--fpp-fs-sm);
-	font-weight: var(--fpp-fw-semibold);
-	color: var(--fpp-text-secondary);
+	padding: var(--fpp-sp-sm) 0;
+	font-size: 14px;
+	font-weight: var(--fpp-fw-medium);
+	color: var(--fpp-text-primary);
 	cursor: pointer;
 	display: flex;
 	justify-content: space-between;
@@ -1600,15 +1591,8 @@
 	transition: all var(--fpp-transition-fast);
 }
 
-.fpp-faq__question:hover {
-	color: var(--fpp-text-primary);
-}
-
-.fpp-faq__item--open .fpp-faq__question {
-	color: var(--fpp-primary);
-}
-
 .fpp-faq__question i {
+	color: var(--fpp-text-muted);
 	font-size: var(--fpp-fs-xs);
 	transition: transform var(--fpp-transition-normal);
 }
@@ -1624,18 +1608,18 @@
 }
 
 .fpp-faq__item--open .fpp-faq__answer {
-	max-height: 200px;
+	max-height: 300px;
 }
 
 .fpp-faq__answer-inner {
-	padding: 0 var(--fpp-sp-md) var(--fpp-sp-sm) var(--fpp-sp-md);
-	font-size: var(--fpp-fs-sm);
-	color: var(--fpp-text-muted);
-	line-height: 1.5;
+	padding: 0 0 var(--fpp-sp-sm) 0;
+	font-size: 13.5px;
+	color: var(--fpp-text-secondary);
+	line-height: 1.55;
 }
 
 .fpp-faq__answer-inner strong {
-	color: var(--fpp-text-secondary);
+	color: var(--fpp-text-primary);
 }
 
 /* ==========================================================================
