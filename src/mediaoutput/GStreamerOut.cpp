@@ -147,7 +147,7 @@ GStreamerOutput::DrmConnectorInfo GStreamerOutput::ResolveDrmConnector(const std
             }
         }
 
-        LogInfo(VB_MEDIAOUT, "GStreamer DRM: %s on card%d connector_id=%d connected=%d display=%dx%d\n",
+        LogDebug(VB_MEDIAOUT, "GStreamer DRM: %s on card%d connector_id=%d connected=%d display=%dx%d\n",
                 connectorName.c_str(), cardNum, info.connectorId, info.connected,
                 info.displayWidth, info.displayHeight);
         break;
@@ -187,7 +187,7 @@ int GStreamerOutput::GetSharedDrmFd(const std::string& cardPath) {
     }
 
     s_drmFds[cardPath] = fd;
-    LogInfo(VB_MEDIAOUT, "GStreamer: Opened shared DRM fd=%d for %s\n", fd, cardPath.c_str());
+    LogDebug(VB_MEDIAOUT, "GStreamer: Opened shared DRM fd=%d for %s\n", fd, cardPath.c_str());
     return fd;
 }
 
@@ -285,7 +285,7 @@ int GStreamerOutput::FindPrimaryPlaneForConnector(int drmFd, int connectorId) {
         s_allocatedPlanes.insert(foundPlane);
     }
 
-    LogInfo(VB_MEDIAOUT, "GStreamer DRM: connector %d → CRTC %u (index %d) → overlay plane %d\n",
+    LogDebug(VB_MEDIAOUT, "GStreamer DRM: connector %d → CRTC %u (index %d) → overlay plane %d\n",
             connectorId, crtcId, crtcIndex, foundPlane);
     return foundPlane;
 }
@@ -389,7 +389,7 @@ int GStreamerOutput::Start(int msTime) {
             m_mediaOutputStatus->minutesTotal = totalSecs / 60;
             m_mediaOutputStatus->secondsTotal = totalSecs % 60;
             m_maxDuration = (gint64)details.lengthMS * GST_MSECOND;
-            LogInfo(VB_MEDIAOUT, "GStreamer: pre-set duration from metadata: %d:%02d (%d ms)\n",
+            LogDebug(VB_MEDIAOUT, "GStreamer: pre-set duration from metadata: %d:%02d (%d ms)\n",
                     m_mediaOutputStatus->minutesTotal, m_mediaOutputStatus->secondsTotal, details.lengthMS);
         }
     }
@@ -414,7 +414,7 @@ int GStreamerOutput::Start(int msTime) {
         m_pwVideoSinkName.clear();
     }
     if (!m_pwVideoSinkName.empty()) {
-        LogInfo(VB_MEDIAOUT, "GStreamer: PipeWireVideoSinkName='%s' (slot %d) — video will route through PipeWire\n",
+        LogDebug(VB_MEDIAOUT, "GStreamer: PipeWireVideoSinkName='%s' (slot %d) — video will route through PipeWire\n",
                 m_pwVideoSinkName.c_str(), m_streamSlot);
     }
 
@@ -442,7 +442,7 @@ int GStreamerOutput::Start(int msTime) {
                     // primary kmssink; consumer kmssinks in VideoOutputManager
                     // (one per group member) own every HDMI connector.
                     wantHDMI = true;
-                    LogInfo(VB_MEDIAOUT, "GStreamer: PipeWire video routing active — ignoring VideoOutput=%s for direct kmssink, consumers handle HDMI\n",
+                    LogDebug(VB_MEDIAOUT, "GStreamer: PipeWire video routing active — ignoring VideoOutput=%s for direct kmssink, consumers handle HDMI\n",
                             connectorName.c_str());
                 } else {
                     m_wantHDMI = true;
@@ -451,7 +451,7 @@ int GStreamerOutput::Start(int msTime) {
                     m_hdmiCardPath = drmInfo.cardPath;
                     m_hdmiDisplayWidth = drmInfo.displayWidth;
                     m_hdmiDisplayHeight = drmInfo.displayHeight;
-                    LogInfo(VB_MEDIAOUT, "GStreamer HDMI output: connector=%s id=%d card=%s resolution=%dx%d\n",
+                    LogDebug(VB_MEDIAOUT, "GStreamer HDMI output: connector=%s id=%d card=%s resolution=%dx%d\n",
                             connectorName.c_str(), m_hdmiConnectorId, m_hdmiCardPath.c_str(),
                             m_hdmiDisplayWidth, m_hdmiDisplayHeight);
                 }
@@ -491,7 +491,7 @@ int GStreamerOutput::Start(int msTime) {
         m_videoOverlayModel = PixelOverlayManager::INSTANCE.getModel(m_videoOut);
         if (m_videoOverlayModel) {
             m_videoOverlayModel->getSize(m_videoOverlayWidth, m_videoOverlayHeight);
-            LogInfo(VB_MEDIAOUT, "GStreamer video overlay: model=%s size=%dx%d\n",
+            LogDebug(VB_MEDIAOUT, "GStreamer video overlay: model=%s size=%dx%d\n",
                     m_videoOut.c_str(), m_videoOverlayWidth, m_videoOverlayHeight);
         } else {
             LogWarn(VB_MEDIAOUT, "GStreamer: PixelOverlay model '%s' not found, skipping video\n",
@@ -536,7 +536,7 @@ int GStreamerOutput::Start(int msTime) {
     // Log PipeWire group delay for reference (handled natively by PipeWire
     // filter-chain delay nodes, not by GStreamer ts-offset).
     int maxGroupDelayMs = GetMaxPipeWireGroupDelayMs();
-    LogInfo(VB_MEDIAOUT, "GStreamer: PipeWire maxGroupDelay=%dms (handled by PipeWire filter-chain)\n",
+    LogDebug(VB_MEDIAOUT, "GStreamer: PipeWire maxGroupDelay=%dms (handled by PipeWire filter-chain)\n",
             maxGroupDelayMs);
 
     // PipeWireVideoSinkName was already read above (before connector check)
@@ -931,11 +931,11 @@ int GStreamerOutput::Start(int msTime) {
                 gst_object_unref(teeSrc);
                 gst_object_unref(kmsQSink);
                 gst_element_link(kmsQueue, m_kmssink);
-                LogInfo(VB_MEDIAOUT, "GStreamer: video tee active — kmssink direct, pipewiresink deferred\n");
+                LogDebug(VB_MEDIAOUT, "GStreamer: video tee active — kmssink direct, pipewiresink deferred\n");
             } else {
                 // No primary HDMI — vtee routes to deferred pipewiresink
                 // and direct consumer kmssinks linked below.
-                LogInfo(VB_MEDIAOUT, "GStreamer: video tee active — no primary kmssink (HDMI disconnected)\n");
+                LogDebug(VB_MEDIAOUT, "GStreamer: video tee active — no primary kmssink (HDMI disconnected)\n");
             }
 
             // ── Consumer direct kmssink branches ──
@@ -959,7 +959,7 @@ int GStreamerOutput::Start(int msTime) {
                     if (!hc.connector.empty()) {
                         auto drmCheck = ResolveDrmConnector(hc.connector);
                         if (!drmCheck.connected) {
-                            LogInfo(VB_MEDIAOUT, "GStreamer: skipping direct kmssink for connector %d (%s) — not connected\n",
+                            LogDebug(VB_MEDIAOUT, "GStreamer: skipping direct kmssink for connector %d (%s) — not connected\n",
                                     hc.connectorId, hc.connector.c_str());
                             continue;
                         }
@@ -992,7 +992,7 @@ int GStreamerOutput::Start(int msTime) {
                                             : !hc.cardPath.empty() ? hc.cardPath
                                             : m_hdmiCardPath;
                     int drmFd = cardForDkms.empty() ? -1 : GetSharedDrmFd(cardForDkms);
-                    LogInfo(VB_MEDIAOUT, "GStreamer: dkms_%d cardPath='%s' sharedFd=%d\n",
+                    LogDebug(VB_MEDIAOUT, "GStreamer: dkms_%d cardPath='%s' sharedFd=%d\n",
                             resolvedConnId, cardForDkms.c_str(), drmFd);
                     if (drmFd >= 0) {
                         g_object_set(dkmsSink,
@@ -1015,7 +1015,7 @@ int GStreamerOutput::Start(int msTime) {
                         // Verify the fd was accepted by kmssink
                         gint readbackFd = -1;
                         g_object_get(dkmsSink, "fd", &readbackFd, NULL);
-                        LogInfo(VB_MEDIAOUT, "GStreamer: dkms_%d fd=%d plane=%d\n",
+                        LogDebug(VB_MEDIAOUT, "GStreamer: dkms_%d fd=%d plane=%d\n",
                                 resolvedConnId, readbackFd, planeId);
                     } else {
                         g_object_set(dkmsSink,
@@ -1048,7 +1048,7 @@ int GStreamerOutput::Start(int msTime) {
 
                     if (lr == GST_PAD_LINK_OK) {
                         m_directConnectorIds.insert(resolvedConnId);
-                        LogInfo(VB_MEDIAOUT, "GStreamer: direct kmssink for connector %d (%dx%d) linked to vtee (pre-PLAYING)\n",
+                        LogDebug(VB_MEDIAOUT, "GStreamer: direct kmssink for connector %d (%dx%d) linked to vtee (pre-PLAYING)\n",
                                 resolvedConnId, hc.width, hc.height);
                     } else {
                         LogWarn(VB_MEDIAOUT, "GStreamer: failed to link vtee → kmssink for connector %d (ret=%d)\n",
@@ -1212,7 +1212,7 @@ int GStreamerOutput::Start(int msTime) {
         GstClock* sysClock = gst_system_clock_obtain();
         gst_pipeline_use_clock(GST_PIPELINE(m_pipeline), sysClock);
         gst_object_unref(sysClock);
-        LogInfo(VB_MEDIAOUT, "GStreamer: forced pipeline clock to GstSystemClock\n");
+        LogDebug(VB_MEDIAOUT, "GStreamer: forced pipeline clock to GstSystemClock\n");
     }
 
     // Flush AES67 send pipelines just before PLAYING so the drop probe
@@ -1343,10 +1343,10 @@ int GStreamerOutput::Start(int msTime) {
 
                 if (kmsPaces) {
                     g_object_set(pwvideosink, "async", FALSE, "sync", FALSE, NULL);
-                    LogInfo(VB_MEDIAOUT, "GStreamer: pipewiresink sync=FALSE (kmssink paces)\n");
+                    LogDebug(VB_MEDIAOUT, "GStreamer: pipewiresink sync=FALSE (kmssink paces)\n");
                 } else {
                     g_object_set(pwvideosink, "sync", TRUE, NULL);
-                    LogInfo(VB_MEDIAOUT, "GStreamer: pipewiresink sync=TRUE (no kmssink, pipewiresink paces)\n");
+                    LogDebug(VB_MEDIAOUT, "GStreamer: pipewiresink sync=TRUE (no kmssink, pipewiresink paces)\n");
                 }
 
                 GstElement* pwQueue = gst_element_factory_make("queue", "vpwq");
@@ -1372,7 +1372,7 @@ int GStreamerOutput::Start(int msTime) {
 
                 gboolean qSync = gst_element_sync_state_with_parent(pwQueue);
                 gboolean pwSync = gst_element_sync_state_with_parent(pwvideosink);
-                LogInfo(VB_MEDIAOUT, "GStreamer: deferred state sync — queue=%d pipewiresink=%d\n",
+                LogDebug(VB_MEDIAOUT, "GStreamer: deferred state sync — queue=%d pipewiresink=%d\n",
                         qSync, pwSync);
 
                 GstPad* teeSrc = gst_element_request_pad_simple(vtee, "src_%u");
@@ -1386,10 +1386,10 @@ int GStreamerOutput::Start(int msTime) {
 
                 GstState pwState, pwPending;
                 gst_element_get_state(pwvideosink, &pwState, &pwPending, 2 * GST_SECOND);
-                LogInfo(VB_MEDIAOUT, "GStreamer: pipewiresink state=%d pending=%d after attach\n",
+                LogDebug(VB_MEDIAOUT, "GStreamer: pipewiresink state=%d pending=%d after attach\n",
                         pwState, pwPending);
 
-                LogInfo(VB_MEDIAOUT, "GStreamer: pipewiresink attached to vtee (node=%s)\n",
+                LogDebug(VB_MEDIAOUT, "GStreamer: pipewiresink attached to vtee (node=%s)\n",
                         videoNodeName.c_str());
 
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -1576,70 +1576,76 @@ int GStreamerOutput::Process(void) {
 
         // One-shot: log pipeline clock and sink sync state on first position update
         if (havePos && m_wallStartMs == 0) {
-            m_wallStartMs = GetTimeMS();  // record wall time at first pos
-            GstClock* clock = gst_pipeline_get_clock(GST_PIPELINE(m_pipeline));
-            LogInfo(VB_MEDIAOUT, "GStreamer: pipeline clock=%s pos=%.1fs\n",
-                    clock ? GST_OBJECT_NAME(clock) : "(none)",
-                    (float)pos / GST_SECOND);
-            if (clock) {
-                GstClockTime ct = gst_clock_get_time(clock);
-                GstClockTime bt = gst_element_get_base_time(m_pipeline);
-                LogInfo(VB_MEDIAOUT, "GStreamer: clock_time=%" GST_TIME_FORMAT " base_time=%" GST_TIME_FORMAT "\n",
-                        GST_TIME_ARGS(ct), GST_TIME_ARGS(bt));
-                gst_object_unref(clock);
-            }
-            // Log consumer kmssink stats (rendered/dropped frame counts)
-            for (int cid : m_directConnectorIds) {
-                std::string name = "dkms_" + std::to_string(cid);
-                GstElement* dkms = gst_bin_get_by_name(GST_BIN(m_pipeline), name.c_str());
-                if (dkms) {
-                    GstStructure* stats = nullptr;
-                    g_object_get(dkms, "stats", &stats, NULL);
-                    if (stats) {
-                        guint64 rendered = 0, dropped = 0;
-                        gst_structure_get_uint64(stats, "rendered", &rendered);
-                        gst_structure_get_uint64(stats, "dropped", &dropped);
-                        LogInfo(VB_MEDIAOUT, "GStreamer: %s stats: rendered=%" G_GUINT64_FORMAT " dropped=%" G_GUINT64_FORMAT "\n",
-                                name.c_str(), rendered, dropped);
-                        gst_structure_free(stats);
-                    }
-                    GstState st, pend;
-                    gst_element_get_state(dkms, &st, &pend, 0);
-                    LogInfo(VB_MEDIAOUT, "GStreamer: %s state=%d pending=%d\n", name.c_str(), st, pend);
-                    gst_object_unref(dkms);
+            m_wallStartMs = GetTimeMS();  // record wall time at first pos (also used by preroll watchdog)
+            // The remaining pipeline/sink introspection here exists purely to
+            // populate the debug log — skip the GStreamer queries entirely when
+            // MediaOut isn't at DEBUG (or more verbose).
+            if (WillLog(LOG_DEBUG, VB_MEDIAOUT)) {
+                GstClock* clock = gst_pipeline_get_clock(GST_PIPELINE(m_pipeline));
+                LogDebug(VB_MEDIAOUT, "GStreamer: pipeline clock=%s pos=%.1fs\n",
+                        clock ? GST_OBJECT_NAME(clock) : "(none)",
+                        (float)pos / GST_SECOND);
+                if (clock) {
+                    GstClockTime ct = gst_clock_get_time(clock);
+                    GstClockTime bt = gst_element_get_base_time(m_pipeline);
+                    LogDebug(VB_MEDIAOUT, "GStreamer: clock_time=%" GST_TIME_FORMAT " base_time=%" GST_TIME_FORMAT "\n",
+                            GST_TIME_ARGS(ct), GST_TIME_ARGS(bt));
+                    gst_object_unref(clock);
                 }
-            }
-            // Check sync on sinks
-            GstElement* pwsink = gst_bin_get_by_name(GST_BIN(m_pipeline), "pwsink");
-            if (pwsink) {
-                gboolean s; g_object_get(pwsink, "sync", &s, NULL);
-                LogInfo(VB_MEDIAOUT, "GStreamer: pwsink sync=%d\n", s);
-                gst_object_unref(pwsink);
-            }
-            GstElement* kms = gst_bin_get_by_name(GST_BIN(m_pipeline), "kmsvideosink");
-            if (kms) {
-                gboolean s; g_object_get(kms, "sync", &s, NULL);
-                LogInfo(VB_MEDIAOUT, "GStreamer: kmssink sync=%d\n", s);
-                gst_object_unref(kms);
+                // Log consumer kmssink stats (rendered/dropped frame counts)
+                for (int cid : m_directConnectorIds) {
+                    std::string name = "dkms_" + std::to_string(cid);
+                    GstElement* dkms = gst_bin_get_by_name(GST_BIN(m_pipeline), name.c_str());
+                    if (dkms) {
+                        GstStructure* stats = nullptr;
+                        g_object_get(dkms, "stats", &stats, NULL);
+                        if (stats) {
+                            guint64 rendered = 0, dropped = 0;
+                            gst_structure_get_uint64(stats, "rendered", &rendered);
+                            gst_structure_get_uint64(stats, "dropped", &dropped);
+                            LogDebug(VB_MEDIAOUT, "GStreamer: %s stats: rendered=%" G_GUINT64_FORMAT " dropped=%" G_GUINT64_FORMAT "\n",
+                                    name.c_str(), rendered, dropped);
+                            gst_structure_free(stats);
+                        }
+                        GstState st, pend;
+                        gst_element_get_state(dkms, &st, &pend, 0);
+                        LogDebug(VB_MEDIAOUT, "GStreamer: %s state=%d pending=%d\n", name.c_str(), st, pend);
+                        gst_object_unref(dkms);
+                    }
+                }
+                // Check sync on sinks
+                GstElement* pwsink = gst_bin_get_by_name(GST_BIN(m_pipeline), "pwsink");
+                if (pwsink) {
+                    gboolean s; g_object_get(pwsink, "sync", &s, NULL);
+                    LogDebug(VB_MEDIAOUT, "GStreamer: pwsink sync=%d\n", s);
+                    gst_object_unref(pwsink);
+                }
+                GstElement* kms = gst_bin_get_by_name(GST_BIN(m_pipeline), "kmsvideosink");
+                if (kms) {
+                    gboolean s; g_object_get(kms, "sync", &s, NULL);
+                    LogDebug(VB_MEDIAOUT, "GStreamer: kmssink sync=%d\n", s);
+                    gst_object_unref(kms);
+                }
             }
         }
 
-        // Periodic wall-clock vs stream-position diagnostic
-        if (havePos && m_wallStartMs > 0) {
+        // Periodic wall-clock vs stream-position diagnostic (DEBUG only — the
+        // stall/preroll watchdogs below run independently of this block).
+        if (havePos && m_wallStartMs > 0 && WillLog(LOG_DEBUG, VB_MEDIAOUT)) {
             uint64_t wallMs = GetTimeMS() - m_wallStartMs;
             float wallSec = wallMs / 1000.0f;
             float streamSec = (float)pos / GST_SECOND;
             if (wallMs - m_lastWallLogMs > 5000) {
                 m_lastWallLogMs = wallMs;
                 float ratio = (wallSec > 0.1f) ? streamSec / wallSec : 0.0f;
-                LogInfo(VB_MEDIAOUT, "GStreamer: wall=%.1fs stream=%.1fs ratio=%.2fx\n",
+                LogDebug(VB_MEDIAOUT, "GStreamer: wall=%.1fs stream=%.1fs ratio=%.2fx\n",
                         wallSec, streamSec, ratio);
                 // Log pipeline clock time and consumer kmssink stats at each 5s checkpoint
                 GstClock* chkClock = gst_pipeline_get_clock(GST_PIPELINE(m_pipeline));
                 if (chkClock) {
                     GstClockTime ct = gst_clock_get_time(chkClock);
                     GstClockTime bt = gst_element_get_base_time(m_pipeline);
-                    LogInfo(VB_MEDIAOUT, "GStreamer: clock_time=%" GST_TIME_FORMAT " base_time=%" GST_TIME_FORMAT " running=%" GST_TIME_FORMAT "\n",
+                    LogDebug(VB_MEDIAOUT, "GStreamer: clock_time=%" GST_TIME_FORMAT " base_time=%" GST_TIME_FORMAT " running=%" GST_TIME_FORMAT "\n",
                             GST_TIME_ARGS(ct), GST_TIME_ARGS(bt),
                             GST_TIME_ARGS(ct >= bt ? ct - bt : 0));
                     gst_object_unref(chkClock);
@@ -1656,7 +1662,7 @@ int GStreamerOutput::Process(void) {
                             guint64 rendered = 0, dropped = 0;
                             gst_structure_get_uint64(stats, "rendered", &rendered);
                             gst_structure_get_uint64(stats, "dropped", &dropped);
-                            LogInfo(VB_MEDIAOUT, "GStreamer: %s rendered=%" G_GUINT64_FORMAT " dropped=%" G_GUINT64_FORMAT " state=%d pending=%d\n",
+                            LogDebug(VB_MEDIAOUT, "GStreamer: %s rendered=%" G_GUINT64_FORMAT " dropped=%" G_GUINT64_FORMAT " state=%d pending=%d\n",
                                     name.c_str(), rendered, dropped, st, pend);
                             gst_structure_free(stats);
                         }
@@ -1694,7 +1700,7 @@ int GStreamerOutput::Process(void) {
                     newSec != m_mediaOutputStatus->secondsTotal) {
                     m_mediaOutputStatus->minutesTotal = newMin;
                     m_mediaOutputStatus->secondsTotal = newSec;
-                    LogInfo(VB_MEDIAOUT, "GStreamer duration: %d:%02d\n", newMin, newSec);
+                    LogDebug(VB_MEDIAOUT, "GStreamer duration: %d:%02d\n", newMin, newSec);
                 }
             }
 
@@ -2003,7 +2009,7 @@ int GStreamerOutput::Close(void) {
 
     // Clean up video overlay state
     if (m_videoFramesReceived > 0 || m_videoFramesDelivered > 0) {
-        LogInfo(VB_MEDIAOUT, "GStreamer video overlay stats: %lu frames received, %lu delivered\n",
+        LogDebug(VB_MEDIAOUT, "GStreamer video overlay stats: %lu frames received, %lu delivered\n",
                 (unsigned long)m_videoFramesReceived, (unsigned long)m_videoFramesDelivered);
     }
     m_hasVideoStream = false;
@@ -2312,7 +2318,7 @@ bool GStreamerOutput::ProcessVideoOverlay(unsigned int msTimestamp) {
         self->m_videoFramesDelivered++;
 
         if (self->m_videoFramesDelivered == 1 || (self->m_videoFramesDelivered % 100) == 0) {
-            LogInfo(VB_MEDIAOUT, "GStreamer: video frame %lu delivered to overlay (%zu bytes)\n",
+            LogExcess(VB_MEDIAOUT, "GStreamer: video frame %lu delivered to overlay (%zu bytes)\n",
                     (unsigned long)self->m_videoFramesDelivered, frameData.size());
         }
 
@@ -2357,7 +2363,7 @@ GstFlowReturn GStreamerOutput::OnNewVideoSample(GstAppSink* appsink, gpointer us
         self->m_videoFrameReady = true;
         self->m_videoFramesReceived++;
         if (self->m_videoFramesReceived == 1 || (self->m_videoFramesReceived % 100) == 0) {
-            LogInfo(VB_MEDIAOUT, "GStreamer: video frame %lu received (%zu bytes, stride=%d, rowBytes=%d)\n",
+            LogExcess(VB_MEDIAOUT, "GStreamer: video frame %lu received (%zu bytes, stride=%d, rowBytes=%d)\n",
                     (unsigned long)self->m_videoFramesReceived, map.size, stride, rowBytes);
         }
         gst_buffer_unmap(buffer, &map);
@@ -2386,7 +2392,7 @@ void GStreamerOutput::OnPadAdded(GstElement* element, GstPad* pad, gpointer user
     }
 
     const gchar* name = gst_structure_get_name(gst_caps_get_structure(caps, 0));
-    LogInfo(VB_MEDIAOUT, "GStreamer decodebin pad-added: %s\n", name);
+    LogDebug(VB_MEDIAOUT, "GStreamer decodebin pad-added: %s\n", name);
 
     if (g_str_has_prefix(name, "audio/") && self->m_audioChain) {
         GstPad* sinkPad = gst_element_get_static_pad(self->m_audioChain, "sink");
@@ -2395,7 +2401,7 @@ void GStreamerOutput::OnPadAdded(GstElement* element, GstPad* pad, gpointer user
             if (GST_PAD_LINK_FAILED(ret)) {
                 LogErr(VB_MEDIAOUT, "GStreamer: Failed to link audio pad: %d\n", ret);
             } else {
-                LogInfo(VB_MEDIAOUT, "GStreamer: Linked audio pad successfully\n");
+                LogDebug(VB_MEDIAOUT, "GStreamer: Linked audio pad successfully\n");
                 self->m_audioLinked = true;
             }
         } else {
@@ -2410,7 +2416,7 @@ void GStreamerOutput::OnPadAdded(GstElement* element, GstPad* pad, gpointer user
             if (GST_PAD_LINK_FAILED(ret)) {
                 LogErr(VB_MEDIAOUT, "GStreamer: Failed to link video pad: %d\n", ret);
             } else {
-                LogInfo(VB_MEDIAOUT, "GStreamer: Linked video pad successfully\n");
+                LogDebug(VB_MEDIAOUT, "GStreamer: Linked video pad successfully\n");
                 self->m_videoLinked = true;
             }
         } else {
@@ -2430,7 +2436,7 @@ void GStreamerOutput::OnNoMorePads(GstElement* element, gpointer userData) {
     if (!self)
         return;
 
-    LogInfo(VB_MEDIAOUT, "GStreamer: no-more-pads (audio=%s, video=%s)\n",
+    LogDebug(VB_MEDIAOUT, "GStreamer: no-more-pads (audio=%s, video=%s)\n",
             self->m_audioLinked ? "linked" : "not linked",
             self->m_videoLinked ? "linked" : "not linked");
 
@@ -2438,7 +2444,7 @@ void GStreamerOutput::OnNoMorePads(GstElement* element, gpointer userData) {
     // Without this, the pipeline will never reach EOS because the audio sinks
     // never receive data and never post their individual EOS events.
     if (!self->m_audioLinked && self->m_audioChain && self->m_pipeline) {
-        LogInfo(VB_MEDIAOUT, "GStreamer: Removing unconnected audio chain (video-only media)\n");
+        LogDebug(VB_MEDIAOUT, "GStreamer: Removing unconnected audio chain (video-only media)\n");
 
         // Get all audio elements by name and remove them
         const char* audioNames[] = {"aconv", "aresample", "t", "q1", "vol", "pwsink", "audiosink",
@@ -2467,7 +2473,7 @@ void GStreamerOutput::OnNoMorePads(GstElement* element, gpointer userData) {
 
     // If video chain was never connected, remove orphaned video elements.
     if (!self->m_videoLinked && self->m_videoChain && self->m_pipeline) {
-        LogInfo(VB_MEDIAOUT, "GStreamer: Removing unconnected video chain (audio-only media)\n");
+        LogDebug(VB_MEDIAOUT, "GStreamer: Removing unconnected video chain (audio-only media)\n");
 
         const char* videoNames[] = {"vq", "vconv", "vscale", "vcapsf", "vtee", "vkmsq", "vpwq", "videosink", "kmsvideosink", "pwvideosink", nullptr};
         for (int i = 0; videoNames[i]; i++) {

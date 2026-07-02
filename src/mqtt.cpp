@@ -177,7 +177,7 @@ int MosquittoClient::Init(const std::string& username, const std::string& passwo
             clientId.append(1, digitc);
         }
     }
-    LogInfo(VB_CONTROL, "Using MQTT client id of %s \n", clientId.c_str());
+    LogDebug(VB_CONTROL, "Using MQTT client id of %s \n", clientId.c_str());
     m_mosq = mosquitto_new(clientId.c_str(), true, NULL);
     if (!m_mosq) {
         LogErr(VB_CONTROL, "Error, unable to create new Mosquitto instance.\n");
@@ -193,14 +193,14 @@ int MosquittoClient::Init(const std::string& username, const std::string& passwo
     }
 
     if (ca_file != "") {
-        LogInfo(VB_CONTROL, "Using CA File: %s for MQTT\n", ca_file.c_str());
+        LogDebug(VB_CONTROL, "Using CA File: %s for MQTT\n", ca_file.c_str());
         int rc = mosquitto_tls_set(m_mosq, ca_file.c_str(), NULL, NULL, NULL, NULL);
         if (rc) {
             LogErr(VB_CONTROL, "Error, unable to set MQTT_Ca_file. RC=  %d\n", rc);
             return 0;
         }
     } else {
-        LogInfo(VB_CONTROL, "No CA File specified for MQTT\n");
+        LogDebug(VB_CONTROL, "No CA File specified for MQTT\n");
     }
 
     LogDebug(VB_CONTROL, "About to call MQTT Connect (%s, %d, %d)\n", m_host.c_str(), m_port, m_keepalive);
@@ -342,7 +342,7 @@ void MosquittoClient::RemoveCallback(const std::string& topic) {
     callbackTopics.remove(topic);
 }
 void MosquittoClient::SetReady() {
-    LogInfo(VB_CONTROL, "Mosquitto SetReady()\n");
+    LogDebug(VB_CONTROL, "Mosquitto SetReady()\n");
     if (!m_canProcessMessages) {
         m_canProcessMessages = true;
         mosquitto_message_callback_set(m_mosq, mosq_msg_callback);
@@ -363,7 +363,7 @@ void MosquittoClient::HandleConnect() {
         return;
     }
 
-    LogInfo(VB_CONTROL, "Mosquitto Connected.... Will Subscribe to Topics\n");
+    LogDebug(VB_CONTROL, "Mosquitto Connected.... Will Subscribe to Topics\n");
     std::vector<std::string> subscribe_topics;
     subscribe_topics.push_back(m_baseTopic + "/set/#");
 
@@ -393,7 +393,7 @@ void MosquittoClient::HandleConnect() {
             s.erase(0, s.find_first_not_of(" \t\n\r\f\v"));
             s.erase(s.find_last_not_of(" \t\n\r\f\v") + 1);
             if (!s.empty()) {
-                LogInfo(VB_CONTROL, "Adding extra MQTT subscribe topic: %s\n", s.c_str());
+                LogDebug(VB_CONTROL, "Adding extra MQTT subscribe topic: %s\n", s.c_str());
                 subscribe_topics.push_back(s);
             }
         }
@@ -420,12 +420,12 @@ void MosquittoClient::HandleConnect() {
     // Re-publish retained status messages on reconnection
     // This ensures the broker has the current values after a network disconnection
     // that may have triggered the last will (ready=0)
-    LogInfo(VB_CONTROL, "MQTT: Re-publishing retained status on reconnection\n");
+    LogDebug(VB_CONTROL, "MQTT: Re-publishing retained status on reconnection\n");
     Publish(MQTT_READY_TOPIC_NAME, 1, true, 1);
     Publish("version", getFPPVersion(), true, 1);
     Publish("branch", getFPPBranch(), true, 1);
     
-    LogInfo(VB_CONTROL, "MQTT HandleConnect Complete\n");
+    LogDebug(VB_CONTROL, "MQTT HandleConnect Complete\n");
 }
 
 void MosquittoClient::HandleDisconnect() {
