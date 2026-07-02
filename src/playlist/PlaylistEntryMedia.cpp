@@ -330,18 +330,18 @@ void PlaylistEntryMedia::Dump(void) {
 int PlaylistEntryMedia::OpenMediaOutput(void) {
     LogDebug(VB_PLAYLIST, "PlaylistEntryMedia::OpenMediaOutput() - Starting\n");
 
-    std::unique_lock<std::mutex> lock(m_mediaOutputLock);
-    if (m_mediaOutput) {
-        lock.unlock();
-        CloseMediaOutput();
-        lock.lock();
+    {
+        std::unique_lock<std::mutex> lock(m_mediaOutputLock);
+        if (m_mediaOutput) {
+            lock.unlock();
+            CloseMediaOutput();
+        }
     }
 
     std::string tmpFile = m_mediaFilename;
     std::size_t found = tmpFile.find_last_of(".");
 
     if (found == std::string::npos) {
-        lock.unlock();
         LogWarn(VB_MEDIAOUT, "Unable to determine extension of media file %s\n",
                 m_mediaFilename.c_str());
         return 0;
@@ -351,6 +351,13 @@ int PlaylistEntryMedia::OpenMediaOutput(void) {
 
     LogDebug(VB_PLAYLIST, "PlaylistEntryMedia - Starting %s\n", tmpFile.c_str());
 
+    // m_mediaOutputLock must NOT be held here: mediaCallback() re-enters this
+    // entry on the same thread via Playlist::GetInfo() -> GetCurrentEntry() ->
+    // GetConfig(), which takes m_mediaOutputLock.  Holding it across the
+    // callback self-deadlocks the playlist thread (fppd hang on every media
+    // start).  Nothing below touches m_mediaOutput until the assignment at
+    // the end, so the pointer needs no protection in between — only the
+    // final store is done under the lock.
     MediaDetails::INSTANCE.ParseMedia(m_mediaFilename.c_str());
     PluginManager::INSTANCE.mediaCallback(m_parentPlaylist->GetInfo(), MediaDetails::INSTANCE);
 
@@ -366,15 +373,17 @@ int PlaylistEntryMedia::OpenMediaOutput(void) {
         }
     }
 
-    m_mediaOutput = CreateMediaOutput(tmpFile, vOut, m_streamSlot);
+    MediaOutputBase* out = CreateMediaOutput(tmpFile, vOut, m_streamSlot);
 
-    if (!m_mediaOutput) {
-        lock.unlock();
+    if (!out) {
         LogDebug(VB_MEDIAOUT, "No Media Output handler for %s\n", tmpFile.c_str());
         return 0;
     }
 
-    lock.unlock();
+    {
+        std::lock_guard<std::mutex> lock(m_mediaOutputLock);
+        m_mediaOutput = out;
+    }
 
     LogDebug(VB_PLAYLIST, "PlaylistEntryMedia::OpenMediaOutput() - Complete\n");
 
