@@ -1987,6 +1987,16 @@
 	background: var(--fpp-border-dark);
 }
 
+/* Once the user actively engages a faded (non-recommended) card -- e.g. picks an
+   OS image from the dropdown to reinstall -- restore full opacity so its controls,
+   especially the action button, read as normal and clickable rather than dimmed.
+   Parent opacity can't be raised by a child, so the lift has to happen here on the
+   card. The accent bar stays neutral, so the card is "usable" without being
+   promoted to the amber "recommended" treatment. */
+.fpp-card.is-disabled.is-engaged {
+	opacity: 1;
+}
+
 /* ==========================================================================
    UPDATE STATUS DOT
    Quiet inline "update available" indicator — reads as status next to a value

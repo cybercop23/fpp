@@ -225,6 +225,10 @@
             $('#osCard')
                 .toggleClass('is-recommended', recommended === 'os')
                 .toggleClass('is-disabled', recommended !== 'os');
+            // Re-derive the engaged (un-faded) state after (re)coordinating, so a
+            // reset/repopulated dropdown can't leave the card un-faded with nothing
+            // selected.
+            syncOSCardEngaged();
         }
 
         // State-specific card subtitles, so each card describes what applies now
@@ -988,6 +992,18 @@
             // Selecting an image enables the (rebooting) OS upgrade even when no
             // upgrade was auto-detected, so keep the reboot warning in sync.
             updateOSRebootWarning();
+
+            syncOSCardEngaged();
+        }
+
+        // In the coordinated view the OS card may be faded back (is-disabled) when
+        // it isn't the recommended path. Once the user actually picks an image, the
+        // card is "engaged": it -- and its Upgrade button -- return to full opacity
+        // and read as normal/clickable. Derived purely from the current selection
+        // so a repopulated/reset dropdown can't leave the card falsely un-faded.
+        function syncOSCardEngaged() {
+            var os = $('#osSelect').val();
+            $('#osCard').toggleClass('is-engaged', os !== '' && os != null);
         }
 
         function initFaqAccordion() {
