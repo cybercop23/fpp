@@ -2693,3 +2693,118 @@
 	font-weight: var(--fpp-fw-bold);
 	color: var(--fpp-text-primary);
 }
+
+/* ==========================================================================
+   CHANGELOG / COMMIT LIST
+   A flex-row commit history (used by changelog.php). Each row is one commit:
+   avatar | message + meta | hover actions. No table columns to misalign.
+   ========================================================================== */
+.fpp-commit {
+	display: flex;
+	align-items: center;
+	gap: var(--fpp-sp-md);
+	padding: 12px 16px;
+	border-bottom: 1px solid var(--fpp-border-light);
+	transition: background var(--fpp-transition-fast);
+}
+
+.fpp-commit:last-child {
+	border-bottom: none;
+}
+
+.fpp-commit--clickable {
+	cursor: pointer;
+}
+
+.fpp-commit--clickable:hover {
+	background: var(--fpp-bg-hover);
+}
+
+/* Currently checked-out commit: success left-rail + subtle tint */
+.fpp-commit--current {
+	background: var(--fpp-success-light);
+	box-shadow: inset 3px 0 0 0 var(--bs-success);
+}
+
+.fpp-commit--current.fpp-commit--clickable:hover {
+	background: var(--fpp-success-light);
+}
+
+.fpp-commit__avatar {
+	flex-shrink: 0;
+	font-size: 1.6rem;
+	color: var(--fpp-text-muted);
+}
+
+.fpp-commit__body {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.fpp-commit__msg {
+	display: flex;
+	align-items: center;
+	gap: var(--fpp-sp-sm);
+	min-width: 0;
+	color: var(--fpp-text-primary);
+	font-weight: var(--fpp-fw-semibold);
+}
+
+/* Only the subject text ellipsizes; the "Current" badge stays a full-size
+   sibling so a long subject can't clip the active-version indicator. */
+.fpp-commit__subject {
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.fpp-commit__msg .badge {
+	flex-shrink: 0;
+}
+
+.fpp-commit__meta {
+	font-size: var(--fpp-fs-sm);
+	color: var(--fpp-text-muted);
+	margin-top: 2px;
+}
+
+.fpp-sha-chip {
+	font-family: var(--bs-font-monospace, monospace);
+	padding: 1px 7px;
+	border-radius: var(--fpp-radius-sm);
+	background: var(--fpp-bg-disabled);
+	color: var(--fpp-text-secondary);
+}
+
+/* Right-side actions: quiet until row hover, so they don't clutter the log */
+.fpp-commit__actions {
+	flex-shrink: 0;
+	display: flex;
+	gap: 4px;
+	opacity: 0;
+	transition: opacity var(--fpp-transition-fast);
+}
+
+.fpp-commit:hover .fpp-commit__actions {
+	opacity: 1;
+}
+
+.fpp-commit__action {
+	width: 32px;
+	height: 32px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: var(--fpp-radius-md);
+	color: var(--fpp-text-secondary);
+	border: 1px solid var(--fpp-border);
+	background: var(--fpp-bg-card);
+	cursor: pointer;
+}
+
+.fpp-commit__action:hover {
+	color: var(--fpp-text-primary);
+	border-color: var(--fpp-border-dark);
+	text-decoration: none;
+}

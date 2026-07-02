@@ -261,6 +261,10 @@
                 $os.text('A new OS image is available. Recommended -- it includes a fresh FPP build.');
             } else if (osUpgradeAvailable) {
                 $os.text('A new OS image is available. Includes security patches and dependency updates.');
+            } else if (isEndOfLife) {
+                // EOL but no matching image is listed yet -- don't claim the OS is
+                // "current" (that contradicts the End of Life call to upgrade).
+                $os.text('An OS upgrade is required to reach a supported release, but no compatible image is listed for this board yet.');
             } else {
                 $os.text('OS is current. No new image available.');
             }
@@ -390,6 +394,16 @@
         var isEndOfLife = false;
 
         function UpdateVersionInfo(testMode) {
+            // Replace any still-shimmering async placeholders with a neutral "--"
+            // so a failed/partial status response can't leave them animating forever.
+            function clearVersionSkeletons() {
+                $('#osVersionValue, #osReleaseValue, #kernelValue, #osCurrentVersionBadge').each(function () {
+                    if ($(this).find('.fpp-skeleton').length) {
+                        $(this).text('--');
+                    }
+                });
+            }
+
             // Fetch system status for version info
             $.get('api/system/status', function (data) {
                 if (data.advancedView) {
@@ -433,7 +447,10 @@
 
                     $('#osVersionStatusBadge').show();
                 }
-            });
+                // These fields are populated only here; clear any that this
+                // response didn't fill so they don't shimmer indefinitely.
+                clearVersionSkeletons();
+            }).fail(clearVersionSkeletons);
 
             // Fetch unified update status
             var updateStatusUrl = 'api/system/updateStatus';
@@ -610,11 +627,7 @@
                 setVersionStatusDot('fppVersionStatusBadge', 'unknown', 'Unknown');
                 // Don't leave placeholders shimmering forever if status can't be
                 // fetched -- fall back to the neutral "--" for any unresolved field.
-                $('#osVersionValue, #osReleaseValue, #kernelValue, #osCurrentVersionBadge').each(function () {
-                    if ($(this).find('.fpp-skeleton').length) {
-                        $(this).text('--');
-                    }
-                });
+                clearVersionSkeletons();
             });
         }
 
@@ -1049,6 +1062,17 @@
 
             // Initialize (the first item is open by default in the markup).
             items.forEach(syncFaqHeight);
+
+            // Re-measure open answers on resize: a narrower viewport reflows the
+            // text taller, and a max-height frozen at the old scrollHeight would
+            // clip it (overflow is hidden). Debounced to avoid thrashing.
+            var faqResizeTimer = null;
+            window.addEventListener('resize', function () {
+                clearTimeout(faqResizeTimer);
+                faqResizeTimer = setTimeout(function () {
+                    items.forEach(syncFaqHeight);
+                }, 100);
+            });
         }
 
         // Test mode support: append ?test=branch (or commit, both, uptodate, major/eol, osonly)
