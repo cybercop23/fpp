@@ -15,7 +15,9 @@
 #include "fpp-json-fwd.h"
 #include <vector>
 
-#include <pthread.h>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 #include "ChannelOutput.h"
 
@@ -49,10 +51,14 @@ protected:
     volatile unsigned int m_dataWaiting;
     unsigned int m_useDoubleBuffer;
 
-    pthread_t m_threadID;
-    pthread_mutex_t m_bufLock;
-    pthread_mutex_t m_sendLock;
-    pthread_cond_t m_sendCond;
+    // Converted from pthread_t/pthread_mutex_t/pthread_cond_t to the
+    // std:: equivalents. Default-constructed std::thread is
+    // non-joinable (equivalent to the old m_threadID == 0 sentinel), and
+    // std::mutex/std::condition_variable need no explicit init/destroy.
+    std::thread m_thread;
+    std::mutex m_bufLock;
+    std::mutex m_sendLock;
+    std::condition_variable m_sendCond;
 
     unsigned char* m_inBuf;
     unsigned char* m_outBuf;

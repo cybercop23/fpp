@@ -14,7 +14,7 @@
 #include <string>
 #include "fpp-json-fwd.h"
 
-#include <pthread.h>
+#include <mutex>
 
 #include "TestPatternBase.h"
 
@@ -42,6 +42,6 @@ public:
 
 private:
     TestPatternBase* m_testPattern;
-    pthread_mutex_t m_testLock;
+    std::mutex m_testLock;
     std::string m_configStr;
 };

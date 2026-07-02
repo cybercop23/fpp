@@ -38,8 +38,6 @@ ChannelTester ChannelTester::INSTANCE;
 ChannelTester::ChannelTester() :
     m_testPattern(NULL) {
     LogExcess(VB_CHANNELOUT, "ChannelTester::ChannelTester()\n");
-
-    pthread_mutex_init(&m_testLock, NULL);
 }
 
 /*
@@ -48,16 +46,12 @@ ChannelTester::ChannelTester() :
 ChannelTester::~ChannelTester() {
     LogExcess(VB_CHANNELOUT, "ChannelTester::~ChannelTester()\n");
 
-    pthread_mutex_lock(&m_testLock);
+    std::lock_guard<std::mutex> lock(m_testLock);
 
     if (m_testPattern) {
         delete m_testPattern;
         m_testPattern = NULL;
     }
-
-    pthread_mutex_unlock(&m_testLock);
-
-    pthread_mutex_destroy(&m_testLock);
 }
 
 class StopTestingCommand : public Command {
@@ -390,7 +384,10 @@ int ChannelTester::SetupTest(const std::string configStr) {
     return SetupTest(config);
 }
 int ChannelTester::SetupTest(const Json::Value& config) {
-    pthread_mutex_lock(&m_testLock);
+    // unique_lock (not lock_guard) because this function unlocks and
+    // re-locks mid-function below while waiting for the channel output
+    // loop to clear test data.
+    std::unique_lock<std::mutex> lock(m_testLock);
     int result = 0;
 
     if (config["enabled"].asInt()) {
@@ -426,19 +423,21 @@ int ChannelTester::SetupTest(const Json::Value& config) {
     } else {
         if (m_testPattern) {
             m_testPattern->DisableTest();
-            pthread_mutex_unlock(&m_testLock);
+            lock.unlock();
 
             // Give the channel output loop time to clear test data
             usleep(150000);
 
-            pthread_mutex_lock(&m_testLock);
+            lock.lock();
 
             delete m_testPattern;
             m_testPattern = NULL;
         }
     }
 
-    pthread_mutex_unlock(&m_testLock);
+    // Matches the coverage of the original pthread_mutex_unlock() here:
+    // m_configStr is intentionally set outside the lock.
+    lock.unlock();
 
     m_configStr = SaveJsonToString(config);
     return result;
@@ -450,16 +449,16 @@ int ChannelTester::SetupTest(const Json::Value& config) {
 void ChannelTester::OverlayTestData(char* channelData) {
     LogExcess(VB_CHANNELOUT, "ChannelTester::OverlayTestData()\n");
 
-    pthread_mutex_lock(&m_testLock);
+    // lock_guard releases the lock on every return path (including the
+    // early return below), matching the coverage of the previous
+    // pthread_mutex_lock()/unlock() pairs.
+    std::lock_guard<std::mutex> lock(m_testLock);
 
     if (!m_testPattern) {
-        pthread_mutex_unlock(&m_testLock);
         return;
     }
 
     m_testPattern->OverlayTestData(channelData);
-
-    pthread_mutex_unlock(&m_testLock);
 }
 
 /*

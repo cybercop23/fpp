@@ -121,8 +121,6 @@ MosquittoClient::MosquittoClient(const std::string& host, const int port,
     }
     m_baseTopic += hostname;
 
-    pthread_mutex_init(&m_mosqLock, NULL);
-
 } // End of MosquittoClient()
 
 /*
@@ -137,8 +135,6 @@ MosquittoClient::~MosquittoClient() {
     mqtt = NULL;
 
     mosquitto_lib_cleanup();
-
-    pthread_mutex_destroy(&m_mosqLock);
 }
 
 void MosquittoClient::PrepareForShutdown() {
@@ -239,11 +235,13 @@ int MosquittoClient::Init(const std::string& username, const std::string& passwo
 int MosquittoClient::PublishRaw(const std::string& topic, const std::string& msg, const bool retain, const int qos) {
     LogDebug(VB_CONTROL, "Publishing message '%s' on topic '%s'\n", msg.c_str(), topic.c_str());
 
-    pthread_mutex_lock(&m_mosqLock);
-
-    int result = mosquitto_publish(m_mosq, NULL, topic.c_str(), msg.size(), msg.c_str(), qos, retain);
-
-    pthread_mutex_unlock(&m_mosqLock);
+    int result;
+    {
+        // Scope the lock to just the mosquitto_publish() call, matching the
+        // coverage of the previous pthread_mutex_lock()/unlock() pair.
+        std::lock_guard<std::mutex> lock(m_mosqLock);
+        result = mosquitto_publish(m_mosq, NULL, topic.c_str(), msg.size(), msg.c_str(), qos, retain);
+    }
 
     if (result != 0) {
         // MOSQ_ERR_NO_CONN (4) is expected when disconnected, don't spam logs

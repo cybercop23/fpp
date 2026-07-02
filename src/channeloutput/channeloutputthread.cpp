@@ -19,7 +19,6 @@
 #include <ctime>
 #include <errno.h>
 #include <mutex>
-#include <pthread.h>
 #include <thread>
 
 #include "../MultiSync.h"
@@ -47,7 +46,6 @@ volatile int OutputFrames = 1;
 float mediaOffset = 0.0;
 
 /* local variables */
-pthread_t ChannelOutputThreadID;
 volatile int RunThread = 0;
 volatile int ThreadIsRunning = 0;
 volatile int ThreadIsExiting = 0;
@@ -110,7 +108,7 @@ static inline bool forceOutput() {
 /*
  * Main loop in channel output thread
  */
-void* RunChannelOutputThread(void* data) {
+void RunChannelOutputThread(void) {
     SetThreadName("FPP-ChannelOut");
 
     static long long lastStatTime = 0;
@@ -321,8 +319,6 @@ void* RunChannelOutputThread(void* data) {
     outputThreadSatusCond.notify_all();
 
     LogDebug(VB_CHANNELOUT, "RunChannelOutputThread() completed\n");
-
-    pthread_exit(NULL);
 }
 
 /*
@@ -378,27 +374,18 @@ void StartChannelOutputThread(void) {
 
     RunThread = 1;
     ThreadIsExiting = 0;
-    int result = pthread_create(&ChannelOutputThreadID, NULL, &RunChannelOutputThread, NULL);
-
-    if (result) {
-        char msg[256];
-
+    // The thread is detached immediately (as the pthread version was via
+    // pthread_detach) — its lifecycle is coordinated through the
+    // RunThread/ThreadIsRunning/ThreadIsExiting flags and condition
+    // variables, never by joining.  std::thread reports creation failure
+    // by throwing std::system_error rather than returning an errno.
+    try {
+        std::thread(RunChannelOutputThread).detach();
+    } catch (const std::system_error& ex) {
         RunThread = 0;
-        switch (result) {
-        case EAGAIN:
-            strcpy(msg, "Insufficient Resources");
-            break;
-        case EINVAL:
-            strcpy(msg, "Invalid settings");
-            break;
-        case EPERM:
-            strcpy(msg, "Invalid Permissions");
-            break;
-        }
-        LogErr(VB_CHANNELOUT, "ERROR creating channel output thread: %s\n", msg);
+        LogErr(VB_CHANNELOUT, "ERROR creating channel output thread: %s (code %d)\n",
+               ex.what(), ex.code().value());
         return;
-    } else {
-        pthread_detach(ChannelOutputThreadID);
     }
 
     // Wait for thread to start

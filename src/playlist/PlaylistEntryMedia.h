@@ -11,6 +11,7 @@
  * included LICENSE.LGPL file.
  */
 
+#include <mutex>
 #include <string>
 #include "fpp-json-fwd.h"
 
@@ -69,7 +70,7 @@ private:
     int m_streamSlot;         // stream slot (1-5), default 1
     MediaOutputStatus* m_slotStatus; // per-slot status pointer
     MediaOutputBase* m_mediaOutput;
-    pthread_mutex_t m_mediaOutputLock;
+    std::mutex m_mediaOutputLock;
 
     uint64_t m_duration;
 

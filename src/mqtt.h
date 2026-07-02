@@ -15,7 +15,6 @@
 #include "fpp-json-fwd.h"
 #include <map>
 #include <mutex>
-#include <pthread.h>
 #include <string>
 #include <atomic>
 
@@ -68,8 +67,7 @@ private:
     std::string m_baseTopic;
 
     struct mosquitto* m_mosq;
-    pthread_mutex_t m_mosqLock;
-    pthread_t m_mqtt_publish_t;
+    std::mutex m_mosqLock;
 
     std::list<std::string> callbackTopics;
 
