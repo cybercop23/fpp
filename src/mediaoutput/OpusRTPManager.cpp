@@ -172,7 +172,16 @@ bool OpusRTPManager::ApplyConfig() {
 
     // Stop existing watchdog and pipelines
     m_watchdogRunning.store(false);
-    if (m_watchdogThread.joinable()) {
+    // Guard against ApplyConfig() being re-entered from its own watchdog
+    // thread (see WatchdogLoop()) -- joining the calling thread would
+    // throw std::system_error ("Resource deadlock avoided"), which
+    // propagates out of the thread function and crashes fppd via
+    // std::terminate().  The watchdog's rebuild path already stops the
+    // watchdog loop and hands off to a short-lived helper thread before
+    // calling ApplyConfig(), but keep this check as a safety net for any
+    // other re-entrant caller.
+    if (m_watchdogThread.joinable() &&
+        m_watchdogThread.get_id() != std::this_thread::get_id()) {
         m_watchdogThread.join();
     }
     StopAllPipelines();
@@ -342,6 +351,11 @@ bool OpusRTPManager::CreateSendPipeline(const OpusRTPInstance& inst) {
         LogErr(VB_MEDIAOUT, "Opus RTP send pipeline error [%d]: %s\n",
                inst.id, error->message);
         g_error_free(error);
+        // gst_parse_launch() can return a non-null (partial) pipeline even
+        // when it also reports an error -- release it so we don't leak.
+        if (pipeline) {
+            gst_object_unref(pipeline);
+        }
         return false;
     }
 
@@ -365,14 +379,33 @@ bool OpusRTPManager::CreateSendPipeline(const OpusRTPInstance& inst) {
     if (ret == GST_STATE_CHANGE_FAILURE) {
         LogErr(VB_MEDIAOUT, "Opus RTP send pipeline [%d] failed to start\n", inst.id);
         WarningHolder::AddWarning(44, "Opus RTP: audio send stream failed to start");
+        // Drop back to NULL before unreffing -- elements may already hold
+        // READY/PAUSED resources (sockets, threads, PipeWire connections)
+        // that gst_object_unref() alone will not release.
+        gst_element_set_state(pipeline, GST_STATE_NULL);
         gst_object_unref(bus);
         gst_object_unref(pipeline);
         return false;
     }
 
     {
-        std::lock_guard<std::mutex> lock(m_pipelineMutex);
-        m_sendPipelines.erase(inst.id);
+        std::unique_lock<std::mutex> lock(m_pipelineMutex);
+        // If a pipeline already exists for this instance id (e.g. two
+        // ApplyConfig() runs interleaved), stop it properly instead of
+        // erasing the map entry directly -- a raw erase() would destroy
+        // the OpusRTPPipeline (dropping its GstElement* refs) without ever
+        // calling gst_element_set_state(NULL), leaking a still-PLAYING
+        // pipeline (refs, threads, sockets).
+        auto node = m_sendPipelines.extract(inst.id);
+        if (!node.empty()) {
+            // StopPipeline() can block on a GStreamer state change to
+            // PipeWire -- release the lock while it runs, matching the
+            // no-block-while-locked policy used elsewhere in this file
+            // (see StopAllPipelines()).
+            lock.unlock();
+            StopPipeline(node.mapped());
+            lock.lock();
+        }
         auto [it, ok] = m_sendPipelines.try_emplace(inst.id);
         it->second.instanceId = inst.id;
         it->second.isSend = true;
@@ -439,6 +472,11 @@ bool OpusRTPManager::CreateRecvPipeline(const OpusRTPInstance& inst) {
         LogErr(VB_MEDIAOUT, "Opus RTP recv pipeline error [%d]: %s\n",
                inst.id, error->message);
         g_error_free(error);
+        // gst_parse_launch() can return a non-null (partial) pipeline even
+        // when it also reports an error -- release it so we don't leak.
+        if (pipeline) {
+            gst_object_unref(pipeline);
+        }
         return false;
     }
 
@@ -464,14 +502,25 @@ bool OpusRTPManager::CreateRecvPipeline(const OpusRTPInstance& inst) {
     if (ret == GST_STATE_CHANGE_FAILURE) {
         LogErr(VB_MEDIAOUT, "Opus RTP recv pipeline [%d] failed to start\n", inst.id);
         WarningHolder::AddWarning(44, "Opus RTP: audio receive stream failed to start");
+        // Drop back to NULL before unreffing -- elements may already hold
+        // READY/PAUSED resources (sockets, threads, PipeWire connections)
+        // that gst_object_unref() alone will not release.
+        gst_element_set_state(pipeline, GST_STATE_NULL);
         gst_object_unref(bus);
         gst_object_unref(pipeline);
         return false;
     }
 
     {
-        std::lock_guard<std::mutex> lock(m_pipelineMutex);
-        m_recvPipelines.erase(inst.id);
+        std::unique_lock<std::mutex> lock(m_pipelineMutex);
+        // See CreateSendPipeline() for why we stop any existing pipeline
+        // for this id instead of erasing the map entry directly.
+        auto node = m_recvPipelines.extract(inst.id);
+        if (!node.empty()) {
+            lock.unlock();
+            StopPipeline(node.mapped());
+            lock.lock();
+        }
         auto [it, ok] = m_recvPipelines.try_emplace(inst.id);
         it->second.instanceId = inst.id;
         it->second.isSend = false;
@@ -492,6 +541,22 @@ bool OpusRTPManager::CreateRecvPipeline(const OpusRTPInstance& inst) {
 void OpusRTPManager::StopPipeline(OpusRTPPipeline& p) {
     if (p.pipeline) {
         gst_element_set_state(p.pipeline, GST_STATE_NULL);
+
+        // Remove the buffer-drop probe installed by FlushSendPipelines()
+        // (if any) and release our ref on the pad it was installed on.
+        // Without this, the probe stays registered on the pad with
+        // &p.dropCounter as userdata -- a dangling pointer once this
+        // OpusRTPPipeline is erased from its owning map -- and the pad
+        // ref taken in FlushSendPipelines() leaks.
+        if (p.probeId != 0 && p.probePad) {
+            gst_pad_remove_probe(p.probePad, p.probeId);
+            p.probeId = 0;
+        }
+        if (p.probePad) {
+            gst_object_unref(p.probePad);
+            p.probePad = nullptr;
+        }
+
         if (p.bus) {
             gst_object_unref(p.bus);
             p.bus = nullptr;
@@ -601,8 +666,23 @@ void OpusRTPManager::WatchdogLoop() {
         if (!m_watchdogRunning.load()) break;
 
         if (PollPipelinesWatchdog()) {
-            LogWarn(VB_MEDIAOUT, "OpusRTPManager: Watchdog detected failed pipelines, rebuilding\n");
-            ApplyConfig();
+            // We cannot call ApplyConfig() directly from this thread:
+            // ApplyConfig() joins m_watchdogThread -- which IS this thread
+            // -- and std::thread::join() on the calling thread itself
+            // throws std::system_error, which propagates out of this
+            // thread function and terminates fppd (see AES67Manager's
+            // SAPAnnounceLoop() for the same issue).  Instead, stop this
+            // loop and hand off to a short-lived thread that calls
+            // ApplyConfig() once we've exited.
+            LogWarn(VB_MEDIAOUT, "OpusRTPManager: Watchdog detected failed pipelines, scheduling rebuild\n");
+            m_watchdogRunning.store(false);
+            std::thread([this]() {
+                // Brief delay to let this watchdog thread finish exiting
+                // and become joinable.
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                ApplyConfig();
+            }).detach();
+            break;
         }
     }
 }

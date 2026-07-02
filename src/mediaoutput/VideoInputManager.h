@@ -120,7 +120,10 @@ private:
         std::thread audioRunThread;
         std::atomic<bool> shutdownRequested{false};
         std::atomic<bool> audioShutdownRequested{false};
-        bool running = false;
+        // atomic: read/written from both the owning thread and the bus
+        // monitor thread spawned in StartSource()/StartSourceWithAudio()
+        // without holding m_mutex.
+        std::atomic<bool> running{false};
         int restartCount = 0;
 
         SourceInfo() = default;
@@ -144,7 +147,7 @@ private:
               audioRunThread(std::move(o.audioRunThread)),
               shutdownRequested(o.shutdownRequested.load()),
               audioShutdownRequested(o.audioShutdownRequested.load()),
-              running(o.running), restartCount(o.restartCount) {
+              running(o.running.load()), restartCount(o.restartCount) {
 #ifdef HAS_GSTREAMER_VIDEO_INPUT
             o.pipeline = nullptr;
             o.audioPipeline = nullptr;
@@ -169,12 +172,28 @@ private:
     /// Stop all sources.
     void StopAllSources();
 
+    /// Join (and discard) any pipeline-teardown threads queued up by
+    /// StopSource(). Must be called before re-opening the same device/URI
+    /// (start of Reload()) and at Shutdown() so nothing outlives the
+    /// manager.
+    void JoinTeardownThreads();
+
     mutable std::mutex m_mutex;
     std::vector<SourceInfo> m_sources;
     bool m_initialized = false;
     // Guards Shutdown() so the destructor doesn't re-run it after main() already
     // did (the "Shutdown complete" was logged twice). Keeps teardown single-shot.
     std::atomic<bool> m_shutdownDone{false};
+
+    // StopSource() offloads gst_element_set_state(..., GST_STATE_NULL) +
+    // unref to a background thread so callers (Shutdown/Reload) don't block
+    // on a wedged pipeline. Those threads used to be detach()'d, which let
+    // them (and their pipeline refs) pile up across repeated Reloads and
+    // race a subsequent StartSource() trying to reopen the same device.
+    // They're tracked here instead and joined before the device can be
+    // reopened, and at Shutdown().
+    std::mutex m_teardownMutex;
+    std::vector<std::thread> m_teardownThreads;
 
     static constexpr int MAX_RESTARTS = 3;
 };

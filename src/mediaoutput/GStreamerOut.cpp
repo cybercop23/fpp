@@ -157,18 +157,29 @@ GStreamerOutput::DrmConnectorInfo GStreamerOutput::ResolveDrmConnector(const std
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Shared DRM master fd — opened once per card, shared by all kmssink elements.
-// This avoids DRM master contention between multiple pipelines driving
-// different HDMI connectors on the same card.
+// Shared DRM master fd — opened once per card, shared by all kmssink elements,
+// refcounted so it closes (and drops DRM master) once nothing references it
+// any more.  This avoids DRM master contention between multiple pipelines
+// driving different HDMI connectors on the same card, AND — critically for
+// the 24h soak case — closing the fd is the kernel's cleanup backstop that
+// frees any GEM handles/framebuffers a kmssink/vc4 driver failed to release
+// explicitly.  Keeping the fd open forever (the old behavior) meant that
+// backstop never ran, so any per-track leak in gstkmssink/vc4 accumulated in
+// CMA without bound across ~300-500 build/teardown cycles.
 // ──────────────────────────────────────────────────────────────────────────────
 static std::mutex s_drmFdMutex;
-static std::map<std::string, int> s_drmFds;  // cardPath → fd
+struct DrmFdEntry {
+    int fd = -1;
+    int refCount = 0;
+};
+static std::map<std::string, DrmFdEntry> s_drmFds;  // cardPath → {fd, refCount}
 
-int GStreamerOutput::GetSharedDrmFd(const std::string& cardPath) {
+int GStreamerOutput::AcquireSharedDrmFd(const std::string& cardPath) {
     std::lock_guard<std::mutex> lock(s_drmFdMutex);
     auto it = s_drmFds.find(cardPath);
     if (it != s_drmFds.end()) {
-        return it->second;
+        it->second.refCount++;
+        return it->second.fd;
     }
 
     int fd = open(cardPath.c_str(), O_RDWR | O_CLOEXEC);
@@ -186,9 +197,28 @@ int GStreamerOutput::GetSharedDrmFd(const std::string& cardPath) {
         // Continue anyway — kmssink may still work if we're root
     }
 
-    s_drmFds[cardPath] = fd;
-    LogDebug(VB_MEDIAOUT, "GStreamer: Opened shared DRM fd=%d for %s\n", fd, cardPath.c_str());
+    s_drmFds[cardPath] = DrmFdEntry{fd, 1};
+    LogDebug(VB_MEDIAOUT, "GStreamer: Opened shared DRM fd=%d for %s (refcount=1)\n", fd, cardPath.c_str());
     return fd;
+}
+
+void GStreamerOutput::ReleaseSharedDrmFd(const std::string& cardPath) {
+    std::lock_guard<std::mutex> lock(s_drmFdMutex);
+    auto it = s_drmFds.find(cardPath);
+    if (it == s_drmFds.end()) {
+        LogWarn(VB_MEDIAOUT, "GStreamer: ReleaseSharedDrmFd(%s) called with no matching acquire\n", cardPath.c_str());
+        return;
+    }
+    it->second.refCount--;
+    if (it->second.refCount <= 0) {
+        LogDebug(VB_MEDIAOUT, "GStreamer: Closing shared DRM fd=%d for %s (refcount 0)\n",
+                it->second.fd, cardPath.c_str());
+        close(it->second.fd);
+        s_drmFds.erase(it);
+    } else {
+        LogDebug(VB_MEDIAOUT, "GStreamer: Released one ref on DRM fd for %s (refcount=%d)\n",
+                cardPath.c_str(), it->second.refCount);
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -859,7 +889,7 @@ int GStreamerOutput::Start(int msTime) {
         // Build video sub-chain: queue ! videoconvert ! videoscale ! capsfilter ! kmssink
         // When PipeWire video routing is active, a tee is inserted before kmssink
         // so a deferred pipewiresink can expose the stream in the PipeWire graph.
-        // All kmssink elements share a single DRM master fd via GetSharedDrmFd()
+        // All kmssink elements share a single DRM master fd via AcquireSharedDrmFd()
         // so multiple HDMI outputs on the same card work simultaneously.
         bool haveHdmiConnector = (m_hdmiConnectorId >= 0);
         GstElement* videoQueue = gst_element_factory_make("queue", "vq");
@@ -869,12 +899,26 @@ int GStreamerOutput::Start(int msTime) {
             if (!m_kmssink) {
                 LogErr(VB_MEDIAOUT, "GStreamer: kmssink element not available — is gstreamer1.0-plugins-bad installed?\n");
                 WarningHolder::AddWarning(31, "Video output unavailable: kmssink element missing (install gstreamer1.0-plugins-bad)");
+                // Release the extra refs taken above (~827-828) before discarding
+                // the pipeline.  Close() only unrefs m_volume/m_appsink when
+                // m_pipeline is still set, and we're about to null it out below,
+                // so without this those two refs leak every time kmssink is
+                // unavailable.
+                if (m_volume) {
+                    gst_object_unref(m_volume);
+                    m_volume = nullptr;
+                }
+                if (m_appsink) {
+                    gst_object_unref(m_appsink);
+                    m_appsink = nullptr;
+                }
                 gst_object_unref(m_pipeline);
                 m_pipeline = nullptr;
                 return 0;
             }
-            int sharedFd = GetSharedDrmFd(m_hdmiCardPath);
+            int sharedFd = AcquireSharedDrmFd(m_hdmiCardPath);
             if (sharedFd >= 0) {
+                m_acquiredDrmCards.push_back(m_hdmiCardPath);
                 g_object_set(m_kmssink,
                              "fd", sharedFd,
                              "connector-id", m_hdmiConnectorId,
@@ -991,10 +1035,11 @@ int GStreamerOutput::Start(int msTime) {
                     std::string cardForDkms = !resolvedCard.empty() ? resolvedCard
                                             : !hc.cardPath.empty() ? hc.cardPath
                                             : m_hdmiCardPath;
-                    int drmFd = cardForDkms.empty() ? -1 : GetSharedDrmFd(cardForDkms);
+                    int drmFd = cardForDkms.empty() ? -1 : AcquireSharedDrmFd(cardForDkms);
                     LogDebug(VB_MEDIAOUT, "GStreamer: dkms_%d cardPath='%s' sharedFd=%d\n",
                             resolvedConnId, cardForDkms.c_str(), drmFd);
                     if (drmFd >= 0) {
+                        m_acquiredDrmCards.push_back(cardForDkms);
                         g_object_set(dkmsSink,
                                      "fd", drmFd,
                                      "connector-id", resolvedConnId,
@@ -1395,6 +1440,16 @@ int GStreamerOutput::Start(int msTime) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
                 gst_object_unref(vtee);
+
+                // Stop() may have run during the 200ms wait above and set the
+                // cancellation token — if so the producer pipeline is already
+                // being (or has been) torn down, and starting consumers now
+                // would strand their DRM planes/CMA against a dead producer
+                // that nothing will ever stop them against.  Bail out.
+                if (cancel->load()) {
+                    LogDebug(VB_MEDIAOUT, "GStreamer: Start() cancelled during deferred attach, skipping StartConsumers\n");
+                    return;
+                }
 
                 VideoOutputManager::Instance().StartConsumers(videoNodeName, hdmiConnectorId, directConnectorIds);
             }
@@ -1945,6 +2000,27 @@ GstBusSyncReply GStreamerOutput::BusSyncHandler(GstBus* bus, GstMessage* msg, gp
     }
 }
 
+// Read a single "<Key>: <N> kB" line from /proc/meminfo.  Returns -1 if the
+// key isn't present.  Small and self-contained on purpose — mirrors the
+// CmaFree check VideoOutputManager::StartConsumer does before launching an
+// HDMI consumer, generalized to whichever key is asked for.
+static long ReadMeminfoKB(const char* key) {
+    FILE* f = fopen("/proc/meminfo", "r");
+    if (!f)
+        return -1;
+    char line[256];
+    long kb = -1;
+    size_t keyLen = strlen(key);
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, key, keyLen) == 0 && line[keyLen] == ':') {
+            sscanf(line + keyLen + 1, "%ld", &kb);
+            break;
+        }
+    }
+    fclose(f);
+    return kb;
+}
+
 int GStreamerOutput::Close(void) {
     LogDebug(VB_MEDIAOUT, "GStreamerOutput::Close()\n");
     if (m_pipeline) {
@@ -2007,6 +2083,18 @@ int GStreamerOutput::Close(void) {
     }
     m_allocatedPlanes.clear();
 
+    // Release the shared DRM master fd(s) this pipeline's kmssink(s) acquired.
+    // Must run after gst_object_unref(m_pipeline) above — the kmssinks (which
+    // hold the fd open via kmssink's internal use) are destroyed as part of
+    // that unref, and ReleaseSharedDrmFd() must not close the fd out from
+    // under a still-alive kmssink.  Runs unconditionally (outside the
+    // `if (m_pipeline)` guard) so a Start() that failed after acquiring a fd
+    // but before/without building a full pipeline still releases it.
+    for (const std::string& card : m_acquiredDrmCards) {
+        ReleaseSharedDrmFd(card);
+    }
+    m_acquiredDrmCards.clear();
+
     // Clean up video overlay state
     if (m_videoFramesReceived > 0 || m_videoFramesDelivered > 0) {
         LogDebug(VB_MEDIAOUT, "GStreamer video overlay stats: %lu frames received, %lu delivered\n",
@@ -2050,6 +2138,16 @@ int GStreamerOutput::Close(void) {
 
     // Deregister from StreamSlotManager
     StreamSlotManager::Instance().ClearSlot(m_streamSlot);
+
+    // Per-track CMA trend line — logged unconditionally (not just when
+    // m_pipeline was set) so 24h soak-test logs show CMA after every Close(),
+    // including failed-Start cycles, letting a slow leak be correlated with
+    // build/teardown count instead of only track count.
+    {
+        long cmaFreeKB = ReadMeminfoKB("CmaFree");
+        long cmaTotalKB = ReadMeminfoKB("CmaTotal");
+        LogInfo(VB_MEDIAOUT, "GStreamer: post-close CmaFree=%ld kB / CmaTotal=%ld kB\n", cmaFreeKB, cmaTotalKB);
+    }
 
     return 1;
 }

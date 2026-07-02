@@ -14,6 +14,8 @@
 
 #include "fpp-json.h"
 
+#include "../Warnings.h" // WarningHolder -- needed directly for NOPCH builds
+
 #include <curl/curl.h>
 
 #include <functional>
@@ -342,13 +344,36 @@ std::unique_ptr<Command::Result> PlayMediaCommand::run(const std::vector<std::st
         return std::make_unique<Command::ErrorResult>("No media backend available");
     }
 
-    if (out->Start()) {
-        std::map<std::string, std::string> keywords;
-        keywords["MEDIA_NAME"] = args[0];
-        keywords["STREAM_SLOT"] = std::to_string(slot);
-        if (CommandManager::INSTANCE.HasPreset("MEDIA_STARTED")) {
-            CommandManager::INSTANCE.TriggerPreset("MEDIA_STARTED", keywords);
+    if (!out->Start()) {
+        // GStreamerPlayData's ctor self-registers into runningCommandMedia
+        // (RegisterRunningMedia()). Normally the entry is removed when
+        // GStreamerOutput::Stopped() fires, but every failure path inside
+        // GStreamerOutput::Start() returns before the GStreamer bus
+        // watch/state-change thread is ever installed, so Stopped() (and
+        // thus RemoveRunningMedia()) will never be called. Without this,
+        // the object -- and its map entry -- leaks forever. Deregister
+        // directly and delete; it is safe to delete here since Start()
+        // failing this early guarantees m_pipeline is still null, so the
+        // destructor's teardown path is a no-op (no double-stop/hang risk).
+        LogErr(VB_COMMAND, "Play Media: could not start media %s\n", args[0].c_str());
+        WarningHolder::AddWarningTimeout(60, 30, "Could not start media " + args[0]);
+        runningMediaLock.lock();
+        for (auto it = runningCommandMedia.begin(); it != runningCommandMedia.end(); ++it) {
+            if (it->second == out) {
+                runningCommandMedia.erase(it);
+                break;
+            }
         }
+        runningMediaLock.unlock();
+        delete out;
+        return std::make_unique<Command::ErrorResult>("Could not start media " + args[0]);
+    }
+
+    std::map<std::string, std::string> keywords;
+    keywords["MEDIA_NAME"] = args[0];
+    keywords["STREAM_SLOT"] = std::to_string(slot);
+    if (CommandManager::INSTANCE.HasPreset("MEDIA_STARTED")) {
+        CommandManager::INSTANCE.TriggerPreset("MEDIA_STARTED", keywords);
     }
 
     return std::make_unique<Command::Result>("Playing");

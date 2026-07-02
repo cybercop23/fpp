@@ -63,9 +63,25 @@ public:
     };
     static DrmConnectorInfo ResolveDrmConnector(const std::string& connectorName);
 
-    // Get a shared DRM master fd for the given card (e.g. "/dev/dri/card1").
-    // All kmssink elements should use this fd to avoid DRM master contention.
-    static int GetSharedDrmFd(const std::string& cardPath);
+    // Acquire a shared, refcounted DRM master fd for the given card (e.g.
+    // "/dev/dri/card1").  All kmssink elements should use this fd to avoid
+    // DRM master contention.  Opens the device and takes DRM master on the
+    // first acquire for a given card; subsequent acquires just bump the
+    // refcount and return the same fd.  Every successful call MUST be
+    // matched by a later ReleaseSharedDrmFd() call for the same cardPath —
+    // closing the fd once the refcount drops to zero is the kernel's
+    // cleanup backstop that frees any GEM handles/framebuffers a kmssink
+    // failed to release explicitly, which is what keeps CMA/GPU memory from
+    // growing unbounded across many pipeline build/teardown cycles.
+    static int AcquireSharedDrmFd(const std::string& cardPath);
+
+    // Release a reference taken by AcquireSharedDrmFd().  When the refcount
+    // for cardPath reaches zero the fd is closed (dropping DRM master and
+    // freeing any leaked GEM handles/FBs).  Must only be called after the
+    // pipeline holding kmssink(s) on that fd has been fully unreffed —
+    // releasing (and possibly closing the fd) while a kmssink still holds
+    // it open is undefined behavior.
+    static void ReleaseSharedDrmFd(const std::string& cardPath);
 
     // Find a DRM OVERLAY plane for the CRTC currently bound to a connector.
     // Uses overlay planes (not primary) because fbcon holds the primary planes.
@@ -162,6 +178,12 @@ private:
     int m_hdmiConnectorId = -1;            // DRM connector ID from sysfs
     std::string m_hdmiCardPath;            // e.g. "/dev/dri/card1"
     std::vector<int> m_allocatedPlanes;    // overlay planes reserved for this pipeline's kmssinks; released in Close()
+    // Cards this pipeline called AcquireSharedDrmFd() on — one entry per
+    // acquire call (the same card can be acquired more than once, e.g. one
+    // primary kmssink plus several dkms_* consumer branches).  Released with
+    // matching ReleaseSharedDrmFd() calls in Close(), strictly after the
+    // pipeline (and therefore every kmssink) has been unreffed.
+    std::vector<std::string> m_acquiredDrmCards;
     int m_hdmiDisplayWidth = 0;            // display resolution
     int m_hdmiDisplayHeight = 0;
 

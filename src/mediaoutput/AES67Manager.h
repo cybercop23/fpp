@@ -249,6 +249,13 @@ private:
     // Returns true if a full pipeline rebuild is needed.
     bool PollPipelinesWatchdog();
 
+    // Deferred pipeline-rebuild thread — spawned by SAPAnnounceLoop()'s
+    // watchdog rebuild path to call ApplyConfig() from a thread other than
+    // the one ApplyConfig() needs to join (m_sapAnnounceThread).  Tracked
+    // as a member (rather than detached) so Shutdown() can join it before
+    // tearing anything else down -- see Shutdown() and SAPAnnounceLoop().
+    std::thread m_rebuildThread;
+
     // Pipeline management
     std::map<int, AES67Pipeline> m_sendPipelines;    // keyed by instance ID
     std::map<int, AES67Pipeline> m_recvPipelines;

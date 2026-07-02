@@ -53,6 +53,10 @@ void VideoInputManager::Init() {
     }
 
     m_initialized = true;
+    // A prior Shutdown() may have latched m_shutdownDone; since we're
+    // (re)starting sources here, a future Shutdown() must be allowed to
+    // run its teardown again.
+    m_shutdownDone = false;
 
     if (LoadConfig()) {
         LogInfo(VB_MEDIAOUT, "VideoInputManager: Loaded %d source(s), starting enabled ones\n",
@@ -76,8 +80,17 @@ void VideoInputManager::Reload() {
         m_sources.clear();
     }
 
+    // Join the teardown threads spawned by the StopAllSources() above (plus
+    // any still outstanding from an earlier cycle) before touching the
+    // devices/URIs again — otherwise StartSource() below can race the old
+    // pipeline's gst_element_set_state(..., NULL) and fail to reopen a
+    // v4l2/rtsp resource that's still held (EBUSY).
+    JoinTeardownThreads();
+
     std::lock_guard<std::mutex> lock(m_mutex);
     m_initialized = true;
+    // See Init(): allow a subsequent Shutdown() to run its teardown again.
+    m_shutdownDone = false;
 
     if (LoadConfig()) {
         LogInfo(VB_MEDIAOUT, "VideoInputManager: Reloaded with %d source(s)\n", (int)m_sources.size());
@@ -95,10 +108,16 @@ void VideoInputManager::Shutdown() {
     if (m_shutdownDone.exchange(true)) {
         return;
     }
-    std::lock_guard<std::mutex> lock(m_mutex);
-    StopAllSources();
-    m_sources.clear();
-    m_initialized = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        StopAllSources();
+        m_sources.clear();
+        m_initialized = false;
+    }
+    // Make sure every teardown thread spawned above (and any left over from
+    // a prior Reload) has actually finished before we consider Shutdown()
+    // complete, so nothing outlives the process.
+    JoinTeardownThreads();
     LogInfo(VB_MEDIAOUT, "VideoInputManager: Shutdown complete\n");
 }
 
@@ -424,7 +443,20 @@ bool VideoInputManager::StartSource(SourceInfo& source) {
         bool isYouTube = source.uri.find("youtube.com/") != std::string::npos ||
                          source.uri.find("youtu.be/") != std::string::npos;
         if (isYouTube) {
-            return StartSourceWithAudio(source);
+            if (StartSourceWithAudio(source)) {
+                return true;
+            }
+            // StartSourceWithAudio() couldn't resolve the video and/or audio
+            // URL (e.g. yt-dlp found no separate audio stream) and returned
+            // false without starting anything. Don't leave the source
+            // unstarted — retry as video-only. Clearing audioEnabled makes
+            // this re-entrant call take the plain yt-dlp video-URL
+            // resolution path above (it's skipped above while audioEnabled
+            // is set, since that path is StartSourceWithAudio's job).
+            LogWarn(VB_MEDIAOUT, "VideoInputManager: '%s' failed to start with audio, "
+                    "retrying as video-only\n", source.name.c_str());
+            source.audioEnabled = false;
+            return StartSource(source);
         }
         LogWarn(VB_MEDIAOUT, "VideoInputManager: audioEnabled not supported for non-YouTube urisrc '%s', ignoring audio\n",
                 source.name.c_str());
@@ -499,10 +531,9 @@ bool VideoInputManager::StartSource(SourceInfo& source) {
     std::string nodeNameCopy = source.pipeWireNodeName;
     GstElement* pipeline = source.pipeline;
     std::atomic<bool>* shutdownFlag = &source.shutdownRequested;
-    std::atomic<bool>* runningFlag = reinterpret_cast<std::atomic<bool>*>(&source.running);
-    int* restartCountPtr = &source.restartCount;
+    std::atomic<bool>* runningFlag = &source.running;
 
-    source.runThread = std::thread([pipeline, sourceName, nodeNameCopy, shutdownFlag, runningFlag, restartCountPtr]() {
+    source.runThread = std::thread([pipeline, sourceName, nodeNameCopy, shutdownFlag, runningFlag]() {
         LogInfo(VB_MEDIAOUT, "VideoInputManager: Source '%s' thread starting pipeline (node=%s)\n",
                 sourceName.c_str(), nodeNameCopy.c_str());
 
@@ -545,6 +576,12 @@ bool VideoInputManager::StartSource(SourceInfo& source) {
                     g_free(debug);
                     gst_message_unref(msg);
                     gst_object_unref(bus);
+                    // Drop the dead pipeline out of PLAYING so it releases
+                    // its device fd / socket / decoder buffers now instead
+                    // of holding them until the next Reload/Shutdown (this
+                    // pipeline is per-daemon-lifetime, so that could be
+                    // days). StopSource() still owns unref'ing source.pipeline.
+                    gst_element_set_state(pipeline, GST_STATE_NULL);
                     *runningFlag = false;
                     return;
                 }
@@ -584,6 +621,10 @@ bool VideoInputManager::StartSource(SourceInfo& source) {
                     }
                     gst_message_unref(msg);
                     gst_object_unref(bus);
+                    // Same reasoning as the ERROR case above — EOS also
+                    // means the pipeline is done producing and must not be
+                    // left in PLAYING.
+                    gst_element_set_state(pipeline, GST_STATE_NULL);
                     *runningFlag = false;
                     return;
                 default:
@@ -714,8 +755,9 @@ bool VideoInputManager::StartSourceWithAudio(SourceInfo& source) {
     if (audioUrl.empty()) {
         LogWarn(VB_MEDIAOUT, "VideoInputManager: Failed to resolve audio URL for '%s', "
                 "falling back to video-only\n", source.name.c_str());
-        // Fall through to video-only by returning false —
-        // StartSource will build the regular video-only pipeline.
+        // Returning false here is not a no-op: our caller (StartSource())
+        // retries with audioEnabled cleared and builds the regular
+        // video-only pipeline instead of leaving the source unstarted.
         return false;
     }
 
@@ -891,7 +933,7 @@ bool VideoInputManager::StartSourceWithAudio(SourceInfo& source) {
     std::string nodeNameCopy = source.pipeWireNodeName;
     GstElement* combinedPipeline = source.pipeline;
     std::atomic<bool>* shutdownFlag = &source.shutdownRequested;
-    std::atomic<bool>* runningFlag = reinterpret_cast<std::atomic<bool>*>(&source.running);
+    std::atomic<bool>* runningFlag = &source.running;
 
     source.runThread = std::thread([combinedPipeline, sourceName, nodeNameCopy, shutdownFlag, runningFlag]() {
         LogInfo(VB_MEDIAOUT, "VideoInputManager: Source '%s' A/V thread starting (node=%s)\n",
@@ -938,6 +980,12 @@ bool VideoInputManager::StartSourceWithAudio(SourceInfo& source) {
                     g_free(debug);
                     gst_message_unref(msg);
                     gst_object_unref(bus);
+                    // Drop the dead combined A/V pipeline out of PLAYING so
+                    // it releases its device fd / socket / decoder buffers
+                    // now instead of holding them until the next
+                    // Reload/Shutdown. StopSource() still owns unref'ing
+                    // source.pipeline.
+                    gst_element_set_state(combinedPipeline, GST_STATE_NULL);
                     *runningFlag = false;
                     return;
                 }
@@ -974,6 +1022,8 @@ bool VideoInputManager::StartSourceWithAudio(SourceInfo& source) {
                     }
                     gst_message_unref(msg);
                     gst_object_unref(bus);
+                    // Same reasoning as the ERROR case above.
+                    gst_element_set_state(combinedPipeline, GST_STATE_NULL);
                     *runningFlag = false;
                     return;
                 default:
@@ -1016,22 +1066,27 @@ void VideoInputManager::StopSource(SourceInfo& source) {
         GstElement* p = source.pipeline;
         source.pipeline = nullptr;
         std::string name = source.name;
-        std::thread([p, name]() {
+        // Tracked (not detached) so Shutdown()/Reload() can join it before
+        // the process exits or the same device/URI is reopened — see
+        // JoinTeardownThreads().
+        std::lock_guard<std::mutex> tlock(m_teardownMutex);
+        m_teardownThreads.emplace_back([p, name]() {
             gst_element_set_state(p, GST_STATE_NULL);
             gst_object_unref(p);
             LogInfo(VB_MEDIAOUT, "VideoInputManager: Video pipeline for '%s' released\n", name.c_str());
-        }).detach();
+        });
     }
 
     if (source.audioPipeline) {
         GstElement* ap = source.audioPipeline;
         source.audioPipeline = nullptr;
         std::string name = source.name;
-        std::thread([ap, name]() {
+        std::lock_guard<std::mutex> tlock(m_teardownMutex);
+        m_teardownThreads.emplace_back([ap, name]() {
             gst_element_set_state(ap, GST_STATE_NULL);
             gst_object_unref(ap);
             LogInfo(VB_MEDIAOUT, "VideoInputManager: Audio pipeline for '%s' released\n", name.c_str());
-        }).detach();
+        });
     }
 
     source.running = false;
@@ -1042,5 +1097,22 @@ void VideoInputManager::StopSource(SourceInfo& source) {
 void VideoInputManager::StopAllSources() {
     for (auto& source : m_sources) {
         StopSource(source);
+    }
+}
+
+void VideoInputManager::JoinTeardownThreads() {
+    // Swap the list out under the lock, then join outside it — joining can
+    // block for a while if a pipeline is wedged in gst_element_set_state(),
+    // and StopSource() (called from other sources' teardown, or a
+    // concurrent caller) shouldn't have to wait on m_teardownMutex for that.
+    std::vector<std::thread> threads;
+    {
+        std::lock_guard<std::mutex> tlock(m_teardownMutex);
+        threads.swap(m_teardownThreads);
+    }
+    for (auto& t : threads) {
+        if (t.joinable()) {
+            t.join();
+        }
     }
 }

@@ -124,6 +124,21 @@ void AES67Manager::Shutdown() {
 
     LogInfo(VB_MEDIAOUT, "AES67Manager: Shutting down\n");
 
+    // Clear the initialized flag up front so the watchdog rebuild thread
+    // (spawned by SAPAnnounceLoop(), see m_rebuildThread) observes
+    // shutdown-in-progress and skips calling ApplyConfig() instead of
+    // resurrecting pipelines after we tear them down below.
+    m_initialized.store(false);
+
+    // Join any in-flight watchdog rebuild thread FIRST, before touching
+    // m_sapAnnounceThread/m_sapRecvThread.  The rebuild thread internally
+    // calls ApplyConfig(), which itself joins those two threads -- joining
+    // them here concurrently with the rebuild thread would be a double
+    // join on the same std::thread object (undefined behavior).
+    if (m_rebuildThread.joinable()) {
+        m_rebuildThread.join();
+    }
+
     // Stop SAP threads
     m_sapAnnounceRunning.store(false);
     m_sapRecvRunning.store(false);
@@ -138,7 +153,6 @@ void AES67Manager::Shutdown() {
     ShutdownPTP();
 
     m_active.store(false);
-    m_initialized.store(false);
     LogInfo(VB_MEDIAOUT, "AES67Manager: Shutdown complete\n");
 }
 
@@ -613,6 +627,11 @@ bool AES67Manager::CreateSendPipeline(const AES67Instance& inst) {
         LogErr(VB_MEDIAOUT, "AES67 send pipeline error [%d]: %s\n",
                inst.id, error->message);
         g_error_free(error);
+        // gst_parse_launch() can return a non-null (partial) pipeline even
+        // when it also reports an error -- release it so we don't leak.
+        if (pipeline) {
+            gst_object_unref(pipeline);
+        }
         return false;
     }
 
@@ -644,14 +663,33 @@ bool AES67Manager::CreateSendPipeline(const AES67Instance& inst) {
     if (ret == GST_STATE_CHANGE_FAILURE) {
         LogErr(VB_MEDIAOUT, "AES67 send pipeline [%d] failed to start\n", inst.id);
         WarningHolder::AddWarning(44, "AES67: audio send stream failed to start");
+        // Drop back to NULL before unreffing -- elements may already hold
+        // READY/PAUSED resources (sockets, threads, PipeWire connections)
+        // that gst_object_unref() alone will not release.
+        gst_element_set_state(pipeline, GST_STATE_NULL);
         gst_object_unref(bus);
         gst_object_unref(pipeline);
         return false;
     }
 
     {
-        std::lock_guard<std::mutex> lock(m_pipelineMutex);
-        m_sendPipelines.erase(inst.id);
+        std::unique_lock<std::mutex> lock(m_pipelineMutex);
+        // If a pipeline already exists for this instance id (e.g. two
+        // ApplyConfig() runs interleaved), stop it properly instead of
+        // erasing the map entry directly -- a raw erase() would destroy
+        // the AES67Pipeline (dropping its GstElement* refs) without ever
+        // calling gst_element_set_state(NULL), leaking a still-PLAYING
+        // pipeline (refs, threads, sockets).
+        auto node = m_sendPipelines.extract(inst.id);
+        if (!node.empty()) {
+            // StopPipeline() can block on a GStreamer state change to
+            // PipeWire -- release the lock while it runs, matching the
+            // no-block-while-locked policy used elsewhere in this file
+            // (see StopAllPipelines()).
+            lock.unlock();
+            StopPipeline(node.mapped());
+            lock.lock();
+        }
         auto [it, ok] = m_sendPipelines.try_emplace(inst.id);
         it->second.instanceId = inst.id;
         it->second.isSend = true;
@@ -708,6 +746,11 @@ bool AES67Manager::CreateRecvPipeline(const AES67Instance& inst) {
         LogErr(VB_MEDIAOUT, "AES67 recv pipeline error [%d]: %s\n",
                inst.id, error->message);
         g_error_free(error);
+        // gst_parse_launch() can return a non-null (partial) pipeline even
+        // when it also reports an error -- release it so we don't leak.
+        if (pipeline) {
+            gst_object_unref(pipeline);
+        }
         return false;
     }
 
@@ -740,14 +783,25 @@ bool AES67Manager::CreateRecvPipeline(const AES67Instance& inst) {
     if (ret == GST_STATE_CHANGE_FAILURE) {
         LogErr(VB_MEDIAOUT, "AES67 recv pipeline [%d] failed to start\n", inst.id);
         WarningHolder::AddWarning(44, "AES67: audio receive stream failed to start");
+        // Drop back to NULL before unreffing -- elements may already hold
+        // READY/PAUSED resources (sockets, threads, PipeWire connections)
+        // that gst_object_unref() alone will not release.
+        gst_element_set_state(pipeline, GST_STATE_NULL);
         gst_object_unref(bus);
         gst_object_unref(pipeline);
         return false;
     }
 
     {
-        std::lock_guard<std::mutex> lock(m_pipelineMutex);
-        m_recvPipelines.erase(inst.id);
+        std::unique_lock<std::mutex> lock(m_pipelineMutex);
+        // See CreateSendPipeline() for why we stop any existing pipeline
+        // for this id instead of erasing the map entry directly.
+        auto node = m_recvPipelines.extract(inst.id);
+        if (!node.empty()) {
+            lock.unlock();
+            StopPipeline(node.mapped());
+            lock.lock();
+        }
         auto [it, ok] = m_recvPipelines.try_emplace(inst.id);
         it->second.instanceId = inst.id;
         it->second.isSend = false;
@@ -768,6 +822,21 @@ bool AES67Manager::CreateRecvPipeline(const AES67Instance& inst) {
 void AES67Manager::StopPipeline(AES67Pipeline& p) {
     if (p.pipeline) {
         gst_element_set_state(p.pipeline, GST_STATE_NULL);
+
+        // Remove the buffer-drop probe installed by FlushSendPipelines()
+        // (if any) and release our ref on the pad it was installed on.
+        // Without this, the probe stays registered on the pad with
+        // &p.dropCounter as userdata -- a dangling pointer once this
+        // AES67Pipeline is erased from its owning map -- and the pad ref
+        // taken in FlushSendPipelines() leaks.
+        if (p.probeId != 0 && p.probePad) {
+            gst_pad_remove_probe(p.probePad, p.probeId);
+            p.probeId = 0;
+        }
+        if (p.probePad) {
+            gst_object_unref(p.probePad);
+            p.probePad = nullptr;
+        }
 
         // Release the bus ref we stored at pipeline creation
         if (p.bus) {
@@ -1251,12 +1320,26 @@ void AES67Manager::SAPAnnounceLoop() {
                 // that calls ApplyConfig() after we exit.
                 LogWarn(VB_MEDIAOUT, "AES67 watchdog: rebuild needed, stopping SAP loop and scheduling ApplyConfig\n");
                 m_sapAnnounceRunning.store(false);
-                std::thread([this]() {
+                // Track this as m_rebuildThread (rather than detaching) so
+                // Shutdown() can join it before tearing anything else down
+                // -- a detached thread could otherwise call ApplyConfig()
+                // and resurrect pipelines after Shutdown() has already run,
+                // and a detached thread racing Shutdown()'s own joins of
+                // m_sapAnnounceThread/m_sapRecvThread is undefined behavior.
+                if (m_rebuildThread.joinable()) {
+                    m_rebuildThread.join();
+                }
+                m_rebuildThread = std::thread([this]() {
                     // Brief delay to let the SAP announce thread finish
                     // exiting and become joinable.
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    // If Shutdown() ran while we were sleeping, don't
+                    // resurrect pipelines -- just exit quietly.
+                    if (!m_initialized.load()) {
+                        return;
+                    }
                     ApplyConfig();
-                }).detach();
+                });
                 break;
             }
         }
@@ -1448,6 +1531,26 @@ void AES67Manager::HandleSAPPacket(const uint8_t* data, size_t len,
                     stream.sessionName.c_str(), senderAddr.c_str(),
                     stream.multicastIP.c_str(), stream.port, stream.channels);
         }
+
+        // Prune stale entries.  A remote sender that stops announcing
+        // without ever transmitting an explicit SAP deletion packet (e.g.
+        // it crashes, loses power, or drops off the network) would
+        // otherwise leave its stream in m_discoveredStreams forever.  Drop
+        // anything not seen within ~10 announce intervals.
+        uint64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        constexpr uint64_t staleThresholdMs =
+            (uint64_t)AES67::SAP_ANNOUNCE_INTERVAL_S * 1000ULL * 10ULL;
+        for (auto sit = m_discoveredStreams.begin(); sit != m_discoveredStreams.end(); ) {
+            if (nowMs - sit->second.lastSeenMs > staleThresholdMs) {
+                LogInfo(VB_MEDIAOUT, "AES67 SAP: Stream '%s' timed out (no announcement in %llus) — removing\n",
+                        sit->second.sessionName.c_str(),
+                        (unsigned long long)(staleThresholdMs / 1000));
+                sit = m_discoveredStreams.erase(sit);
+            } else {
+                ++sit;
+            }
+        }
     }
 }
 
@@ -1562,10 +1665,18 @@ std::vector<AES67Manager::InlineRTPBranch> AES67Manager::AttachInlineRTPBranches
 
         // Request tee pad and link to queue
         GstPad* teeSrcPad = gst_element_request_pad_simple(tee, "src_%u");
+        if (!teeSrcPad) {
+            LogErr(VB_MEDIAOUT, "AES67 zero-hop: Failed to request tee src pad for instance %d\n", inst.id);
+            continue;
+        }
         GstPad* queueSinkPad = gst_element_get_static_pad(queue, "sink");
 
         if (gst_pad_link(teeSrcPad, queueSinkPad) != GST_PAD_LINK_OK) {
             LogErr(VB_MEDIAOUT, "AES67 zero-hop: Failed to link tee to queue for instance %d\n", inst.id);
+            // Release the request pad back to the tee before dropping our
+            // ref -- otherwise the tee is left with a pad slot that was
+            // never returned via gst_element_release_request_pad().
+            gst_element_release_request_pad(tee, teeSrcPad);
             gst_object_unref(teeSrcPad);
             gst_object_unref(queueSinkPad);
             continue;

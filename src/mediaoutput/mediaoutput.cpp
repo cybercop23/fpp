@@ -420,7 +420,13 @@ int OpenMediaOutput(const std::string& filename) {
             lock.unlock();
             CloseMediaOutput();
         }
-        lock.unlock();
+        // Only unlock here if we didn't already unlock above -- unlocking an
+        // already-unlocked mutex throws std::system_error, which was being
+        // mis-caught below and reported as "Error starting media" any time a
+        // previous mediaOutput existed (e.g. remote-mode UpdateMasterMediaPosition).
+        if (lock.owns_lock()) {
+            lock.unlock();
+        }
 
         std::string tmpFile(filename);
         std::size_t found = tmpFile.find_last_of(".");
@@ -565,24 +571,32 @@ void CloseMediaOutput() {
         return;
     }
 
-    if (mediaOutput->IsPlaying()) {
-        lock.unlock();
-        mediaOutput->Stop();
-        lock.lock();
+    // Move the global pointer into a local and clear the global while still
+    // holding the lock, then release the lock before the (potentially
+    // ~400ms) Stop()/teardown. This ensures only one thread can ever "win"
+    // the null-check above -- a second, concurrent caller (e.g. the
+    // MultiSync thread racing the playlist thread in remote mode) will see
+    // mediaOutput already null and return immediately, instead of both
+    // threads operating on (and eventually deleting) the same object.
+    MediaOutputBase* out = mediaOutput;
+    mediaOutput = nullptr;
+    lock.unlock();
+
+    if (out->IsPlaying()) {
+        out->Stop();
     }
 
     if (multiSync->isMultiSyncEnabled()) {
-        multiSync->SendMediaSyncStopPacket(mediaOutput->m_mediaFilename);
+        multiSync->SendMediaSyncStopPacket(out->m_mediaFilename);
     }
 
     std::map<std::string, std::string> keywords;
-    keywords["MEDIA_NAME"] = mediaOutput->m_mediaFilename;
+    keywords["MEDIA_NAME"] = out->m_mediaFilename;
     if (CommandManager::INSTANCE.HasPreset("MEDIA_STOPPED")) {
         CommandManager::INSTANCE.TriggerPreset("MEDIA_STOPPED", keywords);
     }
 
-    delete mediaOutput;
-    mediaOutput = 0;
+    delete out;
 
     Json::Value root;
     root["name"] = "FPP Remote";

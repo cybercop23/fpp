@@ -140,6 +140,12 @@ private:
         int height = 0;
         std::string scaling;        // "fit", "fill", "stretch"
         int assignedPlaneId = -1;   // DRM overlay plane reserved for this consumer's kmssink; released in StopConsumer
+        // DRM cardPath this consumer's kmssink acquired via
+        // GStreamerOutput::AcquireSharedDrmFd(); empty if none (non-HDMI
+        // consumer, or the acquire failed).  Released with
+        // ReleaseSharedDrmFd() in StopConsumer's teardown thread, strictly
+        // after the pipeline (and its kmssink) has been unreffed.
+        std::string acquiredDrmCard;
 
         // Overlay-specific
         std::string overlayModel;
@@ -165,7 +171,22 @@ private:
         GstElement* pipeline = nullptr;
 #endif
         std::thread startThread;
-        std::atomic<bool> shutdownRequested{false};
+        // Shared (not raw-pointer-captured) so the bus-monitor thread spawned
+        // in StartConsumer can safely outlive this ConsumerInfo: Reload()/
+        // Shutdown() clear() m_consumers, which would invalidate a raw
+        // `&consumer.shutdownRequested` pointer while the detached thread may
+        // still be inside gst_bus_timed_pop().  The thread captures this
+        // shared_ptr by value instead.  Re-assigned to a fresh instance each
+        // time StartConsumer runs so a still-draining prior thread can never
+        // have its flag reset out from under it by a later restart.
+        std::shared_ptr<std::atomic<bool>> shutdownRequested = std::make_shared<std::atomic<bool>>(false);
+        // Set by the bus-monitor thread when it exits due to
+        // GST_MESSAGE_ERROR/EOS (i.e. the pipeline died on its own, not via
+        // StopConsumer).  Without this, `running` stays true forever for
+        // persistent (sourceNode) consumers and nothing ever restarts them —
+        // a zombie that holds its DRM plane and CMA indefinitely.  Same
+        // shared_ptr-per-run rationale as shutdownRequested.
+        std::shared_ptr<std::atomic<bool>> pipelineDead = std::make_shared<std::atomic<bool>>(false);
         bool running = false;
 
         ConsumerInfo() = default;
@@ -174,7 +195,9 @@ private:
               pipeWireNodeName(std::move(o.pipeWireNodeName)),
               connector(std::move(o.connector)), cardPath(std::move(o.cardPath)),
               connectorId(o.connectorId), width(o.width), height(o.height),
-              scaling(std::move(o.scaling)), overlayModel(std::move(o.overlayModel)),
+              scaling(std::move(o.scaling)), assignedPlaneId(o.assignedPlaneId),
+              acquiredDrmCard(std::move(o.acquiredDrmCard)),
+              overlayModel(std::move(o.overlayModel)),
               overlayState(std::move(o.overlayState)),
               address(std::move(o.address)), port(o.port),
               rtpEncoding(std::move(o.rtpEncoding)),
@@ -185,7 +208,8 @@ private:
               pipeline(o.pipeline),
 #endif
               startThread(std::move(o.startThread)),
-              shutdownRequested(o.shutdownRequested.load()),
+              shutdownRequested(std::move(o.shutdownRequested)),
+              pipelineDead(std::move(o.pipelineDead)),
               running(o.running) {
 #ifdef HAS_GSTREAMER_VIDEO_OUTPUT
             o.pipeline = nullptr;

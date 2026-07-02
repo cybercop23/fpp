@@ -237,16 +237,25 @@ int PlaylistEntryMedia::Process(void) {
 }
 
 bool PlaylistEntryMedia::HasExtraAtEnd() {
+    // m_mediaOutput can be deleted concurrently by CloseMediaOutput() (e.g.
+    // the HTTP status thread calling this while the playlist thread tears
+    // down media), so the pointer must not be dereferenced without the lock.
+    pthread_mutex_lock(&m_mediaOutputLock);
+    bool result = false;
     if (m_mediaOutput) {
-        return m_mediaOutput->getMediaOffsetMS() < 0;
+        result = m_mediaOutput->getMediaOffsetMS() < 0;
     }
-    return false;
+    pthread_mutex_unlock(&m_mediaOutputLock);
+    return result;
 }
 int32_t PlaylistEntryMedia::GetMediaOffsetMS() {
+    pthread_mutex_lock(&m_mediaOutputLock);
+    int32_t result = 0;
     if (m_mediaOutput) {
-        return m_mediaOutput->getMediaOffsetMS();
+        result = m_mediaOutput->getMediaOffsetMS();
     }
-    return 0;
+    pthread_mutex_unlock(&m_mediaOutputLock);
+    return result;
 }
 
 uint64_t PlaylistEntryMedia::GetLengthInMS() {
@@ -336,6 +345,7 @@ int PlaylistEntryMedia::OpenMediaOutput(void) {
     std::size_t found = tmpFile.find_last_of(".");
 
     if (found == std::string::npos) {
+        pthread_mutex_unlock(&m_mediaOutputLock);
         LogWarn(VB_MEDIAOUT, "Unable to determine extension of media file %s\n",
                 m_mediaFilename.c_str());
         return 0;
@@ -389,12 +399,22 @@ int PlaylistEntryMedia::CloseMediaOutput(void) {
         return 0;
     }
 
+    // Swap the member into a local and null it out while still holding the
+    // lock, then release the lock before the blocking teardown below.
+    // ~GStreamerOutput() (via delete) runs GStreamerOutput::Stop(), which
+    // has 250ms + 150ms sleeps and a gst_element_set_state(NULL) that can
+    // block indefinitely if the Pi's V4L2 decoder wedges (issue #2695).
+    // Holding m_mediaOutputLock across that would stall any other thread
+    // touching this entry (HTTP status thread, Process(), etc.) for the
+    // same duration.
+    MediaOutputBase* out = m_mediaOutput;
+    m_mediaOutput = NULL;
+    pthread_mutex_unlock(&m_mediaOutputLock);
+
     if (multiSync->isMultiSyncEnabled())
         multiSync->SendMediaSyncStopPacket(m_mediaFilename);
 
-    delete m_mediaOutput;
-    m_mediaOutput = NULL;
-    pthread_mutex_unlock(&m_mediaOutputLock);
+    delete out;
 
     return 1;
 }
@@ -461,7 +481,16 @@ Json::Value PlaylistEntryMedia::GetConfig(void) {
     MediaOutputStatus status = IsPaused() ? m_pausedStatus : *m_slotStatus;
     result["mediaFilename"] = m_mediaFilename;
     result["streamSlot"] = m_streamSlot;
-    if (m_mediaOutput) {
+
+    // Only need the pointer's non-null-ness here (the actual fields come
+    // from the already-copied "status" above), but the pointer itself can
+    // be deleted concurrently by CloseMediaOutput(), so check it under the
+    // lock rather than dereferencing/testing it unguarded.
+    pthread_mutex_lock(&m_mediaOutputLock);
+    bool hasMediaOutput = (m_mediaOutput != nullptr);
+    pthread_mutex_unlock(&m_mediaOutputLock);
+
+    if (hasMediaOutput) {
         result["status"] = status.status;
         result["secondsElapsed"] = status.secondsElapsed;
         result["subSecondsElapsed"] = status.subSecondsElapsed;
@@ -504,9 +533,25 @@ bool PlaylistEntryMedia::IsPaused() {
 }
 void PlaylistEntryMedia::Resume() {
     if (m_pausedTime >= 0) {
+        // PreparePlay()'s return is intentionally not treated as fatal here;
+        // if it failed, m_mediaOutput will be left null and is handled below
+        // instead of blindly dereferencing it.
         PreparePlay();
 
         pthread_mutex_lock(&m_mediaOutputLock);
+
+        if (!m_mediaOutput) {
+            // PreparePlay() couldn't (re)create the media output (e.g. file
+            // missing/unsupported). Nothing to resume -- still clear the
+            // paused state so the entry doesn't stay wedged reporting
+            // itself as paused forever.
+            LogErr(VB_MEDIAOUT, "Could not resume media %s, no media output available\n", m_mediaFilename.c_str());
+            m_pausedTime = -1;
+            *m_slotStatus = m_pausedStatus;
+            pthread_mutex_unlock(&m_mediaOutputLock);
+            return;
+        }
+
         if (multiSync->isMultiSyncEnabled())
             multiSync->SendMediaSyncStartPacket(m_mediaFilename);
 
@@ -515,8 +560,12 @@ void PlaylistEntryMedia::Resume() {
             WarningHolder::AddWarningTimeout(60, 30, "Could not start media " + m_mediaOutput->m_mediaFilename);
             delete m_mediaOutput;
             m_mediaOutput = nullptr;
-            pthread_mutex_unlock(&m_mediaOutputLock);
         }
+
+        // Whether Start() above succeeded or failed, the pause is over:
+        // clear m_pausedTime so the entry doesn't stay wedged reporting
+        // itself as paused, and restore the last known status snapshot.
+        // The mutex is unlocked exactly once here on every path.
         m_pausedTime = -1;
         *m_slotStatus = m_pausedStatus;
         pthread_mutex_unlock(&m_mediaOutputLock);

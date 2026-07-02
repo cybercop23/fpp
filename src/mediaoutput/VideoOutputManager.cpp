@@ -243,6 +243,22 @@ void VideoOutputManager::SuspendPersistentHdmiConsumers() {
 void VideoOutputManager::ResumePersistentHdmiConsumers() {
     std::lock_guard<std::mutex> lock(m_mutex);
 
+    // Zombie sweep: a persistent consumer whose bus-monitor thread saw
+    // GST_MESSAGE_ERROR/EOS sets pipelineDead but leaves `running` true
+    // (nothing else clears it) — without this, such a consumer holds its
+    // DRM plane and CMA forever and is never considered for resume below.
+    // StopConsumer() clears `running` synchronously (its pipeline-NULL
+    // transition is what's detached/async), so it's safe to fold straight
+    // into the grouping loop right after.
+    for (auto& c : m_consumers) {
+        if (!c.sourceNode.empty() && c.type == "hdmi" &&
+            c.running && c.pipelineDead && c.pipelineDead->load()) {
+            LogWarn(VB_MEDIAOUT, "VideoOutputManager: persistent consumer '%s' pipeline died (ERROR/EOS) — tearing down for restart\n",
+                    c.name.c_str());
+            StopConsumer(c);
+        }
+    }
+
     // Group persistent HDMI consumers by sourceNode (same logic as Init)
     std::map<std::string, std::vector<size_t>> hdmiSourceGroups;
     for (size_t i = 0; i < m_consumers.size(); i++) {
@@ -279,6 +295,18 @@ void VideoOutputManager::ResumePersistentHdmiConsumers() {
 
 void VideoOutputManager::NotifyProducerReady(const std::string& channelName) {
     std::lock_guard<std::mutex> lock(m_mutex);
+
+    // Zombie sweep — see ResumePersistentHdmiConsumers for rationale. Applies
+    // to all consumer types here (not just hdmi) since NotifyProducerReady
+    // is the general persistent-source restart path.
+    for (auto& c : m_consumers) {
+        if (c.sourceNode == channelName &&
+            c.running && c.pipelineDead && c.pipelineDead->load()) {
+            LogWarn(VB_MEDIAOUT, "VideoOutputManager: consumer '%s' pipeline died (ERROR/EOS) — tearing down for restart\n",
+                    c.name.c_str());
+            StopConsumer(c);
+        }
+    }
 
     // Group persistent HDMI consumers by sourceNode for grouped start.
     std::map<std::string, std::vector<size_t>> hdmiSourceGroups;
@@ -936,8 +964,9 @@ bool VideoOutputManager::StartConsumer(ConsumerInfo& consumer) {
             }
             std::string cardForFd = !resolvedCard.empty() ? resolvedCard : consumer.cardPath;
             int drmFd = cardForFd.empty() ? -1
-                : GStreamerOutput::GetSharedDrmFd(cardForFd);
+                : GStreamerOutput::AcquireSharedDrmFd(cardForFd);
             if (drmFd >= 0) {
+                consumer.acquiredDrmCard = cardForFd;
                 g_object_set(sink, "fd", drmFd, NULL);
                 int planeId = GStreamerOutput::FindPrimaryPlaneForConnector(drmFd, resolvedConnId);
                 if (planeId >= 0) {
@@ -955,16 +984,26 @@ bool VideoOutputManager::StartConsumer(ConsumerInfo& consumer) {
         }
     }
 
-    // Wire up appsink callback for overlay consumers
+    // Wire up appsink callback for overlay consumers.
+    // user_data is a heap-allocated COPY of the shared_ptr<OverlayState> (not
+    // the raw OverlayState*), with a GDestroyNotify that deletes it.  This
+    // keeps OverlayState alive until GStreamer itself destroys the appsink
+    // element, which can be well after StopConsumer() resets
+    // consumer.overlayState: StopConsumer's pipeline-NULL transition runs on
+    // a detached thread, so the appsink's own streaming thread can still be
+    // in flight (about to call OnNewSample) when the ConsumerInfo's copy of
+    // the shared_ptr is reset — passing the raw pointer there was a
+    // use-after-free race.
     if (consumer.type == "overlay" && consumer.overlayState) {
         GstElement* sink = gst_bin_get_by_name(GST_BIN(consumer.pipeline), "sink");
         if (sink) {
             GstAppSinkCallbacks callbacks = {};
             callbacks.new_sample = OnOverlaySample;
-            // Pass the shared_ptr's raw pointer as user_data — the shared_ptr
-            // in ConsumerInfo keeps it alive for the consumer's lifetime.
-            gst_app_sink_set_callbacks(GST_APP_SINK(sink),
-                &callbacks, consumer.overlayState.get(), nullptr);
+            auto* stateRef = new std::shared_ptr<OverlayState>(consumer.overlayState);
+            gst_app_sink_set_callbacks(GST_APP_SINK(sink), &callbacks, stateRef,
+                [](gpointer data) {
+                    delete static_cast<std::shared_ptr<OverlayState>*>(data);
+                });
             gst_object_unref(sink);
         }
     }
@@ -972,14 +1011,30 @@ bool VideoOutputManager::StartConsumer(ConsumerInfo& consumer) {
     // Start the pipeline in a background thread.
     // With intervideosrc, set_state(PLAYING) should complete quickly
     // (no PipeWire negotiation needed).
-    consumer.shutdownRequested = false;
+    // Fresh shared_ptr instances per run: a still-draining prior thread (if
+    // any) keeps its own copy and is unaffected by this restart.
+    consumer.shutdownRequested = std::make_shared<std::atomic<bool>>(false);
+    consumer.pipelineDead = std::make_shared<std::atomic<bool>>(false);
     consumer.running = true;
 
     std::string consumerName = consumer.name;
     GstElement* pipeline = consumer.pipeline;
-    std::atomic<bool>* shutdownFlag = &consumer.shutdownRequested;
+    // Own a ref on the pipeline for the lifetime of the bus-monitor thread.
+    // StopConsumer()'s detached teardown thread calls gst_object_unref() on
+    // the pipeline, which can drop the LAST ref while this thread is about
+    // to touch it (gst_element_get_state / gst_bus_timed_pop) — without our
+    // own ref that's a use-after-free race. Released by PipelineRefGuard on
+    // every exit path below.
+    gst_object_ref(pipeline);
+    std::shared_ptr<std::atomic<bool>> shutdownFlag = consumer.shutdownRequested;
+    std::shared_ptr<std::atomic<bool>> pipelineDead = consumer.pipelineDead;
 
-    consumer.startThread = std::thread([pipeline, consumerName, shutdownFlag]() {
+    consumer.startThread = std::thread([pipeline, consumerName, shutdownFlag, pipelineDead]() {
+        struct PipelineRefGuard {
+            GstElement* p;
+            ~PipelineRefGuard() { gst_object_unref(p); }
+        } pipelineRefGuard{pipeline};
+
         LogInfo(VB_MEDIAOUT, "VideoOutputManager: Consumer '%s' background thread starting pipeline\n",
                 consumerName.c_str());
 
@@ -993,6 +1048,11 @@ bool VideoOutputManager::StartConsumer(ConsumerInfo& consumer) {
             if (!shutdownFlag->load()) {
                 LogWarn(VB_MEDIAOUT, "VideoOutputManager: Consumer '%s' pipeline failed to start "
                         "(connector may be disconnected)\n", consumerName.c_str());
+                // Never reached PLAYING and nobody asked us to stop — mark
+                // dead so persistent-consumer restart logic notices instead
+                // of `running` staying true forever with a pipeline that
+                // will never produce frames.
+                pipelineDead->store(true);
             }
             return;
         }
@@ -1027,6 +1087,9 @@ bool VideoOutputManager::StartConsumer(ConsumerInfo& consumer) {
                     if (!shutdownFlag->load()) {
                         LogWarn(VB_MEDIAOUT, "VideoOutputManager: Consumer '%s' error: %s (%s)\n",
                                 consumerName.c_str(), err ? err->message : "?", debug ? debug : "");
+                        // Pipeline died on its own (not via StopConsumer) —
+                        // see pipelineDead comment on the ConsumerInfo field.
+                        pipelineDead->store(true);
                     }
                     if (err) g_error_free(err);
                     g_free(debug);
@@ -1037,6 +1100,9 @@ bool VideoOutputManager::StartConsumer(ConsumerInfo& consumer) {
                 case GST_MESSAGE_EOS:
                     LogInfo(VB_MEDIAOUT, "VideoOutputManager: Consumer '%s' received EOS\n",
                             consumerName.c_str());
+                    if (!shutdownFlag->load()) {
+                        pipelineDead->store(true);
+                    }
                     gst_message_unref(msg);
                     gst_object_unref(bus);
                     return;
@@ -1083,7 +1149,15 @@ bool VideoOutputManager::StartConsumer(ConsumerInfo& consumer) {
 
 #ifdef HAS_GSTREAMER_VIDEO_OUTPUT
 GstFlowReturn VideoOutputManager::OnOverlaySample(GstAppSink* appsink, gpointer userData) {
-    auto* state = static_cast<OverlayState*>(userData);
+    // userData is a heap std::shared_ptr<OverlayState>* (see StartConsumer) —
+    // unwrap it rather than treating it as a raw OverlayState*.  The
+    // shared_ptr keeps OverlayState alive independent of ConsumerInfo, so
+    // this is safe even if StopConsumer has already reset the ConsumerInfo's
+    // own copy.
+    auto* stateRef = static_cast<std::shared_ptr<OverlayState>*>(userData);
+    if (!stateRef)
+        return GST_FLOW_EOS;
+    OverlayState* state = stateRef->get();
     if (!state || !state->active.load())
         return GST_FLOW_EOS;
 
@@ -1140,6 +1214,14 @@ bool VideoOutputManager::WaitForPendingTeardowns(int timeoutMs) {
     if (!ok) {
         LogWarn(VB_MEDIAOUT, "VideoOutputManager: Timed out waiting for pipeline teardowns "
                 "(%d still pending after %d ms)\n", m_pendingTeardowns, timeoutMs);
+        // A teardown that never completes leaks its pipeline's CMA, DRM
+        // plane, and DRM fd ref forever, and holds m_pendingTeardowns above
+        // zero permanently (blocking future WaitForPendingTeardowns calls
+        // too).  Surface it as a warning so a 24h soak-test log clearly
+        // flags a wedged gst_element_set_state(NULL) instead of silently
+        // bleeding memory.
+        WarningHolder::AddWarning(31, "Video output: " + std::to_string(m_pendingTeardowns) +
+                                   " pipeline teardown(s) stuck after " + std::to_string(timeoutMs) + "ms");
     } else {
         LogInfo(VB_MEDIAOUT, "VideoOutputManager: All pipeline teardowns completed\n");
     }
@@ -1166,7 +1248,7 @@ void VideoOutputManager::StopConsumer(ConsumerInfo& consumer) {
     }
 
     // Signal the background thread to exit first
-    consumer.shutdownRequested = true;
+    consumer.shutdownRequested->store(true);
 
     // Deactivate overlay state before pipeline teardown to prevent
     // the appsink callback from accessing a model during shutdown
@@ -1197,13 +1279,26 @@ void VideoOutputManager::StopConsumer(ConsumerInfo& consumer) {
         // kmssink still holds.  -1 if this consumer never got a plane.
         int planeId = consumer.assignedPlaneId;
         consumer.assignedPlaneId = -1;
+        // Same ordering requirement for the shared DRM master fd: release it
+        // only after the pipeline (and its kmssink) is gone. Empty if this
+        // consumer never acquired one (non-HDMI, or the acquire failed).
+        std::string drmCard = consumer.acquiredDrmCard;
+        consumer.acquiredDrmCard.clear();
         {
             std::lock_guard<std::mutex> tl(m_teardownMutex);
             m_pendingTeardowns++;
         }
-        std::thread([this, p, planeId]() {
+        std::thread([this, p, planeId, drmCard]() {
+            uint64_t startMs = GetTimeMS();
             gst_element_set_state(p, GST_STATE_NULL);
             gst_object_unref(p);
+            // Release the DRM master fd AFTER the pipeline (and therefore its
+            // kmssink) has been destroyed — closing the fd is what actually
+            // frees any GEM handles/FBs the kmssink/vc4 driver failed to
+            // release explicitly, and doing so while the kmssink object was
+            // still alive would be premature (undefined behavior).
+            if (!drmCard.empty())
+                GStreamerOutput::ReleaseSharedDrmFd(drmCard);
             if (planeId >= 0)
                 GStreamerOutput::ReleasePlane(planeId);
             {
@@ -1211,7 +1306,16 @@ void VideoOutputManager::StopConsumer(ConsumerInfo& consumer) {
                 m_pendingTeardowns--;
             }
             m_teardownCV.notify_all();
+            LogDebug(VB_MEDIAOUT, "VideoOutputManager: pipeline teardown completed in %llu ms\n",
+                    (unsigned long long)(GetTimeMS() - startMs));
         }).detach();
+    } else if (!consumer.acquiredDrmCard.empty()) {
+        // No pipeline to tear down (e.g. this consumer never fully started)
+        // but a DRM fd was still acquired while wiring up the kmssink —
+        // release it immediately since there's no teardown thread to do it
+        // for us later.
+        GStreamerOutput::ReleaseSharedDrmFd(consumer.acquiredDrmCard);
+        consumer.acquiredDrmCard.clear();
     }
 
     // Restore overlay model state and remove listener
