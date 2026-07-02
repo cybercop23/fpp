@@ -31,6 +31,10 @@ if (isset($_GET['cpu'])) {
         // Track which checks have received results
         var receivedChecks = {};
 
+        // Track the latest status ('pass'/'warn'/'fail') per check id, so
+        // recovery actions can be surfaced for degraded media checks.
+        var checkStatuses = {};
+
         function HealthCheckDone() {
             $('#btnStartHealthCheck').prop('disabled', false);
             $('#btnStartHealthCheck i').removeClass('fa-spin');
@@ -38,6 +42,9 @@ if (isset($_GET['cpu'])) {
                 healthCheckSource.close();
                 healthCheckSource = null;
             }
+
+            // Re-evaluate recovery actions once all results are in
+            updateRecoveryActions();
 
             // Mark any static checks that didn't receive results as "Skipped"
             var allChecks = healthChecks.left.concat(healthChecks.right);
@@ -52,6 +59,82 @@ if (isset($_GET['cpu'])) {
                     }
                 }
             });
+        }
+
+        // Show a contextual recovery action when a media check is degraded.
+        // PipeWire trouble -> restart the audio services (which also restarts
+        // fppd). GStreamer trouble alone -> a plain fppd restart rebuilds the
+        // in-process media pipeline, so reuse the existing fppd restart.
+        function updateRecoveryActions() {
+            var pw = checkStatuses['pipewire'];
+            var gst = checkStatuses['gstreamer'];
+            var el = $('#healthRecoveryActions');
+            var html = '';
+
+            if (pw === 'warn' || pw === 'fail') {
+                html =
+                    '<div class="fpp-alert fpp-alert--warning fpp-health-recovery__inner" role="alert">' +
+                    '<i class="fas fa-wrench"></i>' +
+                    '<span>The PipeWire audio stack needs attention. Restarting the audio services will bounce PipeWire and reconnect the media pipeline.</span>' +
+                    '<button class="btn btn-warning" id="btnRestartAudio" onclick="RestartAudioServices();">' +
+                    '<i class="fas fa-volume-high"></i> Restart Audio Services</button>' +
+                    '</div>';
+            } else if (gst === 'warn' || gst === 'fail') {
+                html =
+                    '<div class="fpp-alert fpp-alert--warning fpp-health-recovery__inner" role="alert">' +
+                    '<i class="fas fa-wrench"></i>' +
+                    '<span>GStreamer reported a problem. Restarting FPPD rebuilds the media pipeline from scratch.</span>' +
+                    '<button class="btn btn-warning" id="btnRestartFPPDMedia" onclick="RestartFPPDForMedia();">' +
+                    '<i class="fas fa-sync-alt"></i> Restart FPPD</button>' +
+                    '</div>';
+            }
+
+            if (html) {
+                el.html(html).show();
+            } else {
+                el.hide().empty();
+            }
+        }
+
+        function RestartAudioServices() {
+            if (!confirm('This will restart the PipeWire audio services and then restart FPPD to reconnect the media pipeline.\n\nAny currently playing sequence or audio will be interrupted.\n\nContinue?')) {
+                return;
+            }
+            var btn = $('#btnRestartAudio');
+            btn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Restarting...');
+            $.ajax({ url: 'api/pipewire/audio/services/restart', method: 'POST' })
+                .done(function (data) {
+                    if (data && data.status === 'OK') {
+                        $.jGrowl('Audio services restarted; FPPD is restarting', { themeState: 'success' });
+                    } else {
+                        $.jGrowl((data && data.message) ? data.message : 'Restart reported errors', { themeState: 'danger' });
+                    }
+                })
+                .fail(function () {
+                    $.jGrowl('Failed to restart audio services', { themeState: 'danger' });
+                })
+                .always(function () {
+                    // Give fppd a few seconds to re-exec before re-checking
+                    setTimeout(StartHealthCheck, 5000);
+                });
+        }
+
+        function RestartFPPDForMedia() {
+            if (!confirm('Restart FPPD to rebuild the media / GStreamer pipeline?\n\nAny currently playing sequence or audio will be interrupted.\n\nContinue?')) {
+                return;
+            }
+            var btn = $('#btnRestartFPPDMedia');
+            btn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Restarting...');
+            $.get('api/system/fppd/restart')
+                .done(function () {
+                    $.jGrowl('FPPD restart requested', { themeState: 'success' });
+                })
+                .fail(function () {
+                    $.jGrowl('FPPD restart failed', { themeState: 'danger' });
+                })
+                .always(function () {
+                    setTimeout(StartHealthCheck, 5000);
+                });
         }
 
         function getStatusIcon(status) {
@@ -69,6 +152,12 @@ if (isset($_GET['cpu'])) {
 
             // Track that we received this check
             receivedChecks[check.id] = true;
+            checkStatuses[check.id] = check.status;
+
+            // Surface recovery actions as soon as a media check result arrives
+            if (check.id === 'pipewire' || check.id === 'gstreamer') {
+                updateRecoveryActions();
+            }
 
             if (statusEl.length) {
                 var statusHtml =
@@ -161,6 +250,8 @@ if (isset($_GET['cpu'])) {
 
             // Reset tracking for new health check run
             receivedChecks = {};
+            checkStatuses = {};
+            $('#healthRecoveryActions').hide().empty();
 
             // Build layout with pre-rendered placeholders
             var leftHtml = healthChecks.left.map(renderPlaceholder).join('');
@@ -637,6 +728,7 @@ if (isset($_GET['cpu'])) {
                     </div>
                     <div class="card-body">
                         <div id='healthCheckOutput'></div>
+                        <div id="healthRecoveryActions" class="fpp-health-recovery" style="display: none;"></div>
                     </div>
                 </div>
 

@@ -63,6 +63,68 @@ function SetFppdSetting($key, $value)
 }
 
 /////////////////////////////////////////////////////////////////////////////
+// POST /api/pipewire/audio/services/restart
+//
+// Recovery action surfaced from the System Health page when the PipeWire
+// health check is degraded. Bounces the three PipeWire systemd services and
+// then restarts fppd so its in-process GStreamer pipelines reconnect to the
+// freshly-started daemons.
+//
+// Order matters:
+//   1. Quiesce fppd playback first, so it releases its pipewiresink client
+//      before we yank PipeWire out from under an active pipeline (avoids the
+//      non-idempotent GStreamer teardown path).
+//   2. Restart pipewire -> wireplumber -> pipewire-pulse (pulse depends on the
+//      pipewire core socket).
+//   3. Restart fppd (full re-exec) to rebuild the media stack cleanly.
+function RestartPipeWireServices()
+{
+    global $SUDO, $settings;
+
+    // The services only exist on real FPP platforms, not macOS dev boxes.
+    if (isset($settings['Platform']) && $settings['Platform'] == "MacOS") {
+        http_response_code(400);
+        return json(array("status" => "ERROR", "message" => "Not supported on this platform"));
+    }
+
+    // 1. Stop playback so fppd releases its PipeWire client cleanly.
+    $playback = StopFppdPlaybackSafe();
+
+    // 2. Restart the three services in dependency order.
+    $services = array();
+    exec($SUDO . " /usr/bin/systemctl restart fpp-pipewire.service 2>&1", $o1, $r1);
+    $services['fpp-pipewire'] = ($r1 === 0);
+    usleep(500000);
+
+    exec($SUDO . " /usr/bin/systemctl restart fpp-wireplumber.service 2>&1", $o2, $r2);
+    $services['fpp-wireplumber'] = ($r2 === 0);
+
+    // Wait for the PipeWire core socket before starting pulse.
+    for ($i = 0; $i < 10; $i++) {
+        if (file_exists('/run/pipewire-fpp/pipewire-0'))
+            break;
+        usleep(250000);
+    }
+    exec($SUDO . " /usr/bin/systemctl restart fpp-pipewire-pulse.service 2>&1", $o3, $r3);
+    $services['fpp-pipewire-pulse'] = ($r3 === 0);
+
+    // 3. Restart fppd so its GStreamer pipelines reconnect to the new daemons.
+    //    Tolerate a non-responsive daemon — fppd re-inits media on next start.
+    @SendCommand('restart');
+
+    $allOk = $services['fpp-pipewire'] && $services['fpp-wireplumber'] && $services['fpp-pipewire-pulse'];
+
+    return json(array(
+        "status" => $allOk ? "OK" : "ERROR",
+        "message" => $allOk
+            ? "PipeWire services restarted and FPPD restart requested"
+            : "One or more PipeWire services failed to restart",
+        "services" => $services,
+        "wasPlaying" => $playback['wasPlaying']
+    ));
+}
+
+/////////////////////////////////////////////////////////////////////////////
 // GET /api/pipewire/audio/groups
 function GetPipeWireAudioGroups()
 {
