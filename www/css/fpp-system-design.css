@@ -2002,6 +2002,42 @@
 }
 
 /* ==========================================================================
+   SKELETON LOADING
+   Placeholder shimmer for values fetched asynchronously (OS version, build,
+   kernel, current-OS tag). Reserves inline space so the real text swaps in
+   place instead of shifting the layout when the API responds.
+   ========================================================================== */
+.fpp-skeleton {
+	display: inline-block;
+	vertical-align: middle;
+	min-width: 4.5rem;
+	height: 0.9em;
+	border-radius: var(--fpp-radius-sm);
+	background: linear-gradient(90deg,
+			var(--fpp-border-light) 25%,
+			var(--fpp-border-dark) 37%,
+			var(--fpp-border-light) 63%);
+	background-size: 400% 100%;
+	animation: fpp-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes fpp-skeleton-shimmer {
+	0% {
+		background-position: 100% 50%;
+	}
+
+	100% {
+		background-position: 0 50%;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.fpp-skeleton {
+		animation: none;
+	}
+}
+
+/* ==========================================================================
    UPDATE STATUS DOT
    Quiet inline "update available" indicator — reads as status next to a value
    without the weight of a full badge.

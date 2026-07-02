@@ -608,6 +608,13 @@
                 checkUpgradeRecommendation();
             }).fail(function () {
                 setVersionStatusDot('fppVersionStatusBadge', 'unknown', 'Unknown');
+                // Don't leave placeholders shimmering forever if status can't be
+                // fetched -- fall back to the neutral "--" for any unresolved field.
+                $('#osVersionValue, #osReleaseValue, #kernelValue, #osCurrentVersionBadge').each(function () {
+                    if ($(this).find('.fpp-skeleton').length) {
+                        $(this).text('--');
+                    }
+                });
             });
         }
 
@@ -1119,7 +1126,7 @@
                             <div class="fpp-row">
                                 <span class="fpp-row__label">OS Version:</span>
                                 <span class="fpp-row__value">
-                                    <span id="osVersionValue">--</span>
+                                    <span id="osVersionValue"><span class="fpp-skeleton" aria-hidden="true"></span></span>
                                     <span id="osVersionStatusBadge" class="fpp-upd-dot fpp-upd-dot--ok"
                                         style="display: none;">Up to Date</span>
                                 </span>
@@ -1130,7 +1137,7 @@
                         <div class="col-md-4 fpp-col-divider">
                             <div class="fpp-row">
                                 <span class="fpp-row__label">OS Build:</span>
-                                <span class="fpp-row__value" id="osReleaseValue">--</span>
+                                <span class="fpp-row__value" id="osReleaseValue"><span class="fpp-skeleton" aria-hidden="true"></span></span>
                             </div>
                             <div class="fpp-row">
                                 <span class="fpp-row__label">Platform:</span>
@@ -1154,7 +1161,7 @@
                             <?php } ?>
                             <div class="fpp-row">
                                 <span class="fpp-row__label">Kernel:</span>
-                                <span class="fpp-row__value" id="kernelValue">--</span>
+                                <span class="fpp-row__value" id="kernelValue"><span class="fpp-skeleton" aria-hidden="true"></span></span>
                             </div>
                         </div>
                     </div>
@@ -1330,7 +1337,7 @@
                                 </div>
                                 <div class="fpp-card__header-status">
                                     <span class="fpp-card__header-status-label">Current OS</span>
-                                    <span class="fpp-tag" id="osCurrentVersionBadge">--</span>
+                                    <span class="fpp-tag" id="osCurrentVersionBadge"><span class="fpp-skeleton" aria-hidden="true"></span></span>
                                 </div>
                             </div>
 
