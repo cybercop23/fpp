@@ -1650,21 +1650,16 @@
 	transform: rotate(180deg);
 }
 
-/* Grid-based reveal (0fr -> 1fr) rather than a fixed max-height, so answers of
-   any length expand fully without a magic-number clip and animate evenly. */
+/* Collapsed by default; the accordion JS animates max-height to the answer's
+   exact scrollHeight on open, so answers of any length expand fully without a
+   magic-number clip and the timing matches the real content height. */
 .fpp-faq__answer {
-	display: grid;
-	grid-template-rows: 0fr;
-	transition: grid-template-rows var(--fpp-transition-normal);
-}
-
-.fpp-faq__item--open .fpp-faq__answer {
-	grid-template-rows: 1fr;
+	max-height: 0;
+	overflow: hidden;
+	transition: max-height var(--fpp-transition-normal);
 }
 
 .fpp-faq__answer-inner {
-	overflow: hidden;
-	min-height: 0;
 	padding: 0 0 var(--fpp-sp-sm) 0;
 	font-size: 13.5px;
 	color: var(--fpp-text-secondary);

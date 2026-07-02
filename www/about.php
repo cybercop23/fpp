@@ -1026,13 +1026,29 @@
         }
 
         function initFaqAccordion() {
-            document.querySelectorAll('.fpp-faq__item').forEach(item => {
+            var items = document.querySelectorAll('.fpp-faq__item');
+
+            // Drive max-height from the answer's actual scrollHeight so open/close
+            // animates to the real content height (no fixed-height clip).
+            function syncFaqHeight(item) {
+                var answer = item.querySelector('.fpp-faq__answer');
+                if (!answer) return;
+                answer.style.maxHeight = item.classList.contains('fpp-faq__item--open')
+                    ? answer.scrollHeight + 'px'
+                    : '0px';
+            }
+
+            items.forEach(function (item) {
                 item.querySelector('.fpp-faq__question').addEventListener('click', function () {
-                    const isOpen = item.classList.contains('fpp-faq__item--open');
-                    document.querySelectorAll('.fpp-faq__item').forEach(i => i.classList.remove('fpp-faq__item--open'));
+                    var isOpen = item.classList.contains('fpp-faq__item--open');
+                    items.forEach(function (i) { i.classList.remove('fpp-faq__item--open'); });
                     if (!isOpen) item.classList.add('fpp-faq__item--open');
+                    items.forEach(syncFaqHeight);
                 });
             });
+
+            // Initialize (the first item is open by default in the markup).
+            items.forEach(syncFaqHeight);
         }
 
         // Test mode support: append ?test=branch (or commit, both, uptodate, major/eol, osonly)
