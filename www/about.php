@@ -681,6 +681,7 @@
 
                 $.get(allPlatforms, function (data) {
                     var devMode = (settings['uiLevel'] && (parseInt(settings['uiLevel']) == 3));
+                    var isAdvanced = (settings['uiLevel'] && (parseInt(settings['uiLevel']) >= 1));
                     var showLegacy = $('#LegacyOS').is(':checked');
                     // Regex to match versions below 9.0 (With N-1 - update this yearly)
                     var legacyVersionRegex = /[-_]v?[0-8]\./i;
@@ -703,9 +704,16 @@
                                 continue;
                             }
 
-                            // Only show nightly OS builds in Dev mode
-                            var isNightlyBuild = file["prerelease"] === true;
+                            // Nightly builds are bleeding-edge -- Developer mode only.
+                            // Other prereleases (alpha/beta) are fine in Advanced+.
+                            // GitHub flags alpha/beta AND nightly as prerelease, so
+                            // distinguish nightly by name rather than the flag alone.
+                            var isNightlyBuild = /nightly/i.test(file["filename"]);
                             if (isNightlyBuild && !devMode) {
+                                continue;
+                            }
+                            var isPrerelease = file["prerelease"] === true;
+                            if (isPrerelease && !isNightlyBuild && !isAdvanced) {
                                 continue;
                             }
 
