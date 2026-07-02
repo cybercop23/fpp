@@ -61,6 +61,17 @@ PlaylistEntryMedia::PlaylistEntryMedia(Playlist* playlist, PlaylistEntryBase* pa
  *
  */
 PlaylistEntryMedia::~PlaylistEntryMedia() {
+    // Playlist::Cleanup() deletes entries without calling Stop() first — if
+    // media was still open the output object (and its live GStreamer
+    // pipeline) leaked.  Swap under the lock, tear down outside it, same
+    // discipline as CloseMediaOutput().
+    MediaOutputBase* out = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_mediaOutputLock);
+        out = m_mediaOutput;
+        m_mediaOutput = nullptr;
+    }
+    delete out;
 }
 
 /*
@@ -193,9 +204,15 @@ int PlaylistEntryMedia::StartPlaying(void) {
     if (!m_mediaOutput->Start()) {
         LogErr(VB_MEDIAOUT, "Could not start media %s\n", m_mediaOutput->m_mediaFilename.c_str());
         WarningHolder::AddWarningTimeout(60, 30, "Could not start media " + m_mediaOutput->m_mediaFilename);
-        delete m_mediaOutput;
+        // Swap-unlock-delete: the delete runs the full GStreamer teardown
+        // (sleeps plus a state change that can block indefinitely on a
+        // wedged decoder) — doing that under m_mediaOutputLock wedges any
+        // thread touching this entry, including HTTP status threads that
+        // are holding m_playlistMutex.  Same rationale as CloseMediaOutput.
+        MediaOutputBase* failed = m_mediaOutput;
         m_mediaOutput = 0;
         lock.unlock();
+        delete failed;
         FinishPlay();
         return 0;
     }
@@ -544,6 +561,11 @@ void PlaylistEntryMedia::Resume() {
         // instead of blindly dereferencing it.
         PreparePlay();
 
+        // If Start() fails, the failed output is swapped out under the lock
+        // and deleted after it's released — its destructor runs the blocking
+        // GStreamer teardown (see CloseMediaOutput rationale).
+        MediaOutputBase* failed = nullptr;
+        {
         std::lock_guard<std::mutex> lock(m_mediaOutputLock);
 
         if (!m_mediaOutput) {
@@ -563,7 +585,7 @@ void PlaylistEntryMedia::Resume() {
         if (!m_mediaOutput->Start(m_pausedTime)) {
             LogErr(VB_MEDIAOUT, "Could not start media %s\n", m_mediaOutput->m_mediaFilename.c_str());
             WarningHolder::AddWarningTimeout(60, 30, "Could not start media " + m_mediaOutput->m_mediaFilename);
-            delete m_mediaOutput;
+            failed = m_mediaOutput;
             m_mediaOutput = nullptr;
         }
 
@@ -574,5 +596,7 @@ void PlaylistEntryMedia::Resume() {
         // when it goes out of scope.
         m_pausedTime = -1;
         *m_slotStatus = m_pausedStatus;
+        }
+        delete failed;
     }
 }

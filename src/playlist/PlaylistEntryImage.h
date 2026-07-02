@@ -86,7 +86,6 @@ private:
     volatile bool m_imageDrawn;
 
     std::thread* m_prepThread;
-    std::mutex m_prepLock;
     std::mutex m_bufferLock;
 
     std::condition_variable m_prepSignal;

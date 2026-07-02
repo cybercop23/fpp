@@ -461,7 +461,6 @@ int OpenMediaOutput(const std::string& filename) {
             }
         }
 
-        lock.lock();
         std::string vOut = getSetting("VideoOutput");
         if (vOut == "") {
             if (FileExists("/sys/class/drm/card0-HDMI-A-1/status") || FileExists("/sys/class/drm/card1-HDMI-A-1/status")) {
@@ -471,17 +470,35 @@ int OpenMediaOutput(const std::string& filename) {
             }
         }
         LogWarn(VB_MEDIAOUT, "OpenMediaOutput: Creating media output for '%s' vOut='%s'\n", tmpFile.c_str(), vOut.c_str());
-        mediaOutput = CreateMediaOutput(tmpFile, vOut);
-        LogWarn(VB_MEDIAOUT, "OpenMediaOutput: CreateMediaOutput returned %p\n", mediaOutput);
-        if (!mediaOutput) {
+        MediaOutputBase* out = CreateMediaOutput(tmpFile, vOut);
+        LogWarn(VB_MEDIAOUT, "OpenMediaOutput: CreateMediaOutput returned %p\n", out);
+        if (!out) {
             LogErr(VB_MEDIAOUT, "No Media Output handler for %s\n", tmpFile.c_str());
             WarningHolder::AddWarningTimeout(60, 30, "No media output handler for " + tmpFile + " (unsupported file type?)");
             return 0;
         }
 
+        // Install under a short lock, then run the plugin callbacks with the
+        // lock RELEASED.  playlistCallback/mediaCallback execute arbitrary
+        // plugin code inline — a native plugin that reaches anything taking
+        // mediaOutputLock (setVolume, CloseMediaOutput) would self-deadlock,
+        // and a script plugin would hold the lock for its entire fork/wait
+        // run.  Same defect and fix as PlaylistEntryMedia::OpenMediaOutput.
+        lock.lock();
+        if (mediaOutput) {
+            // Another thread opened media while we were creating ours; it
+            // won the race.  Discard ours (teardown outside the lock).
+            lock.unlock();
+            LogWarn(VB_MEDIAOUT, "OpenMediaOutput: another media output was opened concurrently, discarding %s\n", tmpFile.c_str());
+            delete out;
+            return 0;
+        }
+        mediaOutput = out;
+        lock.unlock();
+
         Json::Value root;
         root["currentEntry"]["type"] = "media";
-        root["currentEntry"]["mediaFilename"] = mediaOutput->m_mediaFilename;
+        root["currentEntry"]["mediaFilename"] = out->m_mediaFilename;
 
         if (getFPPmode() == REMOTE_MODE && firstOutCreate) {
             firstOutCreate = false;
@@ -495,11 +512,11 @@ int OpenMediaOutput(const std::string& filename) {
             root["size"] = 1;
             PluginManager::INSTANCE.playlistCallback(root, "start", "Main", 0);
         }
-        MediaDetails::INSTANCE.ParseMedia(mediaOutput->m_mediaFilename.c_str());
+        MediaDetails::INSTANCE.ParseMedia(out->m_mediaFilename.c_str());
         PluginManager::INSTANCE.mediaCallback(root, MediaDetails::INSTANCE);
 
         if (multiSync->isMultiSyncEnabled()) {
-            multiSync->SendMediaOpenPacket(mediaOutput->m_mediaFilename);
+            multiSync->SendMediaOpenPacket(out->m_mediaFilename);
         }
         return 1;
     } catch (const std::system_error& e) {
@@ -541,18 +558,32 @@ int StartMediaOutput(const std::string& filename, int msTime) {
         return 0;
     }
     std::unique_lock<std::mutex> lock(mediaOutputLock);
-    if (multiSync->isMultiSyncEnabled()) {
-        multiSync->SendMediaSyncStartPacket(mediaOutput->m_mediaFilename);
-    }
-
-    LogWarn(VB_MEDIAOUT, "StartMediaOutput: Calling Start(%d) on mediaOutput=%p\n", msTime, mediaOutput);
-    if (!mediaOutput->Start(msTime)) {
-        LogErr(VB_MEDIAOUT, "Could not start media %s\n", mediaOutput->m_mediaFilename.c_str());
-        WarningHolder::AddWarningTimeout(60, 30, "Could not start media " + mediaOutput->m_mediaFilename);
-        delete mediaOutput;
-        mediaOutput = 0;
+    // Snapshot under the lock — the pre-flight checks above read the global
+    // unlocked, and a concurrent CloseMediaOutput() may have nulled it.
+    MediaOutputBase* out = mediaOutput;
+    if (!out) {
         return 0;
     }
+    if (multiSync->isMultiSyncEnabled()) {
+        multiSync->SendMediaSyncStartPacket(out->m_mediaFilename);
+    }
+
+    LogWarn(VB_MEDIAOUT, "StartMediaOutput: Calling Start(%d) on mediaOutput=%p\n", msTime, out);
+    if (!out->Start(msTime)) {
+        LogErr(VB_MEDIAOUT, "Could not start media %s\n", out->m_mediaFilename.c_str());
+        WarningHolder::AddWarningTimeout(60, 30, "Could not start media " + out->m_mediaFilename);
+        mediaOutput = 0;
+        lock.unlock();
+        // Teardown (GStreamer state change + sleeps) never under the lock.
+        delete out;
+        return 0;
+    }
+    // MEDIA_STARTED preset commands run INLINE on this thread.  A preset
+    // containing a volume command takes mediaOutputLock again (self-deadlock
+    // on this non-recursive mutex); one containing a playlist command takes
+    // m_playlistMutex under mediaOutputLock, the reverse of every other
+    // thread's order (AB-BA).  Release before triggering.
+    lock.unlock();
     std::map<std::string, std::string> keywords;
     keywords["MEDIA_NAME"] = filename;
     if (CommandManager::INSTANCE.HasPreset("MEDIA_STARTED")) {

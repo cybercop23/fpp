@@ -266,12 +266,12 @@ void PlaylistEntryImage::PrepImage(void) {
         return;
     }
 
-    m_bufferLock.lock();
-
-    m_nextFileName = nextFile;
-
-    memset(m_buffer, 0, m_bufferSize);
-
+    // The GraphicsMagick decode/resize/cache work below only touches locals
+    // (image, blob) and the on-disk cache — m_bufferLock is needed solely for
+    // the m_buffer/m_nextFileName updates at the end.  Decoding outside the
+    // lock keeps Draw() (playlist thread) from blocking behind a slow disk
+    // read or resize.
+    bool decoded = false;
     try {
         int cols = 0;
         int rows = 0;
@@ -330,14 +330,33 @@ void PlaylistEntryImage::PrepImage(void) {
         image.magick("RGB");
         image.write(&blob);
 
-        memcpy(m_buffer, blob.data(), m_bufferSize);
+        decoded = true;
     } catch (Exception& error_) {
         LogErr(VB_PLAYLIST, "GraphicsMagick exception reading %s: %s\n",
                nextFile.c_str(), error_.what());
         WarningHolder::AddWarningTimeout(60, 34, "Could not read playlist image file: " + nextFile);
+    } catch (const std::exception& ex) {
+        // Not everything that can throw here is a Magick::Exception
+        // (std::bad_alloc, filesystem errors).  The old code held
+        // m_bufferLock via raw lock()/unlock() with only the Magick catch,
+        // so any other exception leaked the mutex and wedged both Draw()
+        // and this prep thread permanently.
+        LogErr(VB_PLAYLIST, "Exception preparing image %s: %s\n",
+               nextFile.c_str(), ex.what());
+        WarningHolder::AddWarningTimeout(60, 34, "Could not read playlist image file: " + nextFile);
     }
 
-    m_bufferLock.unlock();
+    {
+        std::lock_guard<std::mutex> lock(m_bufferLock);
+        m_nextFileName = nextFile;
+        memset(m_buffer, 0, m_bufferSize);
+        if (decoded) {
+            // Guard the copy length — a short blob previously read past the
+            // end of the blob's allocation.
+            size_t len = blob.length() < (size_t)m_bufferSize ? blob.length() : (size_t)m_bufferSize;
+            memcpy(m_buffer, blob.data(), len);
+        }
+    }
     m_imagePrepped = true;
 }
 
@@ -345,20 +364,25 @@ void PlaylistEntryImage::PrepImage(void) {
  *
  */
 void PlaylistEntryImage::Draw(void) {
-    m_bufferLock.lock();
+    {
+        // RAII guard: the old raw lock()/unlock() code returned from the
+        // !m_model branch with m_bufferLock still held; m_imageDrawn stayed
+        // false, so the next Process() tick called Draw() again and the
+        // playlist thread re-locked a mutex it already owned — a permanent
+        // wedge whenever the overlay model disappeared mid-playlist.
+        std::lock_guard<std::mutex> lock(m_bufferLock);
 
-    // We need to look this up again since the model may have disappeared
-    m_model = PixelOverlayManager::INSTANCE.getModel(m_modelName);
+        // We need to look this up again since the model may have disappeared
+        m_model = PixelOverlayManager::INSTANCE.getModel(m_modelName);
 
-    if (!m_model) {
-        LogErr(VB_PLAYLIST, "Invalid Pixel Overlay Model: '%s'\n", m_modelName.c_str());
-        WarningHolder::AddWarning(35, "Invalid Pixel Overlay Model: '" + m_modelName + "'");
-        return;
+        if (!m_model) {
+            LogErr(VB_PLAYLIST, "Invalid Pixel Overlay Model: '%s'\n", m_modelName.c_str());
+            WarningHolder::AddWarning(35, "Invalid Pixel Overlay Model: '" + m_modelName + "'");
+            return;
+        }
+
+        m_model->setData(m_buffer);
     }
-
-    m_model->setData(m_buffer);
-
-    m_bufferLock.unlock();
 
     m_imageDrawn = true;
 
@@ -384,7 +408,12 @@ void PlaylistEntryImage::PrepLoop(void) {
             lock.lock();
         }
 
-        m_prepSignal.wait(lock);
+        // The predicate guards against a lost wakeup: the destructor sets
+        // m_runLoop=false and notifies while this thread is inside
+        // PrepImage() (lock released above); a bare wait() would then sleep
+        // forever and the destructor's join() would hang whichever thread
+        // is deleting this entry.
+        m_prepSignal.wait(lock, [this] { return !m_runLoop || !m_imagePrepped; });
     }
 }
 

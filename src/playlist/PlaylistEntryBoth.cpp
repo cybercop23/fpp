@@ -57,13 +57,18 @@ int PlaylistEntryBoth::Init(Json::Value& config) {
         return 0;
 
     if (!m_mediaEntry->Init(config)) {
+        // Media init failed — run sequence-only.  The rest of this class
+        // already null-checks m_mediaEntry; the unconditional GetMediaName()
+        // call that used to sit below this branch dereferenced the pointer
+        // just nulled here.
         delete m_mediaEntry;
         m_mediaEntry = nullptr;
-    }
-    m_mediaName = m_mediaEntry->GetMediaName();
+    } else {
+        m_mediaName = m_mediaEntry->GetMediaName();
 
-    // the media will drive the timing, not the fseq
-    m_sequenceEntry->disableAdjustTiming();
+        // the media will drive the timing, not the fseq
+        m_sequenceEntry->disableAdjustTiming();
+    }
 
     if (!m_sequenceEntry->Init(config))
         return 0;
