@@ -1650,17 +1650,21 @@
 	transform: rotate(180deg);
 }
 
+/* Grid-based reveal (0fr -> 1fr) rather than a fixed max-height, so answers of
+   any length expand fully without a magic-number clip and animate evenly. */
 .fpp-faq__answer {
-	max-height: 0;
-	overflow: hidden;
-	transition: max-height var(--fpp-transition-normal);
+	display: grid;
+	grid-template-rows: 0fr;
+	transition: grid-template-rows var(--fpp-transition-normal);
 }
 
 .fpp-faq__item--open .fpp-faq__answer {
-	max-height: 300px;
+	grid-template-rows: 1fr;
 }
 
 .fpp-faq__answer-inner {
+	overflow: hidden;
+	min-height: 0;
 	padding: 0 0 var(--fpp-sp-sm) 0;
 	font-size: 13.5px;
 	color: var(--fpp-text-secondary);
