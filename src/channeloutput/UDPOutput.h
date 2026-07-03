@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <list>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -53,7 +54,7 @@ public:
 
 private:
     std::map<unsigned int, std::vector<struct mmsghdr>> messages;
-    std::map<unsigned int, SendSocketInfo*> sendSockets;
+    std::map<unsigned int, std::shared_ptr<SendSocketInfo>> sendSockets;
 
     void clearMessages();
     void clearSockets();
@@ -144,7 +145,7 @@ private:
     bool interfaceUp;
 
     bool InitNetwork();
-    SendSocketInfo* findOrCreateSocket(unsigned int key, int sc = 1);
+    std::shared_ptr<SendSocketInfo> findOrCreateSocket(unsigned int key, int sc = 1);
     void CloseNetwork();
 
     std::mutex socketMutex;
@@ -159,15 +160,26 @@ private:
     std::atomic_int failedCount;
     std::string HexToIP(unsigned int hex);
 
+    void CheckLocalDrops();
+
+    // A WorkItem owns a copy of the mmsghdr list and a reference on the socket
+    // info so a worker that outlives its frame (stuck send to a dead controller)
+    // cannot hit freed memory when PrepData rebuilds the message vectors or
+    // CloseNetwork drops the sockets.  Note the copy is shallow: the iovecs
+    // still point at per-output buffers, so a late send may transmit the
+    // *current* frame's bytes - acceptable, and no worse than it ever was.
+    // generation identifies which frame queued it.
     class WorkItem {
     public:
-        WorkItem(unsigned int i, SendSocketInfo* si, std::vector<struct mmsghdr>& m) :
+        WorkItem(unsigned int i, std::shared_ptr<SendSocketInfo> si, const std::vector<struct mmsghdr>& m, unsigned int g) :
             id(i),
             socketInfo(si),
-            msgs(m) {}
+            msgs(m),
+            generation(g) {}
         unsigned int id;
-        SendSocketInfo* socketInfo;
-        std::vector<struct mmsghdr>& msgs;
+        std::shared_ptr<SendSocketInfo> socketInfo;
+        std::vector<struct mmsghdr> msgs;
+        unsigned int generation;
     };
 
     std::mutex workMutex;
@@ -175,7 +187,23 @@ private:
     std::list<WorkItem> workQueue;
     std::atomic_int doneWorkCount;
     std::atomic_int numWorkThreads;
+    std::atomic_uint workGeneration;
     volatile bool runWorkThreads;
     bool useThreadedOutput;
     bool blockingOutput;
+
+    // fq/SO_MAX_PACING_RATE based pacing; when active the kernel clocks packets
+    // out at pacingRate per socket and the SIOCOUTQ drain waits are skipped
+    bool pacingEnabled = false;
+    unsigned int pacingRate = 0; // bytes per second
+
+    // local drop diagnostics; the check runs on a short detached thread since
+    // reading qdisc stats forks tc, which is too slow for the frame path
+    int statCheckCounter = 0;
+    std::atomic_bool statCheckRunning{ false };
+    bool statBaselineValid = false;
+    bool dropWarningActive = false;
+    uint64_t lastSndbufErrors = 0;
+    uint64_t lastTxDropped = 0;
+    uint64_t lastQdiscDropped = 0;
 };

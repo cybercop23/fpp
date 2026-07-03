@@ -89,6 +89,20 @@ std::vector<std::string> splitWithQuotes(const std::string& s, char delim = ',')
 
 bool startsWith(const std::string& str, const std::string& prefix);
 bool endsWith(const std::string& str, const std::string& suffix);
+
+// ethernet interfaces that carry show traffic (eth0, eno1, enp3s0, enx<mac>);
+// the single predicate for fppinit's qdisc/EEE setup and UDPOutput's pacing
+bool IsShowEthernetInterface(const std::string& dev);
+
+// path to the tc binary (location varies across distros)
+std::string TcPath();
+// install the fq qdisc used for UDP output pacing on an ethernet interface
+bool InstallShowTrafficQdisc(const std::string& dev);
+// does the interface have a routable IPv4 address (i.e. will it carry routed
+// UDP)?  169.254/16 link-local doesn't count: FPP's catch-all networkd config
+// puts one on every unconfigured interface, including NICs dedicated to raw
+// layer-2 outputs (ColorLight).
+bool InterfaceHasRoutableIPv4(const std::string& dev);
 bool contains(const std::string& str, const std::string& v);
 void replaceAll(std::string& str, const std::string& from, const std::string& to);
 bool replaceStart(std::string& str, const std::string& from, const std::string& to = "");

@@ -690,6 +690,20 @@ void SetThreadName(const std::string& name) {
 #endif
 }
 
+bool SetThreadRealtimePriority(int priority) {
+#ifndef PLATFORM_OSX
+    // Kernel RT throttling (sched_rt_runtime_us, default 95%) still guarantees
+    // normal-priority threads a CPU share even if an RT thread runs hot.
+    // Returns false (typically EPERM in containers/non-root) so callers can
+    // log which mode they're running in.
+    struct sched_param param;
+    param.sched_priority = priority;
+    return pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) == 0;
+#else
+    return false;
+#endif
+}
+
 std::string getPlatform() {
     std::string platform = GetFileContents("/etc/fpp/platform");
     TrimWhiteSpace(platform);

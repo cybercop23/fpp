@@ -111,6 +111,16 @@ static inline bool forceOutput() {
 void RunChannelOutputThread(void) {
     SetThreadName("FPP-ChannelOut");
 
+    // Frame timing must stay consistent under load; a delayed frame bunches
+    // with the next one and doubles the size of the UDP burst hitting the
+    // network.  The loop sleeps every frame (and kernel RT throttling caps
+    // RT CPU at ~95%) so this will not starve the rest of the system.
+    if (SetThreadRealtimePriority(10)) {
+        LogInfo(VB_CHANNELOUT, "Channel output thread running with real-time priority\n");
+    } else {
+        LogInfo(VB_CHANNELOUT, "Could not set real-time priority on channel output thread; frame timing may jitter under load\n");
+    }
+
     static long long lastStatTime = 0;
     long long startTime;
     long long sendTime;

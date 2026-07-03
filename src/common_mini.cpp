@@ -622,6 +622,73 @@ bool startsWith(const std::string& str, const std::string& prefix) {
 bool endsWith(const std::string& str, const std::string& suffix) {
     return str.size() >= suffix.size() && 0 == str.compare(str.size() - suffix.size(), suffix.size(), suffix);
 }
+bool IsShowEthernetInterface(const std::string& dev) {
+    // kernel ethernet naming only (eth0, eno1, enp3s0, enx<mac>, end0).
+    // Deliberately not every 'e' name: erspan0 or an admin's e-named
+    // bridge/veth must not get its qdisc replaced or its drops counted as
+    // FPP show-traffic drops.
+    return startsWith(dev, "eth") || startsWith(dev, "en");
+}
+std::string TcPath() {
+    return FileExists("/usr/sbin/tc") ? "/usr/sbin/tc" : "/sbin/tc";
+}
+static std::string currentRootQdisc(const std::string& dev) {
+    std::string cmd = TcPath() + " qdisc show dev " + dev + " 2>/dev/null";
+    std::string ret;
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (pipe) {
+        char buf[256];
+        while (fgets(buf, sizeof(buf), pipe)) {
+            if (strstr(buf, " root ") && strncmp(buf, "qdisc ", 6) == 0) {
+                char* start = &buf[6];
+                char* end = strchr(start, ' ');
+                if (end) {
+                    ret = std::string(start, end - start);
+                }
+                break;
+            }
+        }
+        pclose(pipe);
+    }
+    return ret;
+}
+bool InstallShowTrafficQdisc(const std::string& dev) {
+    // fq enables per-socket pacing (SO_MAX_PACING_RATE).  flow_limit must
+    // exceed the packets one paced socket can queue (wmem_max ~768KB
+    // effective / ~2KB skb truesize ~= 330) or fq silently drops the tail
+    // of large frames at enqueue, invisibly to the sender.
+    std::string cur = currentRootQdisc(dev);
+    if (cur == "fq") {
+        return true;
+    }
+    if (cur != "" && cur != "pfifo_fast" && cur != "fq_codel" && cur != "mq" && cur != "noqueue" && cur != "pfifo") {
+        // an admin deliberately installed something (htb/tbf/cake/prio/...);
+        // leave it alone - pacing will just fall back to drain-based sending
+        return false;
+    }
+    std::string cmd = TcPath() + " qdisc replace dev " + dev + " root fq flow_limit 1000 > /dev/null 2>&1";
+    return system(cmd.c_str()) == 0;
+}
+bool InterfaceHasRoutableIPv4(const std::string& dev) {
+    struct ifaddrs* ifaddr;
+    if (getifaddrs(&ifaddr) != 0) {
+        return false;
+    }
+    bool found = false;
+    for (struct ifaddrs* ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET && dev == ifa->ifa_name) {
+            uint32_t addr = ntohl(((struct sockaddr_in*)ifa->ifa_addr)->sin_addr.s_addr);
+            // 169.254.0.0/16 link-local is what every unconfigured interface
+            // gets from the catch-all networkd config; not a show network
+            if ((addr & 0xFFFF0000) != 0xA9FE0000 && addr != 0) {
+                found = true;
+                break;
+            }
+        }
+    }
+    freeifaddrs(ifaddr);
+    return found;
+}
 bool contains(const std::string& str, const std::string& v) {
     return str.find(v) != std::string::npos;
 }

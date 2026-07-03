@@ -104,6 +104,7 @@ inline std::string toStdStringAndFree(char* v) {
 }
 
 void SetThreadName(const std::string& name);
+bool SetThreadRealtimePriority(int priority);
 
 void TransposeBits32x32(uint32_t *dst, uint32_t *src);
 

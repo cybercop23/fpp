@@ -163,6 +163,20 @@ if (file_exists(__DIR__ . "/fppdefines.php")) {
 
 						</div>
 						<div class="col-md-auto form-inline" <? if ($uiLevel < 1) { ?> style="display:none;" <? } ?>>
+							<div><i class="fas fa-fw fa-graduation-cap ui-level-1"></i><b> Pacing:</b></div>
+							<div>
+								<select class='form-select' id="E131PacingRate" onchange="PacingRateChanged();"
+									title="Maximum rate data is sent to each unicast controller. Pacing to what the controller's port can absorb prevents switch buffer overruns and silently dropped packets. Most pixel controllers have 100Mbps ports, so 90Mbps is recommended. Multicast/broadcast are not paced; Disabled sends at full line rate.">
+									<option value="0">Disabled</option>
+									<option value="45">45 Mbps</option>
+									<option value="90" selected>90 Mbps</option>
+									<option value="200">200 Mbps</option>
+									<option value="450">450 Mbps</option>
+									<option value="900">900 Mbps</option>
+								</select>
+							</div>
+						</div>
+						<div class="col-md-auto form-inline" <? if ($uiLevel < 1) { ?> style="display:none;" <? } ?>>
 							<div><i class="fas fa-fw fa-graduation-cap ui-level-1"></i><b> Sending:</b></div>
 							<div>
 								<select class='form-select' id="E131ThreadedOutput">

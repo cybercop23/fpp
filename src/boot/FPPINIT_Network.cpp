@@ -518,6 +518,28 @@ void setupNetwork(bool fullReload) {
 
     printf("FPP - Setting max IGMP memberships\n");
     exec("/usr/sbin/sysctl -w net/core/rmem_max=393216 net/core/wmem_max=393216 net/ipv4/igmp_max_memberships=512  > /dev/null 2>&1");
+
+    printf("FPP - Configuring ethernet interfaces for show traffic\n");
+    for (const auto& entry : std::filesystem::directory_iterator("/sys/class/net/")) {
+        std::string dev = entry.path().filename();
+        if (IsShowEthernetInterface(dev)) {
+            if (InterfaceHasRoutableIPv4(dev)) {
+                // fq is required for the per-socket pacing the UDP channel
+                // outputs use, and is a good general-purpose default even
+                // when pacing is off (whether to pace is decided per
+                // destination at runtime).  Only useful on interfaces that
+                // can carry routed UDP, so an address-less interface
+                // dedicated to a raw layer-2 output (ColorLight) keeps its
+                // default qdisc.  Not applied to wifi (mac80211 has its own
+                // internal queueing), and the helper refuses to replace an
+                // admin-installed custom qdisc.
+                InstallShowTrafficQdisc(dev);
+            }
+            // Energy Efficient Ethernet causes latency spikes and drops with
+            // bursty traffic on several NICs (including the Pi's)
+            exec("/usr/sbin/ethtool --set-eee " + dev + " eee off > /dev/null 2>&1");
+        }
+    }
     if (ipForward) {
         exec("/usr/sbin/sysctl net.ipv4.ip_forward=1");
     } else {

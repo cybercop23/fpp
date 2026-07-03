@@ -27,7 +27,9 @@
 #include <unistd.h>
 
 #include <curl/curl.h>
+#include <filesystem>
 #include <set>
+#include <sstream>
 
 #include "../CurlManager.h"
 #include "../Warnings.h"
@@ -71,6 +73,94 @@ static inline std::string createWarning(const std::string& host, const std::stri
     return "Cannot Ping " + type + " Channel Data Target " + host + " " + description;
 }
 
+#ifndef PLATFORM_OSX
+// SO_MAX_PACING_RATE only works if the interface's root qdisc is fq.
+// Some kernels expose the qdisc name in sysfs; fall back to asking tc.
+static bool interfaceHasFQ(const std::string& iface) {
+    std::string qdisc = GetFileContents("/sys/class/net/" + iface + "/qdisc");
+    if (!qdisc.empty()) {
+        TrimWhiteSpace(qdisc);
+        return qdisc == "fq";
+    }
+    // some kernels don't expose the qdisc name in sysfs; ask tc
+    std::string cmd = TcPath() + " qdisc show dev " + iface + " 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (pipe) {
+        char buf[256];
+        while (fgets(buf, sizeof(buf), pipe)) {
+            if (strstr(buf, " root ") && strncmp(buf, "qdisc fq ", 9) == 0) {
+                qdisc = "fq";
+            }
+        }
+        pclose(pipe);
+    }
+    return qdisc == "fq";
+}
+// Unicast sockets follow the routing table, not the configured output
+// interface, and the interface scan at startup can race the network coming
+// up.  fppinit installs fq on every ethernet interface at boot, so consider
+// pacing available if any of them has it.  Whether a specific destination's
+// socket is actually paced is decided per destination by looking up the
+// egress interface of its route (see findOrCreateSocket).
+static bool anyEthernetHasFQ(const std::string& primary) {
+    if (!primary.empty() && interfaceHasFQ(primary)) {
+        return true;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator("/sys/class/net/")) {
+        std::string dev = entry.path().filename();
+        if (IsShowEthernetInterface(dev) && dev != primary && interfaceHasFQ(dev)) {
+            return true;
+        }
+    }
+    return false;
+}
+// Send buffer for paced sockets: the kernel silently caps SO_SNDBUF at
+// wmem_max (set by fppinit at boot), so ask for exactly what it will grant.
+static int pacedSndBufSize() {
+    static int size = []() {
+        int v = atoi(GetFileContents("/proc/sys/net/core/wmem_max").c_str());
+        return v > 0 ? v : 393216;
+    }();
+    return size;
+}
+// Which interface will packets to this destination actually leave through?
+// A connect() on a UDP socket does the route lookup without sending anything.
+// (The address->interface tail is intentionally not FindInterfaceForIP(): that
+// helper returns a static buffer and round-trips through strings; comparing
+// s_addr directly is thread-safe and exact.)
+static std::string egressInterfaceFor(in_addr_t dest) {
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) {
+        return "";
+    }
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(53);
+    sa.sin_addr.s_addr = dest;
+    std::string ret;
+    if (connect(s, (struct sockaddr*)&sa, sizeof(sa)) == 0) {
+        struct sockaddr_in local;
+        socklen_t len = sizeof(local);
+        if (getsockname(s, (struct sockaddr*)&local, &len) == 0) {
+            struct ifaddrs *interfaces, *tmp;
+            if (getifaddrs(&interfaces) == 0) {
+                for (tmp = interfaces; tmp; tmp = tmp->ifa_next) {
+                    if (tmp->ifa_addr && tmp->ifa_addr->sa_family == AF_INET &&
+                        ((struct sockaddr_in*)tmp->ifa_addr)->sin_addr.s_addr == local.sin_addr.s_addr) {
+                        ret = tmp->ifa_name;
+                        break;
+                    }
+                }
+                freeifaddrs(interfaces);
+            }
+        }
+    }
+    close(s);
+    return ret;
+}
+#endif
+
 class SendSocketInfo {
 public:
     SendSocketInfo() {
@@ -86,32 +176,48 @@ public:
     }
 
     std::vector<int> sockets;
-    int errCount;
+    // read/written by workers and the frame thread without a common lock;
+    // atomic so the errCount >= 3 re-ping trigger can't act on a torn value
+    std::atomic_int errCount;
     int curSocket;
     bool preventClose = false;
+    // kernel (fq) pacing is active on these sockets; drain waits are the
+    // qdisc's job and EAGAIN means "wait", not "get another socket".
+    // pacedChecked latches once the destination's route has resolved; until
+    // then (e.g. interface still waiting on DHCP at startup) the pacing
+    // decision is re-attempted periodically (pacedCheckCountdown frames).
+    bool paced = false;
+    bool pacedChecked = false;
+    int pacedCheckCountdown = 0;
+    // Serializes all use/mutation of sockets/curSocket (errCount is atomic
+    // and accessed outside the lock).  A worker that outlives its frame
+    // (stuck send) can still be inside SendMessages when the next frame's
+    // worker gets the same destination, and SendMessages rotates curSocket
+    // and grows the sockets vector on EAGAIN.
+    std::mutex sendLock;
 };
 
 UDPOutputMessages::UDPOutputMessages() {
 }
 UDPOutputMessages::~UDPOutputMessages() {
-    for (auto& si : sendSockets) {
-        delete si.second;
-    }
     sendSockets.clear();
 }
 int UDPOutputMessages::GetSocket(unsigned int key) {
-    SendSocketInfo* info = sendSockets[key];
-    if (info && !info->sockets.empty()) {
-        return info->sockets[0];
+    std::shared_ptr<SendSocketInfo>& info = sendSockets[key];
+    if (info) {
+        std::lock_guard<std::mutex> lg(info->sendLock);
+        if (!info->sockets.empty()) {
+            return info->sockets[0];
+        }
     }
     return -1;
 }
 void UDPOutputMessages::ForceSocket(unsigned int key, int socket, bool preventClose) {
-    SendSocketInfo* info = sendSockets[key];
-    if (info == nullptr) {
-        info = new SendSocketInfo();
-        sendSockets[key] = info;
+    std::shared_ptr<SendSocketInfo>& info = sendSockets[key];
+    if (!info) {
+        info = std::make_shared<SendSocketInfo>();
     }
+    std::lock_guard<std::mutex> lg(info->sendLock);
     if (!info->preventClose) {
         for (int x = 0; x < info->sockets.size(); x++) {
             close(info->sockets[x]);
@@ -130,9 +236,8 @@ void UDPOutputMessages::clearMessages() {
     }
 }
 void UDPOutputMessages::clearSockets() {
-    for (auto& si : sendSockets) {
-        delete si.second;
-    }
+    // sockets are shared_ptrs; any worker thread still mid-send keeps its
+    // SendSocketInfo alive until it finishes
     sendSockets.clear();
 }
 
@@ -251,6 +356,7 @@ UDPOutput::UDPOutput(unsigned int startChannel, unsigned int channelCount) :
     networkCallbackId(0),
     doneWorkCount(0),
     numWorkThreads(0),
+    workGeneration(0),
     runWorkThreads(true),
     useThreadedOutput(true),
     blockingOutput(false) {
@@ -263,6 +369,9 @@ UDPOutput::~UDPOutput() {
     INSTANCE = nullptr;
     NetworkMonitor::INSTANCE.removeCallback(networkCallbackId);
     while (numWorkThreads) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    while (statCheckRunning) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     // Need to make sure all curls are processed before we delete the outputs
@@ -356,6 +465,44 @@ int UDPOutput::Init(Json::Value config) {
         outInterface = "eth0";
     }
 
+#ifndef PLATFORM_OSX
+    // Kernel-level packet pacing.  Bursting a full frame at line rate overruns
+    // switch buffers on the 1G->100M speed mismatch to most pixel controllers
+    // and the drops are silent.  With the fq qdisc installed (fppinit does this
+    // at boot), SO_MAX_PACING_RATE lets the kernel clock each destination's
+    // packets out at a rate the far end can actually absorb.
+    // pacing rate lives in the outputs config (hot-reloadable with the rest
+    // of it); fall back to the old global setting for configs saved before
+    // the UI moved, then to the 90Mbps default
+    int pacingMbps = config.isMember("pacingRate") ? config["pacingRate"].asInt() : getSettingInt("UDPPacingRate", 90);
+    if (pacingMbps > 0) {
+        if (!anyEthernetHasFQ(outInterface)) {
+            // fppinit only installs fq at boot; if the user enabled pacing
+            // since then, install it now so the setting takes effect on the
+            // fppd restart it advertises rather than silently needing a
+            // reboot.  Only interfaces with an IPv4 address can carry the
+            // routed UDP we pace - an address-less interface dedicated to a
+            // raw layer-2 output (ColorLight) keeps its default qdisc.
+            for (const auto& entry : std::filesystem::directory_iterator("/sys/class/net/")) {
+                std::string dev = entry.path().filename();
+                if (IsShowEthernetInterface(dev) && InterfaceHasRoutableIPv4(dev)) {
+                    InstallShowTrafficQdisc(dev);
+                }
+            }
+        }
+        if (anyEthernetHasFQ(outInterface)) {
+            pacingEnabled = true;
+            pacingRate = (unsigned int)(pacingMbps * 1000000ULL / 8);
+            LogInfo(VB_CHANNELOUT, "UDP output pacing enabled at %d Mbps per destination\n", pacingMbps);
+        } else {
+            LogInfo(VB_CHANNELOUT, "UDP output pacing requested but %s does not have the fq qdisc, using buffer drain pacing\n",
+                    outInterface.c_str());
+        }
+    } else {
+        LogInfo(VB_CHANNELOUT, "UDP output pacing disabled, using buffer drain pacing\n");
+    }
+#endif
+
     bool disableFakeBridges = getSettingInt("DisableFakeNetworkBridges");
 
     for (auto o : outputs) {
@@ -376,6 +523,30 @@ int UDPOutput::Init(Json::Value config) {
 
     std::function<void(NetworkMonitor::NetEventType, int, const std::string&)> f = [this](NetworkMonitor::NetEventType i, int up, const std::string& s) {
         std::string interface = outInterface;
+        if ((i == NetworkMonitor::NetEventType::NEW_ADDR && up) || i == NetworkMonitor::NetEventType::DEL_ADDR) {
+            // any address change can move routes; re-evaluate the pacing
+            // decision for every unicast destination.  This covers both
+            // directions: a destination that couldn't be paced yet (route
+            // resolved via wifi while ethernet waited on DHCP) and a paced
+            // destination whose route failed over to a non-fq interface,
+            // which must be un-paced or it sends unpaced line-rate bursts
+            // with the large buffer and no drain waits.  Stagger the
+            // re-checks across frames so one network event doesn't trigger
+            // a route-lookup storm in a single frame.
+            std::unique_lock<std::mutex> lk(socketMutex);
+            int stagger = 0;
+            for (auto& si : messages.sendSockets) {
+                if (si.second) {
+                    // try_lock: blocking here (while holding socketMutex) on a
+                    // straggler worker would transitively stall the frame thread
+                    std::unique_lock<std::mutex> lg(si.second->sendLock, std::try_to_lock);
+                    if (lg.owns_lock()) {
+                        si.second->pacedChecked = false;
+                        si.second->pacedCheckCountdown = stagger++ % 16;
+                    }
+                }
+            }
+        }
         if (s == interface && i == NetworkMonitor::NetEventType::NEW_ADDR && up) {
             if (!interfaceUp) {
                 LogInfo(VB_CHANNELOUT, "UDP Interface %s now up\n", s.c_str());
@@ -495,6 +666,9 @@ static void flushBuffers(int socket, int msgs, int total) {
 }
 
 constexpr int MSGS_PER_SENDMMSG = 8;
+// kernel-paced sockets take the whole frame in one call (kernel caps a single
+// sendmmsg at UIO_MAXIOV=1024 anyway)
+constexpr int PACED_MSGS_PER_SENDMMSG = 1024;
 int UDPOutput::SendMessages(unsigned int socketKey, SendSocketInfo* socketInfo, std::vector<struct mmsghdr>& sendmsgs) {
     errno = 0;
     struct mmsghdr* msgs = &sendmsgs[0];
@@ -504,12 +678,37 @@ int UDPOutput::SendMessages(unsigned int socketKey, SendSocketInfo* socketInfo, 
     }
 
     int newSockKey = socketKey;
+    // Serialize against a straggler worker from a previous frame still sending
+    // to this destination; SendMessages mutates curSocket/sockets.  Blocking
+    // (rather than try_lock) is intentional and safe for the frame thread:
+    // workers exclusively own the early-message keys, and the frame thread
+    // only calls SendMessages for late/sync keys (threaded mode) or when no
+    // workers exist at all (non-threaded mode), so it can never block on a
+    // straggler here.
+    std::lock_guard<std::mutex> sendGuard(socketInfo->sendLock);
+    if (socketInfo->sockets.empty()) {
+        return 0;
+    }
+    if (socketInfo->curSocket < 0 || socketInfo->curSocket >= socketInfo->sockets.size()) {
+        socketInfo->curSocket = 0;
+    }
     int sendSocket = socketInfo->sockets[socketInfo->curSocket];
     errno = 0;
     // uint64_t st = GetTimeMicros();
 
+    // when the kernel is pacing this socket (fq + SO_MAX_PACING_RATE) the
+    // socket buffer is sized for the whole frame; hand everything over at once
+    // and skip the drain waits, the qdisc clocks packets out at the target rate
+    const bool paced = socketInfo->paced;
+    const int maxBatch = paced ? PACED_MSGS_PER_SENDMMSG : MSGS_PER_SENDMMSG;
+
     int outputCount = 0;
-    if (blockingOutput) {
+    if (blockingOutput && !paced) {
+        // Blocking mode only applies to unpaced sockets.  For paced sockets
+        // the kernel throttling that blocking mode approximates is done
+        // properly by the fq qdisc, and the per-packet 1ms SO_SNDTIMEO would
+        // abort a frame that legitimately sits in the paced buffer; they
+        // always use the batched path below.
         int errorCount = 0;
         for (int x = 0; x < msgCount; x++) {
             flushBuffers(sendSocket, x, msgCount);
@@ -527,29 +726,33 @@ int UDPOutput::SendMessages(unsigned int socketKey, SendSocketInfo* socketInfo, 
             }
         }
     } else {
-        int oc = sendmmsg(sendSocket, msgs, msgCount > MSGS_PER_SENDMMSG ? MSGS_PER_SENDMMSG : msgCount, MSG_DONTWAIT);
+        int oc = sendmmsg(sendSocket, msgs, std::min(msgCount, maxBatch), MSG_DONTWAIT);
         if (oc > 0) {
             outputCount += oc;
         }
         if (outputCount != msgCount) {
 #ifndef PLATFORM_OSX
-            flushBuffers(sendSocket, outputCount, msgCount);
+            if (!paced) {
+                flushBuffers(sendSocket, outputCount, msgCount);
+            }
 #else
             // On OSX we have no good way to check the socket buffer, so just
             // sleep a bit to allow the stack to flush
             std::this_thread::sleep_for(std::chrono::microseconds(100));
 #endif
             int outMsgCnt = msgCount - outputCount;
-            oc = sendmmsg(sendSocket, &msgs[outputCount], outMsgCnt > MSGS_PER_SENDMMSG ? MSGS_PER_SENDMMSG : outMsgCnt, MSG_DONTWAIT);
+            oc = sendmmsg(sendSocket, &msgs[outputCount], std::min(outMsgCnt, maxBatch), MSG_DONTWAIT);
             while (oc > 0) {
                 outputCount += oc;
 #ifndef PLATFORM_OSX
-                flushBuffers(sendSocket, outputCount, msgCount);
+                if (!paced) {
+                    flushBuffers(sendSocket, outputCount, msgCount);
+                }
 #else
                 std::this_thread::sleep_for(std::chrono::microseconds(100));
 #endif
                 outMsgCnt = msgCount - outputCount;
-                oc = sendmmsg(sendSocket, &msgs[outputCount], outMsgCnt > MSGS_PER_SENDMMSG ? MSGS_PER_SENDMMSG : outMsgCnt, MSG_DONTWAIT);
+                oc = sendmmsg(sendSocket, &msgs[outputCount], std::min(outMsgCnt, maxBatch), MSG_DONTWAIT);
             }
         }
     }
@@ -558,9 +761,26 @@ int UDPOutput::SendMessages(unsigned int socketKey, SendSocketInfo* socketInfo, 
     // printf("MSG: %d/%d    %d     \n", outputCount, msgCount, (int)tm);
 
     int errCount = 0;
+    auto retryStart = std::chrono::steady_clock::now();
     while (outputCount != msgCount) {
+        // Absolute wall-clock bound in addition to the consecutive-failure
+        // count: a destination that needs more data than the pacing rate
+        // allows keeps making slow progress (resetting errCount), and without
+        // this cap the worker would hold sendLock across whole frames as a
+        // permanent straggler.
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - retryStart).count() > 100) {
+            LogErr(VB_CHANNELOUT, "sendmmsg() send to %s exceeded time budget, dropping remainder of frame (output count: %d/%d)\n",
+                   HexToIP(socketKey).c_str(), outputCount, msgCount);
+            return outputCount;
+        }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            if (socketKey != BROADCAST_MESSAGES_KEY) {
+            if (paced) {
+                // the qdisc is intentionally holding packets; wait for the
+                // buffer to drain at the pacing rate rather than spreading the
+                // overflow across additional sockets, which would multiply the
+                // per-controller rate cap and defeat the pacing
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            } else if (socketKey != BROADCAST_MESSAGES_KEY) {
                 ++socketInfo->curSocket;
                 if (socketInfo->curSocket == socketInfo->sockets.size()) {
                     if (socketInfo->sockets.size() < 5) {
@@ -572,7 +792,10 @@ int UDPOutput::SendMessages(unsigned int socketKey, SendSocketInfo* socketInfo, 
                 }
                 sendSocket = socketInfo->sockets[socketInfo->curSocket];
                 if (sendSocket == -1) {
-                    socketInfo->sockets[socketInfo->curSocket] = createSocket();
+                    // replacement must keep the multicast setup or the packets
+                    // will egress the default route instead of the show network
+                    socketInfo->sockets[socketInfo->curSocket] = createSocket(0, false,
+                                                                              socketKey == MULTICAST_MESSAGES_KEY || socketKey == LATE_MULTICAST_MESSAGES_KEY);
                     sendSocket = socketInfo->sockets[socketInfo->curSocket];
                 }
             } else {
@@ -591,6 +814,14 @@ int UDPOutput::SendMessages(unsigned int socketKey, SendSocketInfo* socketInfo, 
         errno = 0;
         int oc = sendmmsg(sendSocket, &msgs[outputCount], msgCount - outputCount, MSG_DONTWAIT);
         while (oc > 0) {
+            if (paced) {
+                // making progress; for a paced socket EAGAIN is the expected
+                // steady state when a frame exceeds the buffer, so only give
+                // up after consecutive no-progress attempts.  Unpaced sockets
+                // keep the historical ~10-attempt bound so a congested
+                // destination cannot pin a worker for a whole frame.
+                errCount = 0;
+            }
             outputCount += oc;
             std::this_thread::sleep_for(std::chrono::microseconds(100));
             oc = sendmmsg(sendSocket, &msgs[outputCount], msgCount - outputCount, MSG_DONTWAIT);
@@ -601,6 +832,12 @@ int UDPOutput::SendMessages(unsigned int socketKey, SendSocketInfo* socketInfo, 
 
 static void DoWorkThread(UDPOutput* output) {
     SetThreadName("FPP-UDPWork");
+    // Keep the send threads from being delayed by other load (video decode,
+    // php, etc.).  A delayed frame bunches with the next one and doubles the
+    // burst hitting the switch.  Priority sits below the output thread (10)
+    // so the frame loop always preempts stragglers; worker count can grow to
+    // the destination fan-out and these all park on workSignal when idle.
+    SetThreadRealtimePriority(5);
     output->BackgroundOutputWork();
 }
 
@@ -612,12 +849,12 @@ void UDPOutput::BackgroundOutputWork() {
             workSignal.wait(lock);
         }
         if (!workQueue.empty()) {
-            WorkItem i = workQueue.front();
+            WorkItem i = std::move(workQueue.front());
             workQueue.pop_front();
             lock.unlock();
 
             auto t1 = clock.now();
-            int outputCount = SendMessages(i.id, i.socketInfo, i.msgs);
+            int outputCount = SendMessages(i.id, i.socketInfo.get(), i.msgs);
             auto t2 = clock.now();
 
             long diff = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
@@ -627,14 +864,23 @@ void UDPOutput::BackgroundOutputWork() {
                 // failed to send all messages or it took more than 100ms to send them
                 LogErr(VB_CHANNELOUT, "%s() failed for UDP output (IP: %s   output count: %d/%d   time: %u ms    errCount: %d) with error: %d   %s\n",
                        blockingOutput ? "sendmsg" : "sendmmsg", HexToIP(i.id).c_str(),
-                       outputCount, i.msgs.size(), diff, i.socketInfo->errCount,
+                       outputCount, i.msgs.size(), diff, i.socketInfo->errCount.load(),
                        errno,
                        FPPstrerror(errno));
             } else {
                 i.socketInfo->errCount = 0;
             }
 
-            doneWorkCount++;
+            // only count work for the current frame; if SendData timed out and
+            // moved on, this completion must not skew the next frame's count.
+            // The check and increment must be one unit under workMutex or a
+            // generation bump between them counts old work toward the new frame.
+            {
+                std::unique_lock<std::mutex> countLock(workMutex);
+                if (i.generation == workGeneration) {
+                    doneWorkCount++;
+                }
+            }
         }
     }
 
@@ -646,16 +892,43 @@ int UDPOutput::SendData(unsigned char* channelData) {
     if (!enabled || messages.messages.empty()) {
         return 0;
     }
+    if (++statCheckCounter >= 1500) {
+        // roughly once a minute at typical frame rates; run off-thread so the
+        // tc fork in the qdisc check can't hiccup the frame
+        statCheckCounter = 0;
+        if (!statCheckRunning.exchange(true)) {
+            std::thread([this]() {
+                SetThreadName("FPP-UDPStats");
+                try {
+                    CheckLocalDrops();
+                } catch (...) {
+                    // an escaped exception on a detached thread would call
+                    // std::terminate and take down the show over a diagnostic
+                }
+                statCheckRunning = false;
+            }).detach();
+        }
+    }
     std::chrono::high_resolution_clock clock;
     if (useThreadedOutput) {
-        doneWorkCount = 0;
+        unsigned int generation;
+        {
+            // start a new generation so late completions of the previous
+            // frame's work don't count toward this frame.  Stale items are
+            // left in the queue: workers will still send them (late) so a
+            // frame that carried a change the dedup logic won't resend is
+            // never silently dropped.
+            std::unique_lock<std::mutex> lock(workMutex);
+            generation = ++workGeneration;
+            doneWorkCount = 0;
+        }
         int total = 0;
         auto t1 = clock.now();
         for (auto& msgs : messages.messages) {
             if (!msgs.second.empty() && msgs.first < LATE_MESSAGES_START) {
-                SendSocketInfo* socketInfo = findOrCreateSocket(msgs.first);
+                std::shared_ptr<SendSocketInfo> socketInfo = findOrCreateSocket(msgs.first);
                 std::unique_lock<std::mutex> lock(workMutex);
-                workQueue.push_back(WorkItem(msgs.first, socketInfo, msgs.second));
+                workQueue.emplace_back(msgs.first, socketInfo, msgs.second, generation);
                 lock.unlock();
                 workSignal.notify_one();
                 ++total;
@@ -677,24 +950,70 @@ int UDPOutput::SendData(unsigned char* channelData) {
         }
         if (doneWorkCount == total) {
 #ifndef PLATFORM_OSX
-            // now make sure the buffers are drained for the early packets do that they are
-            // fully received before we send the late packets
+            // now make sure the buffers are drained for the early packets so that they are
+            // fully received before we send the late packets (sync or broadcast).
+            // Only worth the wait if there actually are late packets this frame.
+            bool haveLate = false;
             for (auto& msgs : messages.messages) {
-                if (!msgs.second.empty() && msgs.first < LATE_MESSAGES_START) {
-                    int bytes_in_buffer = 0;
-                    SendSocketInfo* socketInfo = findOrCreateSocket(msgs.first);
-                    int sendSocket = socketInfo->sockets[socketInfo->curSocket];
-                    flushBuffers(sendSocket, msgs.second.size(), msgs.second.size());
+                if (!msgs.second.empty() && msgs.first >= LATE_MESSAGES_START) {
+                    haveLate = true;
+                    break;
+                }
+            }
+            if (haveLate) {
+                // Collect every early-message socket that may still have data
+                // queued, then wait on them together: the drains overlap in
+                // wall-clock, so the bound is one drain, not one per destination.
+                std::vector<int> drainFds;
+                bool anyPaced = false;
+                for (auto& msgs : messages.messages) {
+                    if (!msgs.second.empty() && msgs.first < LATE_MESSAGES_START) {
+                        std::shared_ptr<SendSocketInfo> socketInfo = findOrCreateSocket(msgs.first);
+                        // try_lock: a straggler worker still sending here means
+                        // sync ordering is already lost for this destination;
+                        // don't stall the frame thread waiting for it
+                        std::unique_lock<std::mutex> lg(socketInfo->sendLock, std::try_to_lock);
+                        if (lg.owns_lock() && !socketInfo->sockets.empty()) {
+                            drainFds.push_back(socketInfo->sockets[socketInfo->curSocket]);
+                            anyPaced |= socketInfo->paced;
+                        }
+                    }
+                }
+                // Paced packets sit in the fq qdisc for several ms; sleep
+                // proportionally to the deepest queue instead of busy-polling.
+                // The bound must cover a full send buffer draining at the
+                // pacing rate (~34ms for 384KB at 90Mbps) or the sync packet
+                // can beat the tail of the data it synchronizes.
+                int totalBudget = anyPaced ? 35000 : 5000;
+                int waited = 0;
+                while (waited < totalBudget) {
+                    int maxBytes = 0;
+                    for (int fd : drainFds) {
+                        int b = 0;
+                        if (ioctl(fd, SIOCOUTQ, &b) == 0 && b > maxBytes) {
+                            maxBytes = b;
+                        }
+                    }
+                    if (maxBytes <= 1024) {
+                        break;
+                    }
+                    int us = 100;
+                    if (anyPaced) {
+                        us = std::clamp((int)(((uint64_t)maxBytes * 8000000ULL) / pacingRate), 100, 2000);
+                    }
+                    us = std::min(us, totalBudget - waited);
+                    std::this_thread::sleep_for(std::chrono::microseconds(us));
+                    waited += us;
                 }
             }
 #endif
             // now output the LATE/Broadcast packets (likely sync packets)
             for (auto& msgs : messages.messages) {
                 if (!msgs.second.empty()) {
-                    SendSocketInfo* socketInfo = findOrCreateSocket(msgs.first);
+                    std::shared_ptr<SendSocketInfo> socketInfo = findOrCreateSocket(msgs.first);
                     if (msgs.first >= LATE_MESSAGES_START) {
                         t1 = clock.now();
-                        int outputCount = SendMessages(msgs.first, socketInfo, msgs.second);
+                        int outputCount = SendMessages(msgs.first, socketInfo.get(), msgs.second);
                         t2 = clock.now();
                         long diff = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
                         if ((outputCount != msgs.second.size()) || (diff > 100)) {
@@ -703,7 +1022,7 @@ int UDPOutput::SendData(unsigned char* channelData) {
                             // failed to send all messages or it took more than 100ms to send them
                             LogErr(VB_CHANNELOUT, "sendmmsg() failed for UDP output (IP: %s   output count: %d/%d   time: %u ms    errCount: %d) with error: %d   %s\n",
                                    HexToIP(msgs.first).c_str(),
-                                   outputCount, msgs.second.size(), diff, socketInfo->errCount,
+                                   outputCount, msgs.second.size(), diff, socketInfo->errCount.load(),
                                    errno,
                                    FPPstrerror(errno));
                         } else {
@@ -722,9 +1041,9 @@ int UDPOutput::SendData(unsigned char* channelData) {
     }
     for (auto& msgs : messages.messages) {
         if (!msgs.second.empty()) {
-            SendSocketInfo* socketInfo = findOrCreateSocket(msgs.first);
+            std::shared_ptr<SendSocketInfo> socketInfo = findOrCreateSocket(msgs.first);
             auto t1 = clock.now();
-            int outputCount = SendMessages(msgs.first, socketInfo, msgs.second);
+            int outputCount = SendMessages(msgs.first, socketInfo.get(), msgs.second);
             auto t2 = clock.now();
             long diff = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
             if ((outputCount != msgs.second.size()) || (diff > 100)) {
@@ -733,7 +1052,7 @@ int UDPOutput::SendData(unsigned char* channelData) {
                 // failed to send all messages or it took more than 100ms to send them
                 LogErr(VB_CHANNELOUT, "sendmmsg() failed for UDP output (IP: %s   output count: %d/%d   time: %u ms    errCount: %d) with error: %d   %s\n",
                        HexToIP(msgs.first).c_str(),
-                       outputCount, msgs.second.size(), diff, socketInfo->errCount,
+                       outputCount, msgs.second.size(), diff, socketInfo->errCount.load(),
                        errno,
                        FPPstrerror(errno));
 
@@ -748,6 +1067,102 @@ int UDPOutput::SendData(unsigned char* channelData) {
         }
     }
     return 1;
+}
+
+static const std::string LOCAL_DROP_WARNING = "The network interface is dropping outgoing packets before they reach the wire. The link may be down, saturated, or misconfigured. See logs for details.";
+
+#ifndef PLATFORM_OSX
+// Total packets dropped by the qdiscs on the ethernet interfaces.  This is
+// the only place fq enqueue drops (e.g. flow_limit) are visible: they return
+// NET_XMIT_CN, which UDP reports to the sender as success, so neither
+// SndbufErrors nor tx_dropped ever increments for them.
+static uint64_t qdiscDroppedCount() {
+    uint64_t total = 0;
+    for (const auto& entry : std::filesystem::directory_iterator("/sys/class/net/")) {
+        std::string dev = entry.path().filename();
+        if (!IsShowEthernetInterface(dev)) {
+            continue;
+        }
+        std::string cmd = TcPath() + " -s qdisc show dev " + dev + " 2>/dev/null";
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (pipe) {
+            char buf[512];
+            while (fgets(buf, sizeof(buf), pipe)) {
+                const char* d = strstr(buf, "(dropped ");
+                if (d) {
+                    total += strtoull(d + 9, nullptr, 10);
+                }
+            }
+            pclose(pipe);
+        }
+    }
+    return total;
+}
+#endif
+
+void UDPOutput::CheckLocalDrops() {
+#ifndef PLATFORM_OSX
+    // The protocols have no acks, so the only drops we can actually see are the
+    // local ones.  Surface them so users can tell "player is dropping" apart
+    // from "switch/controller is dropping".
+    uint64_t sndbufErrors = 0;
+    std::istringstream snmp(GetFileContents("/proc/net/snmp"));
+    std::string line;
+    std::vector<std::string> headers;
+    while (std::getline(snmp, line)) {
+        if (line.rfind("Udp:", 0) == 0) {
+            std::istringstream ss(line);
+            std::vector<std::string> tokens;
+            std::string token;
+            while (ss >> token) {
+                tokens.push_back(token);
+            }
+            if (headers.empty()) {
+                headers = tokens;
+            } else {
+                for (size_t x = 1; x < headers.size() && x < tokens.size(); x++) {
+                    if (headers[x] == "SndbufErrors") {
+                        // strtoull rather than stoull: this runs on a detached
+                        // thread where an unexpected exception is fatal
+                        sndbufErrors = strtoull(tokens[x].c_str(), nullptr, 10);
+                    }
+                }
+                break;
+            }
+        }
+    }
+    uint64_t txDropped = strtoull(GetFileContents("/sys/class/net/" + outInterface + "/statistics/tx_dropped").c_str(), nullptr, 10);
+    uint64_t qdiscDropped = qdiscDroppedCount();
+
+    // counters can go backwards if the interface bounces or a driver reloads;
+    // rebase silently rather than computing a huge unsigned delta
+    if (statBaselineValid && sndbufErrors >= lastSndbufErrors && txDropped >= lastTxDropped && qdiscDropped >= lastQdiscDropped) {
+        uint64_t sbDelta = sndbufErrors - lastSndbufErrors;
+        uint64_t txDelta = txDropped - lastTxDropped;
+        uint64_t qdDelta = qdiscDropped - lastQdiscDropped;
+        if (sbDelta) {
+            // host-wide counter (covers every UDP socket of every process),
+            // so log it as a diagnostic breadcrumb but don't raise a warning
+            LogWarn(VB_CHANNELOUT, "System-wide UDP send buffer errors since last check: %llu (may include non-FPP traffic)\n",
+                    (unsigned long long)sbDelta);
+        }
+        if (txDelta || qdDelta) {
+            LogWarn(VB_CHANNELOUT, "Local packet drops since last check: %llu on interface %s, %llu in ethernet qdiscs\n",
+                    (unsigned long long)txDelta, outInterface.c_str(), (unsigned long long)qdDelta);
+            if (!dropWarningActive) {
+                WarningHolder::AddWarning(57, LOCAL_DROP_WARNING);
+                dropWarningActive = true;
+            }
+        } else if (dropWarningActive) {
+            WarningHolder::RemoveWarning(57, LOCAL_DROP_WARNING);
+            dropWarningActive = false;
+        }
+    }
+    lastSndbufErrors = sndbufErrors;
+    lastTxDropped = txDropped;
+    lastQdiscDropped = qdiscDropped;
+    statBaselineValid = true;
+#endif
 }
 
 void UDPOutput::PingControllers(bool failedOnly) {
@@ -827,23 +1242,78 @@ void UDPOutput::CloseNetwork() {
     lk.unlock();
     PingControllers(false);
 }
-SendSocketInfo* UDPOutput::findOrCreateSocket(unsigned int socketKey, int sc) {
+std::shared_ptr<SendSocketInfo> UDPOutput::findOrCreateSocket(unsigned int socketKey, int sc) {
     auto it = messages.sendSockets.find(socketKey);
-    SendSocketInfo* info;
+    std::shared_ptr<SendSocketInfo> info;
     if (it == messages.sendSockets.end()) {
-        info = new SendSocketInfo();
+        info = std::make_shared<SendSocketInfo>();
         messages.sendSockets[socketKey] = info;
     } else {
         info = it->second;
     }
 
+    // try_lock: if a straggler worker from a previous frame is still sending
+    // to this destination, its sockets already exist and the pacing check can
+    // wait a frame - nothing here is worth stalling the frame thread on
+    std::unique_lock<std::mutex> lg(info->sendLock, std::try_to_lock);
+    if (!lg.owns_lock()) {
+        return info;
+    }
     if (info->sockets.empty()) {
+        bool broadCast = socketKey == BROADCAST_MESSAGES_KEY;
+        bool multiCast = socketKey == MULTICAST_MESSAGES_KEY || socketKey == LATE_MULTICAST_MESSAGES_KEY;
         for (int x = info->sockets.size(); x < sc; x++) {
-            int s = createSocket(0, socketKey == BROADCAST_MESSAGES_KEY,
-                                 socketKey == MULTICAST_MESSAGES_KEY || socketKey == LATE_MULTICAST_MESSAGES_KEY);
+            int s = createSocket(0, broadCast, multiCast);
             info->sockets.push_back(s);
         }
     }
+#if !defined(PLATFORM_OSX) && defined(SO_MAX_PACING_RATE)
+    // Pacing is only applied to unicast destination sockets: the key IS
+    // the destination IP, so the rate cap is truly per controller, and we
+    // can check that the route's egress interface actually has fq (wifi
+    // and other non-fq routes keep the legacy drain-based pacing).  The
+    // shared multicast socket is left unpaced - it carries the aggregate
+    // of all multicast controllers so a per-controller rate would be wrong.
+    if (pacingEnabled && !info->pacedChecked &&
+        socketKey > ARTNET_MESSAGES_KEY && socketKey < LATE_MESSAGES_START) {
+        if (info->pacedCheckCountdown > 0) {
+            --info->pacedCheckCountdown;
+        } else {
+            std::string iface = egressInterfaceFor((in_addr_t)socketKey);
+            if (!iface.empty()) {
+                // only latch the decision once the route has resolved; during
+                // startup the route may not exist yet (interface waiting on
+                // DHCP) and we want to try again later or on an address change
+                info->pacedChecked = true;
+                // if per-output-line rates are ever added (e.g. slower caps
+                // for ESP32-class controllers), an IP->rate map built in
+                // Init() would replace pacingRate right here
+                bool shouldPace = interfaceHasFQ(iface);
+                if (shouldPace != info->paced) {
+                    LogInfo(VB_CHANNELOUT, "UDP output to %s via %s is %s\n",
+                            HexToIP(socketKey).c_str(), iface.c_str(),
+                            shouldPace ? "paced" : "not paced (no fq qdisc on egress)");
+                    info->paced = shouldPace;
+                    // ~0 = unlimited; used when un-pacing after the route
+                    // moved to a non-fq interface (e.g. eth -> wifi failover)
+                    unsigned int rate = shouldPace ? pacingRate : ~0U;
+                    // paced sockets need the buffer to hold a full frame for
+                    // the qdisc to clock out; unpaced revert to the small
+                    // buffer the drain-based pacing depends on
+                    int bufSize = shouldPace ? pacedSndBufSize() : ((blockingOutput ? 4096 : (MSGS_PER_SENDMMSG * 1511)) - 1);
+                    for (int s : info->sockets) {
+                        setsockopt(s, SOL_SOCKET, SO_MAX_PACING_RATE, &rate, sizeof(rate));
+                        setsockopt(s, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
+                    }
+                }
+            } else {
+                // no route: don't re-run the lookup syscalls on the hot path
+                // every frame, retry after a few seconds worth of frames
+                info->pacedCheckCountdown = 150;
+            }
+        }
+    }
+#endif
     if (info->curSocket == -1) {
         info->curSocket = 0;
     }
@@ -865,7 +1335,17 @@ int UDPOutput::createSocket(int port, bool broadCast, bool multiCast) {
         close(sendSocket);
         return -1;
     }
+    // Mark show traffic as Expedited Forwarding (DSCP EF).  Managed switches
+    // prioritize it out of the box and on wifi it maps to the WMM voice queue.
+    int tos = 0xB8;
+    setsockopt(sendSocket, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+#ifndef PLATFORM_OSX
+    // ahead of fppd's own HTTP/MQTT/curl traffic in the local qdisc
+    int prio = 6;
+    setsockopt(sendSocket, SOL_SOCKET, SO_PRIORITY, &prio, sizeof(prio));
+#endif
     // make sure the send buffer is actually set to a reasonable size for non-blocking mode
+    // (paced sockets get a larger buffer in findOrCreateSocket)
     int bufSize = (blockingOutput ? 4096 : (MSGS_PER_SENDMMSG * 1511)) - 1;
     setsockopt(sendSocket, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
     // these sockets are for sending only, don't need a large receive buffer so

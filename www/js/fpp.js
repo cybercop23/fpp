@@ -3862,6 +3862,10 @@ function populateUniverseData (data, reload, input) {
 		if (channelData.hasOwnProperty('threaded')) {
 			$('#E131ThreadedOutput').val(channelData.threaded).prop('selected', true);
 		}
+		if (channelData.hasOwnProperty('pacingRate')) {
+			$('#E131PacingRate').val(channelData.pacingRate).prop('selected', true);
+		}
+		UpdateSendingModeOptions();
 	}
 	UniverseCount = channelData.universes.length;
 	var hasMCBC = false;
@@ -4124,8 +4128,13 @@ function getUniverses (reload, input) {
 		populateUniverseData(data, reload, input);
 		SetUniverseInputShownFields(); // hide fields based on output type
 	}).fail(function () {
+		// no config saved yet; still need the Sending options set up to
+		// match the default pacing selection
 		UniverseCount = 0;
 		$('#txtUniverseCount').val(UniverseCount);
+		if (!input) {
+			UpdateSendingModeOptions();
+		}
 	});
 }
 
@@ -4248,6 +4257,33 @@ function CloneUniverse () {
 	CloneUniverses(cloneNumber);
 }
 
+function UpdateSendingModeOptions () {
+	var sel = $('#E131ThreadedOutput');
+	if (sel.length == 0 || $('#E131PacingRate').length == 0) {
+		return;
+	}
+	var pacing = parseInt($('#E131PacingRate').val());
+	var threaded = parseInt(sel.val());
+	sel.empty();
+	if (pacing > 0) {
+		// paced destinations always use the batched non-blocking send path,
+		// so only the thread-isolation choice remains
+		sel.append(new Option('Single-Threaded', '2'));
+		sel.append(new Option('Multi-Threaded', '3'));
+		sel.val(threaded == 0 || threaded == 2 ? '2' : '3');
+	} else {
+		sel.append(new Option('Single-Threaded Blocking', '0'));
+		sel.append(new Option('Multi-Threaded Blocking', '1'));
+		sel.append(new Option('Single-Threaded Non-Blocking', '2'));
+		sel.append(new Option('Multi-Threaded Non-Blocking', '3'));
+		sel.val('' + threaded);
+	}
+}
+
+function PacingRateChanged () {
+	UpdateSendingModeOptions();
+}
+
 function postUniverseJSON (input) {
 	var postData = {};
 	var anyEnabled = 0;
@@ -4260,6 +4296,9 @@ function postUniverseJSON (input) {
 		output.interface = document.getElementById('selE131interfaces').value;
 		output.threaded = parseInt(
 			document.getElementById('E131ThreadedOutput').value
+		);
+		output.pacingRate = parseInt(
+			document.getElementById('E131PacingRate').value
 		);
 	} else {
 		// input only properties
