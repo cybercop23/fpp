@@ -787,6 +787,133 @@ function readCapes($cd, $capes)
         return postData;
     }
 
+    // ---- Rough max-frame-rate estimate --------------------------------------
+    // A pixel port can drive roughly 800 RGB pixels (2400 channels) at 40fps, so
+    // the slowest port (the one clocking the most channels) sets the ceiling.
+    // The channel accounting mirrors src/channeloutput/PixelString.cpp: null
+    // pixels count, grouping does NOT reduce wire time, and smart receivers add
+    // a per-chain overhead.  The Falcon v4/v5 "bidirectional" cost is not in
+    // PixelString.cpp; per the receiver table it drops the whole controller's
+    // budget by 90 pixels/port whenever any port uses a v4/v5 remote.
+    function pixelStringChannelsForStrings(strings) {
+        var chans = 0;
+        if (!strings) {
+            return 0;
+        }
+        for (var i = 0; i < strings.length; i++) {
+            var vs = strings[i];
+            var px = parseInt(vs.pixelCount) || 0;
+            if (px <= 0) {
+                continue;
+            }
+            // channelsPerNode == number of channels in the color order (RGB=3, RGBW=4)
+            var cpn = (vs.colorOrder || 'RGB').length;
+            var nulls = (parseInt(vs.nullNodes) || 0) + (parseInt(vs.endNulls) || 0);
+            chans += (px + nulls) * cpn;
+        }
+        return chans;
+    }
+
+    // Total output channels for one physical port, matching PixelString::Init.
+    // Smart-receiver marker/lead-in nodes are counted at 1 channel/node.
+    function pixelStringPortChannels(port) {
+        var rt = parseInt(port.differentialType) || 0;
+        var receiverCount = 1;
+        var type = 'none';
+        if (rt) {
+            if (rt <= 3) {
+                receiverCount = rt; // v1 smart receivers
+                type = 'v1';
+            } else if (rt > 9) {
+                receiverCount = rt - 9; // Falcon v4/v5 smart receivers
+                type = 'v5';
+            } else {
+                receiverCount = rt - 3; // v2 smart receivers
+                type = 'v2';
+            }
+        }
+        var labels = ['virtualStrings', 'virtualStringsB', 'virtualStringsC',
+            'virtualStringsD', 'virtualStringsE', 'virtualStringsF'];
+        var chans = 0;
+        var anyChannels = false;
+        if (type == 'v1') {
+            chans += 36; // VirtualString(0,0) lead-in: 0 + 18 + 18
+        }
+        var r0 = pixelStringChannelsForStrings(port.virtualStrings);
+        chans += r0;
+        if (r0 > 0) {
+            anyChannels = true;
+        } else if (type == 'v1' || type == 'v2') {
+            chans += 3; // AddNullPixelString(): 1 pixel * 3 channels
+        }
+        for (var p = 1; p < receiverCount; p++) {
+            var before = chans;
+            if (type == 'v1') {
+                chans += (p == 1) ? 72 : (p == 2) ? 90 : 0; // VirtualString(p, p)
+            } else if (type == 'v2') {
+                chans += 10; // VirtualString(3, p): SMART_RECEIVER_V2_GAP
+            }
+            var rp = pixelStringChannelsForStrings(port[labels[p]]);
+            chans += rp;
+            if (rp > 0) {
+                anyChannels = true;
+            } else if (p != (receiverCount - 1)) {
+                chans += 3; // keep an empty middle receiver alive
+            } else {
+                chans = before; // trailing empty receiver: send one fewer
+            }
+        }
+        if (!anyChannels) {
+            chans = 0;
+        }
+        return { channels: chans, isV5: type == 'v5' };
+    }
+
+    var pixelStringMaxFPSTimer = null;
+    function CalculatePixelStringMaxFPS() {
+        // coalesce the bursts of change events fired while typing
+        clearTimeout(pixelStringMaxFPSTimer);
+        pixelStringMaxFPSTimer = setTimeout(CalculatePixelStringMaxFPSNow, 150);
+    }
+    function CalculatePixelStringMaxFPSNow() {
+        var el = $('#pixelStringMaxFPS');
+        if (el.length == 0) {
+            return;
+        }
+        var data = getPixelStringOutputJSON();
+        var maxPixels = 0;
+        var worstPort = -1;
+        var anyV5 = false;
+        for (var o = 0; o < data.channelOutputs.length; o++) {
+            var outs = data.channelOutputs[o].outputs || [];
+            for (var i = 0; i < outs.length; i++) {
+                var r = pixelStringPortChannels(outs[i]);
+                if (r.isV5) {
+                    anyV5 = true;
+                }
+                // normalise to RGB-pixel-equivalents so the 800px/40fps rule and
+                // the 90-pixel v4/v5 drop apply directly regardless of color order
+                var px = r.channels / 3;
+                if (px > maxPixels) {
+                    maxPixels = px;
+                    worstPort = outs[i].portNumber;
+                }
+            }
+        }
+        if (maxPixels <= 0) {
+            el.html('');
+            return;
+        }
+        var budget = maxPixels + (anyV5 ? 90 : 0);
+        var fps = Math.floor(32000 / budget);
+        var msg = 'Supports &asymp;' + (fps > 999 ? '>999' : fps) + ' fps max (longest port ' + (worstPort + 1);
+        if (anyV5) {
+            msg += ', -90px for v4/v5 remotes';
+        }
+        msg += ')';
+        el.html(msg);
+    }
+
     var PixelStringLoaded = false;
 
     function GetPixelStringCapeFileNameForSubType(mainType) {
@@ -1633,6 +1760,8 @@ function readCapes($cd, $capes)
                 }
             }
         }
+
+        CalculatePixelStringMaxFPS();
     }
 
     function ValidateBBBStrings(data) {
@@ -1900,6 +2029,7 @@ function readCapes($cd, $capes)
             }
         }
 
+        CalculatePixelStringMaxFPS();
         return ok;
     }
 
@@ -2351,6 +2481,10 @@ function readCapes($cd, $capes)
             .fail(err => $.jGrowl('Error: Unable to retrieve GPIO pin info.', { themeState: 'danger' }));
         populateCapeList();
         loadPixelStringOutputs();
+        // keep the max-fps estimate live as color order / null nodes / etc. change
+        $('#PixelString').on('change', 'input, select', CalculatePixelStringMaxFPS);
+        // recompute when the Strings tab is opened (data is fully loaded by then)
+        $('#stringTab-tab').on('shown.bs.tab', CalculatePixelStringMaxFPS);
     });
 
 </script>
@@ -2487,6 +2621,10 @@ function readCapes($cd, $capes)
                             <option value="1">Slow (1903)</option>
                         </select>
                     </div>
+                </div>
+
+                <div class="col-md-auto form-inline d-flex align-items-center">
+                    <small id="pixelStringMaxFPS" class="text-muted"></small>
                 </div>
 
                 <div class="col-md-auto form-inline">
