@@ -56,13 +56,14 @@
         h2.divider {
             width: 100%;
             text-align: left;
-            border-bottom: 2px solid #000;
+            color: var(--fpp-text-primary);
+            border-bottom: 2px solid var(--fpp-border);
             line-height: 0.1em;
             margin: 12px 0 10px;
         }
 
         h2.divider span {
-            background: #f5f5f5;
+            background: var(--fpp-bg-card);
             padding: 0 10px;
         }
 
