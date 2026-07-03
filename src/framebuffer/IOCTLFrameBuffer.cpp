@@ -54,13 +54,16 @@ IOCTLFrameBuffer::~IOCTLFrameBuffer() {
 int IOCTLFrameBuffer::InitializeFrameBuffer() {
     std::string devicePath = m_device;
     
-    // If device is a DRM connector name (e.g., "HDMI-A-1"), map to framebuffer device
-    if (m_device.find("HDMI") != std::string::npos || 
-        m_device.find("DPI") != std::string::npos || 
+    // If device is a DRM connector name (e.g., "HDMI-A-1", "DSI-1"), map to the
+    // framebuffer device. DSI is included so DSI touchscreens (e.g. the official
+    // 7" display) resolve to /dev/fb0 rather than a non-existent /dev/DSI-1.
+    if (m_device.find("HDMI") != std::string::npos ||
+        m_device.find("DPI") != std::string::npos ||
+        m_device.find("DSI") != std::string::npos ||
         m_device.find("DisplayPort") != std::string::npos) {
-        // For HDMI, use /dev/fb0 (primary framebuffer console)
+        // Use /dev/fb0 (primary framebuffer console)
         devicePath = "fb0";
-        LogDebug(VB_CHANNELOUT, "IOCTLFrameBuffer: Mapping DRM connector '%s' to '%s'\n", 
+        LogDebug(VB_CHANNELOUT, "IOCTLFrameBuffer: Mapping DRM connector '%s' to '%s'\n",
                  m_device.c_str(), devicePath.c_str());
     }
     
