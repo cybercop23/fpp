@@ -712,7 +712,7 @@
 	margin-bottom: 0;
 }
 
-.fpp-health-recovery__inner > span {
+.fpp-health-recovery__inner>span {
 	flex: 1 1 240px;
 	min-width: 0;
 }
@@ -788,7 +788,7 @@
 }
 
 /* Ensure columns containing health checks don't overflow */
-.health-check-card .row > [class*='col-'] {
+.health-check-card .row>[class*='col-'] {
 	overflow: hidden;
 }
 
@@ -1136,6 +1136,7 @@
 }
 
 @keyframes pulse-heart {
+
 	0%,
 	100% {
 		transform: scale(1);
@@ -1165,12 +1166,11 @@
 	color: #003087;
 	border: none;
 	border-radius: var(--fpp-radius-pill);
-	padding: 8px var(--fpp-sp-xl);
-	font-size: var(--fpp-fs-base);
+	padding: 7px 16px;
+	font-size: 13px;
 	font-weight: var(--fpp-fw-bold);
 	cursor: pointer;
 	transition: all var(--fpp-transition-fast);
-	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
 	text-decoration: none;
 }
 
@@ -1213,53 +1213,26 @@
    ========================================================================== */
 .fpp-banner {
 	display: flex;
-	align-items: center;
-	gap: var(--fpp-sp-md);
-	padding: var(--fpp-sp-sm) var(--fpp-sp-lg);
+	align-items: flex-start;
+	gap: 14px;
+	padding: 14px 18px;
+	border: 1px solid var(--fpp-border);
 	border-radius: var(--fpp-radius-lg);
-	margin-bottom: var(--fpp-sp-md);
-}
-
-.fpp-banner--success {
-	background: linear-gradient(
-		135deg,
-		var(--bs-success) 0%,
-		var(--fpp-success-dark) 100%
-	);
-	color: white;
-}
-
-.fpp-banner--warning {
-	background: linear-gradient(
-		135deg,
-		var(--bs-danger) 0%,
-		var(--fpp-danger-dark) 100%
-	);
-	color: white;
-}
-
-.fpp-banner--info {
-	background: var(--fpp-success-light);
-	border: 1px solid var(--bs-success);
-	color: var(--fpp-text-primary);
-}
-
-.fpp-banner--danger {
-	background: linear-gradient(135deg, #b91c1c 0%, #7f1d1d 100%);
-	color: white;
-	border: 2px solid #450a0a;
+	background: var(--fpp-bg-card);
+	margin-bottom: 12px;
 }
 
 .fpp-banner__icon {
-	width: 32px;
-	height: 32px;
-	border-radius: var(--fpp-radius-xl);
+	width: 36px;
+	height: 36px;
+	border-radius: var(--fpp-radius-lg);
 	display: flex;
 	align-items: center;
 	justify-content: center;
 	font-size: 1rem;
 	flex-shrink: 0;
-	background: rgba(255, 255, 255, 0.2);
+	background: var(--fpp-bg-disabled);
+	color: var(--fpp-text-secondary);
 }
 
 .fpp-banner__content {
@@ -1267,14 +1240,93 @@
 }
 
 .fpp-banner__title {
+	font-size: 15px;
 	font-weight: var(--fpp-fw-semibold);
-	margin-bottom: var(--fpp-sp-xs);
+	margin-bottom: 2px;
+	color: var(--fpp-text-primary);
 }
 
 .fpp-banner__message {
 	margin: 0;
-	opacity: 0.9;
-	font-size: var(--fpp-fs-base);
+	font-size: 13.5px;
+	color: var(--fpp-text-secondary);
+	line-height: 1.5;
+}
+
+/* Variants: soft tinted surface + a matching solid icon tile. */
+.fpp-banner--danger {
+	background: var(--fpp-danger-light);
+	border-color: var(--bs-danger);
+}
+
+.fpp-banner--danger .fpp-banner__icon {
+	background: var(--bs-danger);
+	color: #fff;
+}
+
+.fpp-banner--danger .fpp-banner__title {
+	color: var(--fpp-danger-dark);
+}
+
+/* Warning is the recommendation color in the coordinated upgrade layout. */
+.fpp-banner--warning {
+	background: var(--fpp-warning-light);
+	border-color: var(--bs-warning);
+}
+
+.fpp-banner--warning .fpp-banner__icon {
+	background: var(--bs-warning);
+	color: #000;
+}
+
+.fpp-banner--warning .fpp-banner__title {
+	color: var(--fpp-warning-text);
+}
+
+.fpp-banner--success {
+	background: var(--fpp-success-light);
+	border-color: var(--bs-success);
+}
+
+.fpp-banner--success .fpp-banner__icon {
+	background: var(--bs-success);
+	color: #fff;
+}
+
+.fpp-banner--success .fpp-banner__title {
+	color: var(--fpp-success-text);
+}
+
+.fpp-banner--info {
+	background: var(--fpp-info-light);
+	border-color: var(--fpp-info);
+}
+
+.fpp-banner--info .fpp-banner__icon {
+	background: var(--fpp-info);
+	color: #fff;
+}
+
+/* Slim single-line strip modifier — for a secondary severity note (e.g. the
+   End-of-Life alert) that needs its own color but must not compete with the
+   primary recommendation banner. */
+.fpp-banner--strip {
+	align-items: center;
+	gap: 10px;
+	padding: 8px 14px;
+}
+
+.fpp-banner--strip .fpp-banner__icon {
+	width: 24px;
+	height: 24px;
+	font-size: 12px;
+	border-radius: var(--fpp-radius-md);
+}
+
+.fpp-banner--strip .fpp-banner__message {
+	font-size: 13px;
+	line-height: 1.4;
+	color: var(--fpp-text-primary);
 }
 
 /* ==========================================================================
@@ -1350,7 +1402,7 @@
 	margin-bottom: var(--fpp-sp-md);
 }
 
-.fpp-info-collapsible > .fpp-info-grid {
+.fpp-info-collapsible>.fpp-info-grid {
 	margin-bottom: 0;
 	margin-top: var(--fpp-sp-sm);
 }
@@ -1383,7 +1435,7 @@
 	color: var(--fpp-text-primary);
 }
 
-.fpp-info-collapsible[open] > .fpp-info-collapsible__summary {
+.fpp-info-collapsible[open]>.fpp-info-collapsible__summary {
 	color: var(--fpp-primary);
 	border-color: var(--fpp-primary);
 }
@@ -1393,7 +1445,7 @@
 	transition: transform var(--fpp-transition-normal);
 }
 
-.fpp-info-collapsible[open] > .fpp-info-collapsible__summary .fpp-info-collapsible__chevron {
+.fpp-info-collapsible[open]>.fpp-info-collapsible__summary .fpp-info-collapsible__chevron {
 	transform: rotate(180deg);
 }
 
@@ -1445,8 +1497,8 @@
 	align-items: center;
 	gap: var(--fpp-sp-md);
 	padding: var(--fpp-sp-sm) var(--fpp-sp-md);
-	background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
-	border: 1px solid #86efac;
+	background: var(--fpp-bg-page);
+	border: 1px solid var(--fpp-border-light);
 	border-radius: var(--fpp-radius-lg);
 	margin-bottom: var(--fpp-sp-md);
 	font-family: var(--fpp-font-mono);
@@ -1467,21 +1519,19 @@
 }
 
 .fpp-version-indicator__to {
-	color: var(--bs-success);
+	color: var(--fpp-text-primary);
 	font-weight: var(--fpp-fw-semibold);
-	border: 1px solid #86efac;
+	border: 1px solid var(--fpp-border);
 }
 
 .fpp-version-indicator__arrow {
-	color: var(--bs-success);
+	color: var(--fpp-text-muted);
 	font-size: 1.1rem;
 }
 
 .fpp-version-indicator__label {
 	font-size: var(--fpp-fs-sm);
-	font-weight: var(--fpp-fw-semibold);
-	text-transform: uppercase;
-	letter-spacing: 0.05em;
+	font-weight: var(--fpp-fw-medium);
 	color: var(--fpp-text-muted);
 	margin-left: auto;
 }
@@ -1497,14 +1547,14 @@
 }
 
 .fpp-version-indicator--clickable:hover {
-	background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%);
-	border-color: #4ade80;
+	background: var(--fpp-bg-hover);
+	border-color: var(--fpp-border-dark);
 	transform: translateY(-1px);
-	box-shadow: 0 2px 8px rgba(34, 197, 94, 0.2);
+	box-shadow: var(--fpp-shadow-sm);
 }
 
 .fpp-version-indicator--clickable:hover .fpp-version-indicator__label {
-	color: var(--bs-success);
+	color: var(--fpp-text-primary);
 }
 
 .fpp-version-indicator--clickable:active {
@@ -1517,7 +1567,7 @@
 	border-color: var(--fpp-border);
 }
 
-.fpp-version-indicator--current > i {
+.fpp-version-indicator--current>i {
 	color: var(--bs-success);
 	font-size: 1.1rem;
 }
@@ -1556,8 +1606,7 @@
 	box-shadow: 0 2px 8px rgba(245, 158, 11, 0.25);
 }
 
-.fpp-version-indicator--upgrade.fpp-version-indicator--clickable:hover
-	.fpp-version-indicator__label {
+.fpp-version-indicator--upgrade.fpp-version-indicator--clickable:hover .fpp-version-indicator__label {
 	color: #d97706;
 }
 
@@ -1568,31 +1617,22 @@
 .fpp-faq {
 	display: flex;
 	flex-direction: column;
-	gap: var(--fpp-sp-sm);
 }
 
+/* Flat divider list (matches the upgrade mockup) rather than carded rows. */
 .fpp-faq__item {
-	border: 1px solid var(--fpp-border-light);
-	border-radius: var(--fpp-radius-lg);
-	overflow: hidden;
-	transition: all var(--fpp-transition-normal);
-	background: var(--fpp-bg-card);
+	border-bottom: 1px solid var(--fpp-border-light);
 }
 
-.fpp-faq__item:hover {
-	border-color: var(--fpp-border-dark);
-}
-
-.fpp-faq__item--open {
-	border-color: var(--fpp-primary);
-	background: var(--fpp-info-light);
+.fpp-faq__item:last-child {
+	border-bottom: none;
 }
 
 .fpp-faq__question {
-	padding: var(--fpp-sp-sm) var(--fpp-sp-md);
-	font-size: var(--fpp-fs-sm);
-	font-weight: var(--fpp-fw-semibold);
-	color: var(--fpp-text-secondary);
+	padding: var(--fpp-sp-sm) 0;
+	font-size: 14px;
+	font-weight: var(--fpp-fw-medium);
+	color: var(--fpp-text-primary);
 	cursor: pointer;
 	display: flex;
 	justify-content: space-between;
@@ -1600,15 +1640,8 @@
 	transition: all var(--fpp-transition-fast);
 }
 
-.fpp-faq__question:hover {
-	color: var(--fpp-text-primary);
-}
-
-.fpp-faq__item--open .fpp-faq__question {
-	color: var(--fpp-primary);
-}
-
 .fpp-faq__question i {
+	color: var(--fpp-text-muted);
 	font-size: var(--fpp-fs-xs);
 	transition: transform var(--fpp-transition-normal);
 }
@@ -1617,25 +1650,24 @@
 	transform: rotate(180deg);
 }
 
+/* Collapsed by default; the accordion JS animates max-height to the answer's
+   exact scrollHeight on open, so answers of any length expand fully without a
+   magic-number clip and the timing matches the real content height. */
 .fpp-faq__answer {
 	max-height: 0;
 	overflow: hidden;
 	transition: max-height var(--fpp-transition-normal);
 }
 
-.fpp-faq__item--open .fpp-faq__answer {
-	max-height: 200px;
-}
-
 .fpp-faq__answer-inner {
-	padding: 0 var(--fpp-sp-md) var(--fpp-sp-sm) var(--fpp-sp-md);
-	font-size: var(--fpp-fs-sm);
-	color: var(--fpp-text-muted);
-	line-height: 1.5;
+	padding: 0 0 var(--fpp-sp-sm) 0;
+	font-size: 13.5px;
+	color: var(--fpp-text-secondary);
+	line-height: 1.55;
 }
 
 .fpp-faq__answer-inner strong {
-	color: var(--fpp-text-secondary);
+	color: var(--fpp-text-primary);
 }
 
 /* ==========================================================================
@@ -1708,15 +1740,8 @@
 .fpp-card {
 	border: 1px solid var(--fpp-border);
 	border-radius: var(--fpp-radius-lg);
-	box-shadow: var(--fpp-shadow-sm);
-	padding: var(--fpp-sp-md);
-	margin-bottom: var(--fpp-sp-md);
-	transition: all var(--fpp-transition-normal);
-}
-
-.fpp-card:hover {
-	box-shadow: var(--fpp-shadow-md);
-	transform: translateY(-2px);
+	padding: 22px 24px;
+	margin-bottom: 18px;
 }
 
 .fpp-card__header {
@@ -1752,11 +1777,6 @@
 	justify-content: center;
 	font-size: 1.1rem;
 	flex-shrink: 0;
-	transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
-.fpp-card:hover .fpp-card__icon {
-	transform: scale(1.08);
 }
 
 .fpp-card__icon--success {
@@ -1780,9 +1800,9 @@
 }
 
 .fpp-card__title {
-	font-size: var(--fpp-fs-xl);
+	font-size: 18px;
 	font-weight: var(--fpp-fw-semibold);
-	margin: 0 0 var(--fpp-sp-xs) 0;
+	margin: 0 0 4px 0;
 	display: flex;
 	align-items: center;
 	gap: var(--fpp-sp-sm);
@@ -1790,8 +1810,8 @@
 }
 
 .fpp-card__subtitle {
-	font-size: var(--fpp-fs-base);
-	color: var(--fpp-text-muted);
+	font-size: var(--fpp-fs-sm);
+	color: var(--fpp-text-secondary);
 	margin: 0;
 }
 
@@ -1820,13 +1840,8 @@
 	position: absolute;
 	top: 0;
 	left: 0;
-	width: 4px;
-	height: 100%;
-	transition: width var(--fpp-transition-normal);
-}
-
-.fpp-card--accent:hover::before {
 	width: 6px;
+	height: 100%;
 }
 
 .fpp-card--accent-success::before {
@@ -1935,6 +1950,202 @@
 }
 
 /* ==========================================================================
+   COORDINATED CARD STATES
+   Drive the "coordinated semantic" upgrade layout: the recommended card adopts
+   the amber recommendation color end-to-end (accent bar + icon tile), while the
+   card that doesn't apply in the current state fades back. Toggled from JS.
+   ========================================================================== */
+.fpp-card.is-recommended.fpp-card--accent::before {
+	background: var(--bs-warning);
+}
+
+.fpp-card.is-recommended .fpp-card__icon {
+	background: var(--fpp-warning-light);
+	color: var(--bs-warning);
+}
+
+/* Coordinated: the "What it does" info tile shares the recommended card's amber
+   family instead of its default blue, so the color flows through the card. */
+.fpp-card.is-recommended .fpp-info-box--info {
+	background: var(--fpp-warning-light);
+	border-color: var(--fpp-warning-dark);
+}
+
+.fpp-card.is-recommended .fpp-info-box--info .fpp-info-box__title {
+	color: var(--fpp-warning-text);
+}
+
+/* The card that doesn't apply in the current state fades back. A flat opacity
+   is used deliberately: FPP's --fpp-text-muted token is nearly black, so muting
+   individual text colors would not read as "disabled". */
+.fpp-card.is-disabled {
+	opacity: 0.55;
+}
+
+.fpp-card.is-disabled.fpp-card--accent::before {
+	background: var(--fpp-border-dark);
+}
+
+/* Once the user actively engages a faded (non-recommended) card -- e.g. picks an
+   OS image from the dropdown to reinstall -- restore full opacity so its controls,
+   especially the action button, read as normal and clickable rather than dimmed.
+   Parent opacity can't be raised by a child, so the lift has to happen here on the
+   card. The accent bar stays neutral, so the card is "usable" without being
+   promoted to the amber "recommended" treatment. */
+.fpp-card.is-disabled.is-engaged {
+	opacity: 1;
+}
+
+/* ==========================================================================
+   SKELETON LOADING
+   Placeholder shimmer for values fetched asynchronously (OS version, build,
+   kernel, current-OS tag). Reserves inline space so the real text swaps in
+   place instead of shifting the layout when the API responds.
+   ========================================================================== */
+.fpp-skeleton {
+	display: inline-block;
+	vertical-align: middle;
+	min-width: 4.5rem;
+	height: 0.9em;
+	border-radius: var(--fpp-radius-sm);
+	background: linear-gradient(90deg,
+			var(--fpp-border-light) 25%,
+			var(--fpp-border-dark) 37%,
+			var(--fpp-border-light) 63%);
+	background-size: 400% 100%;
+	animation: fpp-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes fpp-skeleton-shimmer {
+	0% {
+		background-position: 100% 50%;
+	}
+
+	100% {
+		background-position: 0 50%;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.fpp-skeleton {
+		animation: none;
+	}
+}
+
+/* ==========================================================================
+   UPDATE STATUS DOT
+   Quiet inline "update available" indicator — reads as status next to a value
+   without the weight of a full badge.
+   ========================================================================== */
+.fpp-upd-dot {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--fpp-sp-icon);
+	color: var(--fpp-text-muted);
+	font-size: var(--fpp-fs-sm);
+	font-weight: var(--fpp-fw-medium);
+}
+
+.fpp-upd-dot::before {
+	content: '';
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--bs-warning);
+	flex-shrink: 0;
+}
+
+.fpp-upd-dot--ok::before {
+	background: var(--fpp-gray);
+}
+
+.fpp-upd-dot--required::before {
+	background: var(--bs-danger);
+}
+
+.fpp-upd-dot--required {
+	color: var(--fpp-danger-dark);
+	font-weight: var(--fpp-fw-semibold);
+}
+
+/* ==========================================================================
+   QUIET TAGS
+   Low-key pill labels ("Advanced", "Adv", current-version) -- deliberately
+   softer than a solid Bootstrap .badge so they read as metadata, not alerts.
+   ========================================================================== */
+.fpp-tag {
+	display: inline-flex;
+	align-items: center;
+	padding: 2px 8px;
+	border-radius: var(--fpp-radius-sm);
+	font-size: 10.5px;
+	font-weight: var(--fpp-fw-bold);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	background: var(--fpp-border-light);
+	color: var(--fpp-text-muted);
+}
+
+/* Advanced-feature marker: quiet, italic, mixed-case. */
+.fpp-tag--adv {
+	font-style: italic;
+	text-transform: none;
+	letter-spacing: 0.02em;
+	font-weight: var(--fpp-fw-semibold);
+}
+
+/* Recommended marker: amber, matching the coordinated recommendation color. */
+.fpp-tag--recommended {
+	background: var(--bs-warning);
+	color: #000;
+}
+
+/* ==========================================================================
+   MAJOR-VERSION CALLOUT
+   Inline danger notice inside a card (e.g. "major version requires OS upgrade").
+   ========================================================================== */
+.fpp-major-callout {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--fpp-sp-sm);
+	padding: var(--fpp-sp-sm) var(--fpp-sp-md);
+	background: var(--fpp-danger-light);
+	border: 1px solid var(--bs-danger);
+	border-radius: var(--fpp-radius-md);
+	font-size: var(--fpp-fs-sm);
+	color: var(--fpp-danger-dark);
+	margin-bottom: var(--fpp-sp-md);
+}
+
+.fpp-major-callout i {
+	margin-top: 2px;
+	flex-shrink: 0;
+}
+
+/* ==========================================================================
+   INLINE WARNING STRIP
+   A left-accent note inside a card -- lighter than a full .fpp-alert box, so it
+   sits below content without competing (e.g. the OS reboot warning).
+   ========================================================================== */
+.fpp-inline-warn {
+	display: flex;
+	gap: var(--fpp-sp-sm);
+	padding: var(--fpp-sp-sm) 12px;
+	background: var(--fpp-warning-light);
+	border-left: 3px solid var(--bs-warning);
+	border-radius: var(--fpp-radius-sm);
+	font-size: var(--fpp-fs-sm);
+	color: var(--fpp-warning-text);
+	margin-bottom: var(--fpp-sp-md);
+}
+
+.fpp-inline-warn i {
+	color: var(--fpp-warning-dark);
+	margin-top: 2px;
+	flex-shrink: 0;
+}
+
+/* ==========================================================================
    FPP BUTTON COMPONENT
    Consistent button styling with variants
    ========================================================================== */
@@ -2013,11 +2224,10 @@
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	padding: var(--fpp-sp-sm) 0;
+	padding: 8px 0;
 	border-bottom: 1px solid var(--fpp-border-light);
 	font-size: var(--fpp-fs-base);
-	gap: var(--fpp-sp-md);
-	min-height: 36px;
+	gap: 12px;
 }
 
 .fpp-row:last-child {
@@ -2026,6 +2236,7 @@
 
 .fpp-row__label {
 	color: var(--fpp-text-muted);
+	font-weight: var(--fpp-fw-medium);
 	flex-shrink: 0;
 }
 
@@ -2034,6 +2245,11 @@
 	color: var(--fpp-text-primary);
 	text-align: right;
 	word-break: break-word;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+	justify-content: flex-end;
 }
 
 .fpp-row__value a {
@@ -2108,12 +2324,11 @@
 	background: var(--fpp-bg-card);
 	border: 1px solid var(--fpp-border);
 	border-radius: var(--fpp-radius-lg);
-	padding: var(--fpp-sp-md);
-	box-shadow: var(--fpp-shadow-sm);
+	padding: 20px 22px;
 }
 
 .fpp-info-panel__title {
-	font-size: var(--fpp-fs-lg);
+	font-size: 15px;
 	font-weight: var(--fpp-fw-semibold);
 	color: var(--fpp-text-primary);
 	margin: 0 0 var(--fpp-sp-md) 0;
@@ -2127,17 +2342,18 @@
 	width: 100%;
 }
 
-/* Resources list styling */
+/* Resources list styling: single row when it fits, wrapping to avoid clipping
+   on narrow-desktop / tablet-landscape widths above the 768px breakpoint. */
 .fpp-resources-list {
 	list-style: none;
 	padding: 0;
 	margin: 0;
 	display: flex;
 	flex-wrap: wrap;
-	gap: var(--fpp-sp-sm) var(--fpp-sp-xl);
+	gap: 8px 24px;
 }
 
-/* Spread modifier - evenly distributed across full width */
+/* Spread modifier - distribute items evenly across the row. */
 .fpp-resources-list--spread {
 	justify-content: space-between;
 }
@@ -2147,21 +2363,23 @@
 	align-items: center;
 	gap: var(--fpp-sp-sm);
 	font-size: var(--fpp-fs-base);
+	white-space: nowrap;
 }
 
 .fpp-resources-list li i {
-	width: 16px;
+	width: 14px;
 	text-align: center;
 	color: var(--fpp-text-muted);
 }
 
 .fpp-resources-list li a {
-	color: var(--fpp-primary);
+	color: var(--fpp-text-secondary);
 	text-decoration: none;
 }
 
 .fpp-resources-list li a:hover {
-	text-decoration: underline;
+	color: var(--fpp-primary);
+	text-decoration: none;
 }
 
 @media (max-width: 768px) {
@@ -2247,10 +2465,17 @@
 	color: var(--fpp-info-text);
 }
 
-/* Block-level note with top margin */
+/* Block-level small-print note */
 .fpp-note {
 	display: block;
-	margin-top: var(--fpp-sp-md);
+	margin-top: var(--fpp-sp-sm);
+	font-size: 12.5px;
+	line-height: 1.5;
+	color: var(--fpp-text-secondary);
+}
+
+.fpp-note strong {
+	color: var(--fpp-text-primary);
 }
 
 /* Badge size variants */
@@ -2390,9 +2615,11 @@
 .fpp-release-notes h3 {
 	font-size: var(--fpp-fs-lg);
 }
+
 .fpp-release-notes h4 {
 	font-size: var(--fpp-fs-md);
 }
+
 .fpp-release-notes h5 {
 	font-size: var(--fpp-fs-base);
 }
@@ -2465,4 +2692,119 @@
 	font-size: var(--fpp-fs-lg);
 	font-weight: var(--fpp-fw-bold);
 	color: var(--fpp-text-primary);
+}
+
+/* ==========================================================================
+   CHANGELOG / COMMIT LIST
+   A flex-row commit history (used by changelog.php). Each row is one commit:
+   avatar | message + meta | hover actions. No table columns to misalign.
+   ========================================================================== */
+.fpp-commit {
+	display: flex;
+	align-items: center;
+	gap: var(--fpp-sp-md);
+	padding: 12px 16px;
+	border-bottom: 1px solid var(--fpp-border-light);
+	transition: background var(--fpp-transition-fast);
+}
+
+.fpp-commit:last-child {
+	border-bottom: none;
+}
+
+.fpp-commit--clickable {
+	cursor: pointer;
+}
+
+.fpp-commit--clickable:hover {
+	background: var(--fpp-bg-hover);
+}
+
+/* Currently checked-out commit: success left-rail + subtle tint */
+.fpp-commit--current {
+	background: var(--fpp-success-light);
+	box-shadow: inset 3px 0 0 0 var(--bs-success);
+}
+
+.fpp-commit--current.fpp-commit--clickable:hover {
+	background: var(--fpp-success-light);
+}
+
+.fpp-commit__avatar {
+	flex-shrink: 0;
+	font-size: 1.6rem;
+	color: var(--fpp-text-muted);
+}
+
+.fpp-commit__body {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.fpp-commit__msg {
+	display: flex;
+	align-items: center;
+	gap: var(--fpp-sp-sm);
+	min-width: 0;
+	color: var(--fpp-text-primary);
+	font-weight: var(--fpp-fw-semibold);
+}
+
+/* Only the subject text ellipsizes; the "Current" badge stays a full-size
+   sibling so a long subject can't clip the active-version indicator. */
+.fpp-commit__subject {
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.fpp-commit__msg .badge {
+	flex-shrink: 0;
+}
+
+.fpp-commit__meta {
+	font-size: var(--fpp-fs-sm);
+	color: var(--fpp-text-muted);
+	margin-top: 2px;
+}
+
+.fpp-sha-chip {
+	font-family: var(--bs-font-monospace, monospace);
+	padding: 1px 7px;
+	border-radius: var(--fpp-radius-sm);
+	background: var(--fpp-bg-disabled);
+	color: var(--fpp-text-secondary);
+}
+
+/* Right-side actions: quiet until row hover, so they don't clutter the log */
+.fpp-commit__actions {
+	flex-shrink: 0;
+	display: flex;
+	gap: 4px;
+	opacity: 0;
+	transition: opacity var(--fpp-transition-fast);
+}
+
+.fpp-commit:hover .fpp-commit__actions {
+	opacity: 1;
+}
+
+.fpp-commit__action {
+	width: 32px;
+	height: 32px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: var(--fpp-radius-md);
+	color: var(--fpp-text-secondary);
+	border: 1px solid var(--fpp-border);
+	background: var(--fpp-bg-card);
+	cursor: pointer;
+}
+
+.fpp-commit__action:hover {
+	color: var(--fpp-text-primary);
+	border-color: var(--fpp-border-dark);
+	text-decoration: none;
 }
