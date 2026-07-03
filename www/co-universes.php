@@ -77,6 +77,10 @@ if (file_exists(__DIR__ . "/fppdefines.php")) {
 
 		InitializeUniverses();
 		getUniverses('TRUE', 0);
+		// keep the pacing max-fps estimate live as rows are edited
+		$('#tblUniverses').on('change', 'input, select', function () {
+			CalculatePacingMaxFPS();
+		});
 	});
 
 	<?
@@ -193,6 +197,7 @@ if (file_exists(__DIR__ . "/fppdefines.php")) {
 									value="Enter Universe Count" size="3" maxlength="3"></div>
 							<div><input id="btnUniverseCount" onclick="SetUniverseCount(0);" type="button"
 									class="buttons" value="Set"></div>
+							<div><small id="pacingMaxFPS" class="text-muted ms-2"></small></div>
 						</div>
 					</div>
 				</div>

@@ -4109,6 +4109,9 @@ function populateUniverseData (data, reload, input) {
 	}
 
 	SetUniverseInputNames(); // in co-universes.php
+	if (!input) {
+		CalculatePacingMaxFPS();
+	}
 }
 
 function SetUniverseInputShownFields () {
@@ -4280,8 +4283,81 @@ function UpdateSendingModeOptions () {
 	}
 }
 
+function CalculatePacingMaxFPS () {
+	var el = $('#pacingMaxFPS');
+	if (el.length == 0 || $('#E131PacingRate').length == 0) {
+		return;
+	}
+	var pacing = parseInt($('#E131PacingRate').val());
+	if (!(pacing > 0) || UniverseCount == 0) {
+		el.html('');
+		return;
+	}
+	// Pacing is applied per unicast destination, so the slowest controller is
+	// the one with the most wire bytes per frame.  42 = IP+UDP+ethernet
+	// framing per packet; the rest is each protocol's own header.
+	var perDest = {};
+	for (var i = 0; i < UniverseCount; i++) {
+		var activeEl = document.getElementById('chkActive[' + i + ']');
+		var typeEl = document.getElementById('universeType[' + i + ']');
+		var ipEl = document.getElementById('txtIP[' + i + ']');
+		var sizeEl = document.getElementById('txtSize[' + i + ']');
+		var ucountEl = document.getElementById('numUniverseCount[' + i + ']');
+		if (!activeEl || !activeEl.checked || !typeEl || !ipEl || !sizeEl) {
+			continue;
+		}
+		var type = parseInt(typeEl.value);
+		var addr = ipEl.value.trim();
+		var chans = parseInt(sizeEl.value) || 0;
+		var ucount = (ucountEl ? parseInt(ucountEl.value) : 1) || 1;
+		var bytes = 0;
+		if (type == 1) {
+			// E1.31 unicast
+			bytes = ucount * (chans + 126 + 42);
+		} else if (type == 3 || type == 9) {
+			// ArtNet unicast
+			bytes = ucount * (chans + 18 + 42);
+		} else if (type == 4 || type == 5) {
+			// DDP
+			bytes = chans + Math.ceil(chans / 1440) * (10 + 42);
+		} else if (type == 6 || type == 7) {
+			// KiNet
+			bytes = ucount * (chans + 24 + 42);
+		} else if (type == 8) {
+			// Twinkly
+			bytes = chans + Math.ceil(chans / 900) * (12 + 42);
+		} else {
+			// multicast/broadcast types are not paced
+			continue;
+		}
+		if (addr == '' || bytes <= 0) {
+			continue;
+		}
+		perDest[addr] = (perDest[addr] || 0) + bytes;
+	}
+	var worstAddr = '';
+	var worstBytes = 0;
+	for (var a in perDest) {
+		if (perDest[a] > worstBytes) {
+			worstBytes = perDest[a];
+			worstAddr = a;
+		}
+	}
+	if (worstBytes == 0) {
+		el.html('');
+		return;
+	}
+	var fps = Math.floor((pacing * 1000000) / (worstBytes * 8));
+	if (fps > 999) {
+		el.html('Supports &gt;999 fps');
+	} else {
+		el.html('Supports &asymp;' + fps + ' fps max (limited by ' + worstAddr + ')');
+	}
+}
+
 function PacingRateChanged () {
 	UpdateSendingModeOptions();
+	CalculatePacingMaxFPS();
 }
 
 function postUniverseJSON (input) {
