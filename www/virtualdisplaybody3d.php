@@ -3298,7 +3298,7 @@ if (!isset($standalone)) {
 
 <style>
     #canvas-container {
-        border: 1px solid #333;
+        border: 1px solid var(--fpp-border);
         display: inline-block;
         position: relative;
     }
@@ -3365,22 +3365,23 @@ if (!isset($standalone)) {
     #controls {
         margin: 10px 0;
         padding: 10px;
-        background-color: #f5f5f5;
-        border: 1px solid #ddd;
+        background-color: var(--fpp-bg-card);
+        border: 1px solid var(--fpp-border);
         border-radius: 4px;
     }
 
     #controls input[type='button'] {
         padding: 6px 12px;
         margin-right: 8px;
-        background-color: #fff;
-        border: 1px solid #ccc;
+        color: var(--fpp-text-primary);
+        background-color: var(--fpp-bg-page);
+        border: 1px solid var(--fpp-border);
         border-radius: 3px;
         cursor: pointer;
     }
 
     #controls input[type='button']:hover {
-        background-color: #e6e6e6;
+        background-color: var(--fpp-bg-hover);
     }
 
     #controls span {
@@ -3401,7 +3402,7 @@ if (!isset($standalone)) {
     .control-section {
         margin-top: 10px;
         padding-top: 8px;
-        border-top: 1px solid #e0e0e0;
+        border-top: 1px solid var(--fpp-border-light);
     }
 
     .advanced-toggle {
@@ -3412,7 +3413,7 @@ if (!isset($standalone)) {
     .advanced-section {
         margin-top: 10px;
         padding-top: 10px;
-        border-top: 1px dashed #ccc;
+        border-top: 1px dashed var(--fpp-border);
         display: none;
     }
 </style>
@@ -3482,7 +3483,7 @@ if (!isset($standalone)) {
                     oninput='handleCameraControlInput();'>
                 <span id='panZValue'>0</span>
             </span>
-            <span style="margin-left: 15px; color: #666; font-style: italic;">
+            <span class="ms-3 fst-italic" style="color: var(--fpp-text-muted);">
                 Left-click: rotate | Middle-click: pan | Scroll: zoom
             </span>
         </div>
@@ -3491,7 +3492,7 @@ if (!isset($standalone)) {
                 onclick='togglePixelOffsetAdvanced();'>
         </div>
         <div id='pixelOffsetSection' class='advanced-section'>
-            <div style="margin-bottom: 8px; color: #555;">
+            <div class="mb-2" style="color: var(--fpp-text-secondary);">
                 Adjust pixel position offsets to align with 3D objects. Click "Save Offsets" to remember your settings.
             </div>
             <span class="control-group">
@@ -3529,7 +3530,7 @@ if (!isset($standalone)) {
                     <span id="testModeColorValue">#FF0000</span>
                 </span>
                 <span class="control-group" id="testModeStatus">Live data</span>
-                <div style="margin-top: 5px; color: #666; font-style: italic;">
+                <div class="mt-1 fst-italic" style="color: var(--fpp-text-muted);">
                     When enabled, incoming data is ignored and every pixel renders the selected color so you can inspect
                     spatial placement.
                 </div>
@@ -3539,8 +3540,8 @@ if (!isset($standalone)) {
 <?php endif; ?>
 <div id='canvas-container'></div>
 <?php if (!isset($standalone) || !$standalone): ?>
-    <div id='objectsList'
-        style="margin-top: 10px; padding: 10px; background-color: #f9f9f9; border: 1px solid #ddd; border-radius: 4px;">
+    <div id='objectsList' class="mt-2 p-2"
+        style="background-color: var(--fpp-bg-card); border: 1px solid var(--fpp-border); border-radius: 4px;">
         <em>3D Objects will appear here once loaded...</em>
     </div>
 <?php endif; ?>

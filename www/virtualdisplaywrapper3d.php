@@ -39,8 +39,8 @@
         <script src="js/filepond.min.js"></script>
         <style>
             .fileponduploader {
-                background: #fff;
-                border: 2px dashed #ced4da;
+                background: var(--fpp-bg-card);
+                border: 2px dashed var(--fpp-border);
                 border-radius: 10px;
                 transition: 0.3s all cubic-bezier(0.02, 0.72, 0.32, 0.99);
             }
@@ -61,7 +61,7 @@
             #asset-uploader-section {
                 margin-top: 30px;
                 padding: 20px;
-                background: #f5f5f5;
+                background: var(--fpp-bg-card);
                 border-radius: 8px;
             }
         </style>
