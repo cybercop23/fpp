@@ -2484,8 +2484,8 @@
         "tags": [
           "fppd"
         ],
-        "summary": "fppd/log/level/{level}",
-        "description": "Set the logging level for a specific log channel.",
+        "summary": "Set logging levels.",
+        "description": "There is no separate channel parameter: the {level} path segment carries both the level and the optional channel targeting. A bare level name - one of error, warn, info, debug, or excess - sets that level globally for every log channel. To target specific channels instead, use level:channel,channel and separate multiple groups with a semicolon, e.g. debug:Schedule,Player;info:Sync. Channel names are case-sensitive and match those returned by GET /api/fppd/log (for example Command, Control, HTTP, Schedule, Sync).",
         "responses": {
           "200": {
             "description": "Log level updated."
@@ -4029,6 +4029,11 @@
                         "family": "inet",
                         "local": "192.168.50.146",
                         "prefixlen": 24
+                      },
+                      {
+                        "family": "inet6",
+                        "local": "2001:db8::146",
+                        "prefixlen": 64
                       }
                     ],
                     "wifi": {
@@ -4275,6 +4280,48 @@
                       "SSID": "Christmas"
                     }
                   ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/network/wifi/status/{interface}": {
+      "parameters": [
+        {
+          "name": "interface",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "Get WiFi connection status / diagnostics",
+        "description": "Returns the wpa_supplicant association state for the given wireless `{interface}` plus a human-readable reason describing why it is (not) connected (wrong password, SSID not in range, waiting for DHCP, etc).",
+        "responses": {
+          "200": {
+            "description": "WiFi connection status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                },
+                "example": {
+                  "status": "OK",
+                  "connected": false,
+                  "wpa_state": "SCANNING",
+                  "ssid": "",
+                  "configuredSSID": "MyNet",
+                  "ip": "",
+                  "signal": null,
+                  "ssidVisible": false,
+                  "reason": "Network 'MyNet' not found in range (or it is hidden)."
                 }
               }
             }

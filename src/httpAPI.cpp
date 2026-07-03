@@ -782,7 +782,15 @@ HttpResponsePtr PlayerResource::render_GET(const HttpRequestPtr& req) {
  */
 
 /**
- * Set the logging level for a specific log channel.
+ * Set logging levels.
+ *
+ * There is no separate channel parameter: the {level} path segment carries both
+ * the level and the optional channel targeting. A bare level name - one of
+ * error, warn, info, debug, or excess - sets that level globally for every log
+ * channel. To target specific channels instead, use level:channel,channel and
+ * separate multiple groups with a semicolon, e.g. debug:Schedule,Player;info:Sync.
+ * Channel names are case-sensitive and match those returned by GET /api/fppd/log
+ * (for example Command, Control, HTTP, Schedule, Sync).
  *
  * @route POST /api/fppd/log/level/{level}
  * @response 200 Log level updated.
@@ -1055,7 +1063,7 @@ HttpResponsePtr PlayerResource::render_POST(const HttpRequestPtr& req) {
         result["Message"] = std::string("endpoint fppd/") + url + " does not exist";
     }
 
-    if (!result.isMember("status")) {
+    if (!result.isMember("Status")) {
         result["Status"] = "ERROR";
         result["respCode"] = 400;
         result["Message"] = "POST endpoint helper did not set result JSON";
@@ -1156,7 +1164,7 @@ HttpResponsePtr PlayerResource::render_PUT(const HttpRequestPtr& req) {
         result["Message"] = std::string("endpoint fppd/") + url + " does not exist";
     }
 
-    if (!result.isMember("status")) {
+    if (!result.isMember("Status")) {
         result["Status"] = "ERROR";
         result["respCode"] = 400;
         result["Message"] = "PUT endpoint helper did not set result JSON";
