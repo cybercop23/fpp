@@ -132,6 +132,27 @@ def parse_docblocks(php_source):
         body_raw = body_match.group(1).strip() if body_match else None
 
         path_param_names = set(extract_path_params(oapi_path))
+
+        # @pathparam <name> [enum:a,b,c] [example:x] [free-text description]
+        # Lets a path parameter advertise valid values / a default so the API
+        # tester (Scalar) sends something usable instead of a placeholder.
+        path_param_meta = {}
+        for pm in re.finditer(r'@pathparam\s+(\S+)\s+(.*)', text):
+            pname = pm.group(1)
+            rest = pm.group(2).strip()
+            meta = {}
+            m_enum = re.search(r'enum:(\S+)', rest)
+            if m_enum:
+                meta['enum'] = m_enum.group(1).split(',')
+                rest = rest.replace(m_enum.group(0), '', 1).strip()
+            m_ex = re.search(r'example:(\S+)', rest)
+            if m_ex:
+                meta['example'] = m_ex.group(1)
+                rest = rest.replace(m_ex.group(0), '', 1).strip()
+            if rest:
+                meta['description'] = rest
+            path_param_meta[pname] = meta
+
         params = []
         for pm in re.finditer(r'@param\s+(\S+)\s+(\S+)\s*(.*)', text):
             php_type, pname, pdesc = pm.group(1), pm.group(2), pm.group(3).strip()
@@ -173,6 +194,7 @@ def parse_docblocks(php_source):
             'responses':   responses,
             'badges':      badges,
             'params':      params,
+            'path_param_meta': path_param_meta,
         }
 
 
@@ -253,10 +275,24 @@ def build_openapi(endpoints):
         path_item = {}
 
         if params:
-            path_item['parameters'] = [
-                {'name': p, 'in': 'path', 'required': True, 'schema': {'type': 'string'}}
-                for p in params
-            ]
+            # Merge any @pathparam metadata declared on the endpoints for this path.
+            meta_by_name = {}
+            for ep in eps:
+                for name, meta in ep.get('path_param_meta', {}).items():
+                    meta_by_name.setdefault(name, {}).update(meta)
+
+            path_item['parameters'] = []
+            for p in params:
+                meta = meta_by_name.get(p, {})
+                schema = {'type': 'string'}
+                if 'enum' in meta:
+                    schema['enum'] = meta['enum']
+                entry = {'name': p, 'in': 'path', 'required': True, 'schema': schema}
+                if 'example' in meta:
+                    entry['example'] = meta['example']
+                if 'description' in meta:
+                    entry['description'] = meta['description']
+                path_item['parameters'].append(entry)
 
         for ep in sorted(eps, key=lambda e: e['method']):
             method        = ep['method']

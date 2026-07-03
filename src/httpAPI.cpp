@@ -793,7 +793,9 @@ HttpResponsePtr PlayerResource::render_GET(const HttpRequestPtr& req) {
  * (for example Command, Control, HTTP, Schedule, Sync).
  *
  * @route POST /api/fppd/log/level/{level}
+ * @pathparam level enum:error,warn,info,debug,excess example:debug Log level to apply globally, or a level:channel[,channel] targeting expression.
  * @response 200 Log level updated.
+ * @response 400 Invalid or unrecognized log level.
  */
 
 /**
@@ -973,8 +975,20 @@ HttpResponsePtr PlayerResource::render_POST(const HttpRequestPtr& req) {
     } else if (replaceStart(url, "gpio/ext")) {
         PostGPIOExt(data, result);
     } else if (replaceStart(url, "log/level/")) {
-        SetLogLevelComplex(url);
-        SetOKResult(result, "Log Level Updated");
+        // SetLogLevelComplex returns false when the level (or targeted channel)
+        // is not recognized and nothing was changed.  Report that back rather
+        // than falsely claiming success.
+        if (SetLogLevelComplex(url)) {
+            // Persist the resulting per-channel levels to the settings file so
+            // they survive a restart and stay in sync with the Logging settings
+            // page (which reads/writes the LogLevel_* settings).
+            for (FPPLoggerInstance* logger : FPPLogger::INSTANCE.allInstances()) {
+                setSetting("LogLevel_" + logger->name, LogLevelToString(logger->level), true);
+            }
+            SetOKResult(result, "Log Level Updated");
+        } else {
+            SetErrorResult(result, 400, "Invalid or unrecognized log level: " + url);
+        }
     } else if (url == "outputs") {
         PostOutputs(data, result);
     } else if (url == "outputs/remap") {

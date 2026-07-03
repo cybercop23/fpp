@@ -2476,8 +2476,17 @@
           "in": "path",
           "required": true,
           "schema": {
-            "type": "string"
-          }
+            "type": "string",
+            "enum": [
+              "error",
+              "warn",
+              "info",
+              "debug",
+              "excess"
+            ]
+          },
+          "example": "debug",
+          "description": "Log level to apply globally, or a level:channel[,channel] targeting expression."
         }
       ],
       "post": {
@@ -2489,6 +2498,9 @@
         "responses": {
           "200": {
             "description": "Log level updated."
+          },
+          "400": {
+            "description": "Invalid or unrecognized log level."
           }
         }
       }
