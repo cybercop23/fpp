@@ -1176,8 +1176,9 @@ function readCapes($cd, $capes)
                 $('#' + type + '_Output_0_' + (port + x + 2) + '_0').show();
                 $('#' + type + '_Output_0_' + (port + x + 3) + '_0').show();
                 var o = port + x;
-                var str = "<tr id='ROW_RULER_DIFFERENTIAL_" + o + "'><td colSpan='3'><hr></td><td></td>";
-                str += "<td colspan='2' style='font-size:0.7em; text-align:left; white-space: nowrap;'>Differential Receiver: ";
+                var str = "<tr id='ROW_RULER_DIFFERENTIAL_" + o + "'><td colSpan='15'>";
+                str += "<div class='d-flex align-items-center gap-2' style='font-size:0.7em; white-space: nowrap;'>";
+                str += "<hr class='m-0' style='flex:0 0 40px;'><span>Differential Receiver: ";
 
                 str += "<select id='DifferentialType" + o + "' onChange='PixelStringDifferentialTypeChanged(" + o + ");'>";
                 str += "<option value='0' selected> Standard</option>";
@@ -1194,7 +1195,7 @@ function readCapes($cd, $capes)
                 str += "<option value='2'>2 Smart Receivers</option>";
                 str += "<option value='3'>3 Smart Receivers</option>";
                 str += "</select>";
-                str += "</td><td colSpan='9'><hr></td>";
+                str += "</span><hr class='flex-grow-1 m-0'></div></td>";
                 str += "</tr>";
                 $('#' + type + '_Output_0_' + o + '_0').before(str);
             }
@@ -1421,9 +1422,9 @@ function readCapes($cd, $capes)
                                 inExpansion = true;
                             }
                             if (IsDifferential(subType, o) || IsDifferentialExpansion(inExpansion, expansionType, o)) {
-                                str += "<tr id='ROW_RULER_DIFFERENTIAL_" + o + "'><td colSpan='2'><hr></td>";
-                                str += "<td></td>";
-                                str += "<td colspan='3' style='font-size:0.7em; text-align:left; white-space: nowrap;'>Differential Receiver: ";
+                                str += "<tr id='ROW_RULER_DIFFERENTIAL_" + o + "'><td colSpan='15'>";
+                                str += "<div class='d-flex align-items-center gap-2' style='font-size:0.7em; white-space: nowrap;'>";
+                                str += "<hr class='m-0' style='flex:0 0 40px;'><span>Differential Receiver: ";
 
 
                                 var supportSmart = SupportsSmartReceivers(subType);
@@ -1471,7 +1472,7 @@ function readCapes($cd, $capes)
                                 }
                                 str += "</select>";
 
-                                str += "</td><td colSpan='9'><hr></td>";
+                                str += "</span><hr class='flex-grow-1 m-0'></div></td>";
                                 str += "</tr>";
 
                                 if (diffType >= 1) {
@@ -2491,7 +2492,7 @@ function readCapes($cd, $capes)
                 <div class="col-md-auto form-inline">
                     <div id="PixelTestPatternDiv">
                         <b>Testing:</b>
-                        <select id='PixelTestPatternType' class='form-select' onchange='SetPixelTestPattern();'>
+                        <select id='PixelTestPatternType' class='form-select d-inline-block w-auto align-middle ms-1' onchange='SetPixelTestPattern();'>
                             <option value='0'>Off</option>
                             <option value='1'>Port Number</option>
                             <option value='2'>Pixel Count by Port</option>

@@ -423,8 +423,8 @@
                         $lpTabStyleActive = "active";
                     }
                     ?>
-                    <div class="d-flex align-items-end flex-wrap">
-                        <ul class="nav nav-pills pageContent-tabs flex-grow-1" id="channelOutputTabs" role="tablist">
+                    <div class="d-flex align-items-end flex-wrap mb-3" style="border-bottom: 1px solid var(--fpp-border)">
+                        <ul class="nav nav-pills pageContent-tabs flex-grow-1 border-bottom-0 mb-0" id="channelOutputTabs" role="tablist">
                             <li class="nav-item <?= $e131TabStyle ?>" id="tab-e131-LI" role="presentation">
                                 <a class="nav-link <?= $e131TabStyleActive ?>" id="tab-e131-tab" type="button"
                                     tabType='UDP' data-bs-toggle="pill" data-bs-target="#tab-e131" role="tab"
@@ -498,7 +498,7 @@
                                 </a>
                             </li>
                         </ul>
-                        <div class="dropdown ms-auto" style="padding-bottom: 0.85em; margin-bottom: 1em"
+                        <div class="dropdown ms-auto" style="padding-bottom: 0.85em"
                             id="tab-add-output-LI">
                             <button class="btn btn-outline-success dropdown-toggle" type="button"
                                 data-bs-toggle="dropdown" aria-expanded="false" id="addOutputDropdown">

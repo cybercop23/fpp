@@ -3201,8 +3201,9 @@ a.api-anchor {
 }
 
 .inputWarning {
-	border: 2px solid #ffac1c !important;
-	background-color: #ffac1c;
+	border: 2px solid #cc8400 !important;
+	background-color: #f0a500;
+	color: #000 !important;
 }
 
 .hideme {
