@@ -2829,9 +2829,15 @@ if ($skipHTMLCodeOutput === false) {
 
             }
 
-            function PopulateBackupDirs(data) {
+            function PopulateBackupDirs(data, excludeRoot = false) {
                 var options = "";
                 for (var i = 0; i < data.length; i++) {
+                    // Remote File Copy backups always live in per-host subdirs under
+                    // media/backups/, so the top-level '/' is not a restorable snapshot -
+                    // selecting it would rsync every machine's backup folder into /media
+                    // (see issue #2714). Drop it for those restores.
+                    if (excludeRoot && data[i] == '/')
+                        continue;
                     if (data[i].substring(0, 5) != 'ERROR')
                         options += "<option value='" + data[i] + "'>" + data[i] + "</option>";
                     else
@@ -2840,7 +2846,7 @@ if ($skipHTMLCodeOutput === false) {
                 $('#backup\\.PathSelect').html(options);
             }
 
-            function GetBackupDirsViaAPI(host, remoteStorageSelected = '') {
+            function GetBackupDirsViaAPI(host, remoteStorageSelected = '', excludeRoot = false) {
                 $('#backup\\.PathSelect').html('<option>Loading...</option>');
 
                 //Build a different URL if a storage device has been specified
@@ -2860,7 +2866,7 @@ if ($skipHTMLCodeOutput === false) {
 
                 $.get(url
                 ).done(function (data) {
-                    PopulateBackupDirs(data);
+                    PopulateBackupDirs(data, excludeRoot);
                     $('#backup\\.PathSelect').parent().closest('td').removeClass('fpp-backup-action-loading');
                 }).fail(function () {
                     $('#backup\\.PathSelect').html('');
@@ -2879,8 +2885,11 @@ if ($skipHTMLCodeOutput === false) {
                     }
                 }
 
-                //Get the backup directories on the specified storage device
-                GetBackupDirsViaAPI($('#backup\\.Host').val(), selectedStorage);
+                //Get the backup directories on the specified storage device.
+                //Exclude the top-level '/' - for remote restores it maps to the
+                //media/backups/ container (all machines' backups), not a single
+                //restorable snapshot (issue #2714).
+                GetBackupDirsViaAPI($('#backup\\.Host').val(), selectedStorage, true);
             }
 
             function BackupDirectionChanged() {
@@ -2921,7 +2930,10 @@ if ($skipHTMLCodeOutput === false) {
                         $('.copyHost').hide();
                         $('.copyHostDevice').hide();
                         $('.copyBackups').hide();
-                        GetBackupDirsViaAPI('<?php echo $_SERVER['HTTP_HOST'] ?>');
+                        // Exclude the top-level '/' - like remote restores it maps to
+                        // the media/backups/ container (all machines' backups), not a
+                        // single restorable snapshot (issue #2714).
+                        GetBackupDirsViaAPI('<?php echo $_SERVER['HTTP_HOST'] ?>', '', true);
                         break;
                     case 'TOREMOTE':
                         $('.copyUSB').hide();

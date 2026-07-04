@@ -114,7 +114,9 @@ for action in $@; do
 
     case $action in
     "All")
-        rsync $EXTRA_ARGS $REMOTE_COMPRESS --exclude=music/* --exclude=sequences/* --exclude=videos/* $SOURCE/* $DEST  2>&1 | IgnoreWarnings
+        # Exclude backups/* so restoring a snapshot doesn't re-import the source
+        # machine's own backups folder (backups-of-backups) - issue #2714
+        rsync $EXTRA_ARGS $REMOTE_COMPRESS --exclude=music/* --exclude=sequences/* --exclude=videos/* --exclude=backups/* $SOURCE/* $DEST  2>&1 | IgnoreWarnings
         rsync $EXTRA_ARGS $SOURCE/music $DEST  2>&1 | IgnoreWarnings
         rsync $EXTRA_ARGS $REMOTE_COMPRESS $SOURCE/sequences $DEST  2>&1 | IgnoreWarnings
         rsync $EXTRA_ARGS $SOURCE/videos $DEST  2>&1 | IgnoreWarnings
