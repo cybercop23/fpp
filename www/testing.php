@@ -1437,13 +1437,10 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 											</label>
 										</div>
 										<div class="col-md-6">
-											<div><b>Update Interval:</b></div>
+											<div><b>Update Interval:</b>&nbsp;<small class="text-muted"><span id='testModeCycleMSText'>1000</span><span> ms</span></small></div>
 											<div>
 												<input id="testModeCycleMS" type="range" min="100" max="5000"
 													value="1000" step="100" />
-												<small class="form-text text-muted">
-													<span id='testModeCycleMSText'>1000</span><span> ms</span>
-												</small>
 											</div>
 										</div>
 									</div>
