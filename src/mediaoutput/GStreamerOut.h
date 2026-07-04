@@ -118,6 +118,11 @@ private:
     std::atomic<bool> m_playing{false};     // written from GStreamer thread (BusSyncHandler), read from main loop
     std::atomic<bool> m_shutdownFlag{false};  // guards callbacks during teardown
     bool m_teardownComplete = false;        // makes Stop() idempotent — the expensive pipeline teardown (silence flush + DRM release sleeps) must run only once even when Stop() is called both directly and via Close()/dtor
+    // Set when the supervised pipeline-NULL transition timed out and the
+    // pipeline was abandoned to a reaper thread (wedged V4L2 decoder, issue
+    // #2695).  Close() must then leak the pipeline's DRM planes and shared
+    // DRM fd refs — the still-alive kmssinks own them in the kernel.
+    bool m_teardownAbandoned = false;
     // Cancellation token for the detached Start() PLAYING-transition thread.
     // Shared (shared_ptr) so the thread can safely outlive this object: Stop()
     // sets it to abort the volume ramp / deferred attach early, and the thread

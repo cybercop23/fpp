@@ -29,6 +29,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <sstream>
+#include <condition_variable>
 #include <thread>
 #include <sys/ioctl.h>
 #include <libdrm/drm.h>
@@ -49,6 +50,82 @@
 
 // Static instance pointer for callbacks
 GStreamerOutput* GStreamerOutput::m_currentInstance = nullptr;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Wedged-decoder recovery (issue #2695).
+//
+// The Pi's V4L2 hardware decoder can wedge after ~24h of continuous use even
+// with CMA healthy (confirmed on the 2026-07-03 soak: preroll failure with
+// 402MB CmaFree).  Once wedged, two things go wrong in-process:
+//   1. gst_element_set_state(NULL) on the wedged pipeline blocks FOREVER —
+//      the soak's playlist thread hung 2h25m in that call and then died with
+//      SIGBUS.  Teardown is therefore supervised: the state change runs on a
+//      reaper thread with a deadline, and on timeout the pipeline is
+//      deliberately ABANDONED (leaked, ~40 fds + threads) so the playlist
+//      thread survives.  One leaked pipeline is recoverable; a hung playlist
+//      thread is not.
+//   2. The decoder stays wedged, so subsequent videos fail preroll too.
+//      Consecutive wedge events (preroll-watchdog fires, abandoned
+//      teardowns) are counted here; at the limit fppd restarts itself via
+//      ShutdownFPPD(true) — a fresh process re-opens the V4L2 device, which
+//      bounds the abandoned-pipeline fd leakage and recovers the decoder in
+//      the cases we can recover.  The count resets the moment any pipeline
+//      reports a valid playback position (decoder demonstrably healthy).
+// ──────────────────────────────────────────────────────────────────────────────
+static constexpr int PIPELINE_TEARDOWN_TIMEOUT_MS = 10000;
+static std::atomic<int> s_consecutiveWedgeEvents{ 0 };
+
+static void RecordWedgeEventAndMaybeRestart(const char* what) {
+    int fails = s_consecutiveWedgeEvents.fetch_add(1) + 1;
+    // 0 disables the self-restart escalation (teardown abandonment still applies)
+    int limit = getSettingInt("GStreamerWedgeRestartLimit", 3);
+    LogErr(VB_MEDIAOUT, "GStreamer: %s (consecutive decoder-wedge events: %d, restart limit: %d)\n",
+           what, fails, limit);
+    if (limit > 0 && fails >= limit) {
+        LogErr(VB_MEDIAOUT, "GStreamer: %d consecutive pipeline wedges — hardware decoder is not recoverable in-process, restarting fppd\n", fails);
+        WarningHolder::AddWarningTimeout(300, 37, "Restarting fppd: hardware media decoder wedged (repeated pipeline hangs, issue #2695)");
+        ShutdownFPPD(true);
+    }
+}
+
+// Drive a pipeline to GST_STATE_NULL on a reaper thread with a deadline.
+// Returns true when the pipeline reached NULL in time.  Returns false when
+// the transition wedged: the reaper thread keeps its own ref and either
+// finishes late (logged) or blocks forever, in which case the pipeline and
+// its resources are intentionally leaked.  After a false return the caller
+// must NOT release the pipeline's kernel-side resources (DRM planes, shared
+// DRM fd refs) — the wedged pipeline still owns them.
+static bool SetPipelineToNullSupervised(GstElement* pipeline, int timeoutMs) {
+    struct TeardownCtx {
+        std::mutex m;
+        std::condition_variable cv;
+        bool done = false;
+    };
+    auto ctx = std::make_shared<TeardownCtx>();
+    gst_object_ref(pipeline);
+    std::thread([pipeline, ctx, timeoutMs]() {
+        SetThreadName("FPP-GstReaper");
+        uint64_t start = GetTimeMS();
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+        gst_object_unref(pipeline);
+        uint64_t took = GetTimeMS() - start;
+        if (took > (uint64_t)timeoutMs) {
+            // The caller already gave up and abandoned this pipeline —
+            // record that the kernel/GStreamer eventually let go so a
+            // "late but not never" wedge is distinguishable in soak logs.
+            LogWarn(VB_MEDIAOUT, "GStreamer: abandoned pipeline teardown eventually completed after %llu ms\n",
+                    (unsigned long long)took);
+        }
+        {
+            std::lock_guard<std::mutex> l(ctx->m);
+            ctx->done = true;
+        }
+        ctx->cv.notify_all();
+    }).detach();
+
+    std::unique_lock<std::mutex> l(ctx->m);
+    return ctx->cv.wait_for(l, std::chrono::milliseconds(timeoutMs), [&] { return ctx->done; });
+}
 
 // Static audio sample buffer for WLED audio-reactive effects
 std::array<float, GStreamerOutput::SAMPLE_BUFFER_SIZE> GStreamerOutput::s_sampleBuffer = {};
@@ -1570,8 +1647,16 @@ int GStreamerOutput::Stop(void) {
 
         Stopping();
         LogDebug(VB_MEDIAOUT, "GStreamerOutput::Stop() - setting pipeline to NULL\n");
-        gst_element_set_state(m_pipeline, GST_STATE_NULL);
-        LogDebug(VB_MEDIAOUT, "GStreamerOutput::Stop() - pipeline NULL complete\n");
+        // Supervised: a wedged V4L2 decoder (issue #2695) makes this state
+        // change block forever — on the 2026-07-03 soak it hung the playlist
+        // thread for 2h25m and ended in SIGBUS.  On timeout the pipeline is
+        // abandoned (reaper thread keeps the ref) so playback can continue.
+        if (SetPipelineToNullSupervised(m_pipeline, PIPELINE_TEARDOWN_TIMEOUT_MS)) {
+            LogDebug(VB_MEDIAOUT, "GStreamerOutput::Stop() - pipeline NULL complete\n");
+        } else {
+            m_teardownAbandoned = true;
+            RecordWedgeEventAndMaybeRestart("pipeline teardown wedged, abandoning pipeline");
+        }
 
         // On Raspberry Pi's vc4/v3d DRM driver, the kernel needs time to
         // fully release CRTC/plane resources after kmssink's DRM fd is
@@ -1580,8 +1665,9 @@ int GStreamerOutput::Stop(void) {
         // still held by the kernel.  150ms covers the observed ~100-120ms
         // release window on Pi 5 hardware.
         // Only needed when kmssink is in the primary pipeline (not when
-        // PipeWire routing sends HDMI through a consumer pipeline).
-        if (m_kmssink || !m_directConnectorIds.empty()) {
+        // PipeWire routing sends HDMI through a consumer pipeline), and
+        // pointless after an abandoned teardown (nothing was released).
+        if (!m_teardownAbandoned && (m_kmssink || !m_directConnectorIds.empty())) {
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
             LogDebug(VB_MEDIAOUT, "GStreamerOutput::Stop() - DRM release delay complete\n");
         }
@@ -1632,6 +1718,9 @@ int GStreamerOutput::Process(void) {
         // One-shot: log pipeline clock and sink sync state on first position update
         if (havePos && m_wallStartMs == 0) {
             m_wallStartMs = GetTimeMS();  // record wall time at first pos (also used by preroll watchdog)
+            // A valid position means the pipeline prerolled and the decoder
+            // is producing — clear the consecutive-wedge escalation counter.
+            s_consecutiveWedgeEvents = 0;
             // The remaining pipeline/sink introspection here exists purely to
             // populate the debug log — skip the GStreamer queries entirely when
             // MediaOut isn't at DEBUG (or more verbose).
@@ -1822,6 +1911,7 @@ int GStreamerOutput::Process(void) {
                 LogWarn(VB_MEDIAOUT, "GStreamer pipeline failed to preroll within %dms "
                         "(stuck in PAUSED — HW decoder may have wedged, see issue #2695). "
                         "Forcing stop so the playlist advances.\n", PREROLL_TIMEOUT_MS);
+                RecordWedgeEventAndMaybeRestart("pipeline failed to preroll");
                 m_playing = false;
                 if (m_mediaOutputStatus) {
                     m_mediaOutputStatus->status = MEDIAOUTPUTSTATUS_IDLE;
@@ -2078,8 +2168,16 @@ int GStreamerOutput::Close(void) {
     // elements to the shared free pool.  The kmssinks themselves were owned by
     // the pipeline bin and were destroyed by the unref above; without this the
     // planes stay marked allocated forever and eventually run out.
-    for (int planeId : m_allocatedPlanes) {
-        ReleasePlane(planeId);
+    //
+    // EXCEPT after an abandoned (wedged) teardown: the pipeline and its
+    // kmssinks are still alive on the reaper thread and still hold these
+    // planes in DRM — returning them to the pool would let the next pipeline
+    // claim a plane the kernel considers busy.  Leak them with the pipeline;
+    // the wedge-escalation restart bounds the loss.
+    if (!m_teardownAbandoned) {
+        for (int planeId : m_allocatedPlanes) {
+            ReleasePlane(planeId);
+        }
     }
     m_allocatedPlanes.clear();
 
@@ -2090,8 +2188,14 @@ int GStreamerOutput::Close(void) {
     // under a still-alive kmssink.  Runs unconditionally (outside the
     // `if (m_pipeline)` guard) so a Start() that failed after acquiring a fd
     // but before/without building a full pipeline still releases it.
-    for (const std::string& card : m_acquiredDrmCards) {
-        ReleaseSharedDrmFd(card);
+    //
+    // Same abandonment exception as the planes above: a wedged pipeline's
+    // kmssinks are still alive and using the fd — dropping our refs could
+    // close it under them.  Leak the refs with the pipeline.
+    if (!m_teardownAbandoned) {
+        for (const std::string& card : m_acquiredDrmCards) {
+            ReleaseSharedDrmFd(card);
+        }
     }
     m_acquiredDrmCards.clear();
 
