@@ -121,14 +121,19 @@ FPPOLEDUtils::InputAction* FPPOLEDUtils::configureGPIOPin(const std::string& pin
     action->mode = mode;
     action->gpiodPin = pin.ptr();
 
-    bool rising = true;
-    bool falling = true;
-    if (edge == "falling") {
-        rising = false;
-    } else if (edge == "rising") {
-        falling = false;
-    }
-    action->file = pin.requestEventFile(rising, falling);
+    // Always request BOTH edges, even when this pin only acts on one of them.
+    // Some I2C GPIO expanders (e.g. the pca9675/pcf857x behind a device-tree
+    // interrupt line) have an irqchip that interrupts on every line change and
+    // ignores the requested edge type. If we ask the kernel for a single edge,
+    // gpiolib blindly stamps every interrupt with that edge, so a button's
+    // release gets reported as another press and the action fires twice. When
+    // both edges are requested, gpiolib samples the line level per interrupt and
+    // reports the true direction; checkAction() then filters to the wanted edge
+    // via the per-action min/max value. On regular SoC GPIOs the extra (release)
+    // edge is simply filtered out, so this is safe everywhere. The unused `edge`
+    // hint is retained in the signature for callers/back-compat.
+    (void)edge;
+    action->file = pin.requestEventFile(true, true);
     return action;
 }
 void FPPOLEDUtils::setInputFlag(const std::string& action) {
@@ -240,7 +245,15 @@ bool FPPOLEDUtils::parseInputActions(const std::string& file) {
                     }
 
                     pin.configPin(action->mode, false, nameDesc);
-                    action->file = pin.requestEventFile(edge != "falling", edge == "falling");
+                    // Request BOTH edges even though each button only acts on one.
+                    // I2C GPIO expanders (pca9675/pcf857x) interrupt on every line
+                    // change and ignore the requested edge type; asking for a single
+                    // edge makes the kernel mislabel the button release as another
+                    // press, firing the action twice. With both edges requested,
+                    // gpiolib reports the true direction and checkAction() (below)
+                    // filters to the desired edge via actionValue. Harmless on real
+                    // SoC GPIOs, where the extra release edge is just filtered out.
+                    action->file = pin.requestEventFile(true, true);
 
                     if (type == "gpiod") {
                         // this is the mode for various gpio extenders like the pca9675 chip that
