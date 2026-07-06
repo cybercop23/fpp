@@ -1362,6 +1362,12 @@ void MultiSync::PeriodicPing() {
         unsigned long timeoutRePingAll = (unsigned long)t - 60 * 600;
         std::unique_lock<std::recursive_mutex> lock(m_systemsLock);
         bool unicastChanged = false;
+        // PingSingleRemoteViaHTTP -> UpdateSystem can push_back onto
+        // m_remoteSystems (the recursive mutex doesn't protect against our own
+        // thread), reallocating the vector and invalidating `it` mid-loop.
+        // Collect the addresses (by value) and do the HTTP probes after the
+        // loop, outside the lock - they are blocking curl calls anyway.
+        std::vector<std::string> httpPingAddresses;
         for (auto it = m_remoteSystems.begin(); it != m_remoteSystems.end();) {
             if (it->lastSeen < timeoutRemove) {
                 LogInfo(VB_SYNC, "Have not seen %s in over 2 hours, removing\n", it->address.c_str());
@@ -1374,7 +1380,7 @@ void MultiSync::PeriodicPing() {
                 if (it->multiSync) {
                     PingSingleRemote(*it, 1);
                 } else {
-                    PingSingleRemoteViaHTTP(it->address);
+                    httpPingAddresses.push_back(it->address);
                 }
                 ++it;
             } else {
@@ -1384,6 +1390,10 @@ void MultiSync::PeriodicPing() {
         // Drop any removed remotes from the cached unicast destination list.
         if (m_sendUnicast && unicastChanged) {
             UpdateUnicastDestinations();
+        }
+        lock.unlock();
+        for (auto& address : httpPingAddresses) {
+            PingSingleRemoteViaHTTP(address);
         }
     }
     if (superLongGap) {
