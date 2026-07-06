@@ -29,6 +29,11 @@ class PinCapabilitiesProvider;
 class PinCapabilities {
 public:
     static void InitGPIO(const std::string& processName, PinCapabilitiesProvider* provider);
+    // Re-scan the kernel gpiochips and register lines for any chip that has
+    // appeared since InitGPIO() ran. I2C GPIO expanders instantiated by a cape
+    // device-tree overlay can probe a bit after boot, so a chip (and its named
+    // lines) may not exist yet during the initial scan. Safe to call repeatedly.
+    static void RescanGPIO();
     static void SetMultiPinValue(const std::list<const PinCapabilities*>& pins, int v);
 
     PinCapabilities(const std::string& n, uint32_t k) :

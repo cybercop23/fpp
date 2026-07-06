@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <gpiod.h>
 #include <poll.h>
+#include <set>
 #include <unistd.h>
 
 #include "I2C.h"
@@ -108,6 +109,11 @@ FPPOLEDUtils::InputAction* FPPOLEDUtils::configureGPIOPin(const std::string& pin
                                                           const std::string& edge,
                                                           const std::string& name) {
     const PinCapabilities& pin = PinCapabilities::getPinByName(pinName);
+    if (pin.ptr() == nullptr) {
+        // Unresolved pin (e.g. an expander chip that hasn't probed yet). Let the
+        // caller skip it instead of building a polling action on the null pin.
+        return nullptr;
+    }
 
     std::string nameDesc = "FPPOLED";
     if (!name.empty()) {
@@ -188,6 +194,12 @@ bool FPPOLEDUtils::parseInputActionFromGPIO(const std::string& file) {
                 }
                 if (edge != "") {
                     InputAction* action = configureGPIOPin(pinName, mode, edge, risingAction.empty() ? fallingAction : risingAction);
+                    if (action == nullptr) {
+                        // pin didn't resolve to a real GPIO line -- skip rather than
+                        // poll a null pin (getValue()==0) and flood with phantom presses
+                        printf("Skipping input %s: GPIO line not available\n", pinName.c_str());
+                        continue;
+                    }
                     if (risingAction != "") {
                         printf("Configuring pin %s as input of type %s   (mode: %s,  file: %d)\n", action->pin.c_str(), risingAction.c_str(), action->mode.c_str(), action->file);
                         action->actions.push_back(new FPPOLEDUtils::InputAction::Action(risingAction, 1, 1, 100000, action->file == -1 ? action->gpiodPin : nullptr));
@@ -237,6 +249,17 @@ bool FPPOLEDUtils::parseInputActions(const std::string& file) {
                     std::string type = root["inputs"][x]["type"].asString();
                     int actionValue = (edge == "falling" ? 0 : 1);
                     const PinCapabilities& pin = PinCapabilities::getPinByName(action->pin);
+
+                    if (pin.ptr() == nullptr) {
+                        // The pin didn't resolve to a real GPIO line -- e.g. an i2c
+                        // expander whose chip hasn't probed yet (run() waits for this,
+                        // but bail defensively if it timed out). Falling through would
+                        // create a polling action on the null pin, whose getValue() is
+                        // always 0, flooding the menu with phantom presses.
+                        printf("Skipping input %s: GPIO line not available\n", action->pin.c_str());
+                        delete action;
+                        continue;
+                    }
 
                     action->gpiodPin = pin.ptr();
                     std::string nameDesc = type;
@@ -309,8 +332,100 @@ bool FPPOLEDUtils::parseInputActions(const std::string& file) {
     return needsPolling;
 }
 
+// Gather the GPIO input pin names referenced by the fppoled input configs so
+// run() can wait for them to become resolvable before configuring them.
+static std::set<std::string> collectConfiguredGpioPins() {
+    std::set<std::string> names;
+    Json::Value root;
+    // cape-inputs.json: { "inputs": [ { "pin", "mode":"gpio*", "type", [chip/actions] } ] }
+    if (FileExists("/home/fpp/media/tmp/cape-inputs.json") &&
+        LoadJsonFromFile("/home/fpp/media/tmp/cape-inputs.json", root)) {
+        for (int x = 0; x < root["inputs"].size(); x++) {
+            std::string mode = root["inputs"][x]["mode"].asString();
+            if (mode.find("gpio") == std::string::npos) {
+                continue;
+            }
+            std::string pin = root["inputs"][x]["pin"].asString();
+            if (!pin.empty()) {
+                names.insert(pin);
+            }
+            if (root["inputs"][x]["type"].asString() == "gpiod") {
+                std::string label = root["inputs"][x]["chip"].asString();
+                for (int a = 0; a < root["inputs"][x]["actions"].size(); a++) {
+                    int gpioline = root["inputs"][x]["actions"][a]["line"].asInt();
+                    names.insert(label + "-" + std::to_string(gpioline));
+                }
+            }
+        }
+    }
+    // gpio.json: [ { "enabled", "pin", "rising"/"falling":{"command":"OLED Navigation"} } ]
+    root = Json::Value();
+    if (FileExists("/home/fpp/media/config/gpio.json") &&
+        LoadJsonFromFile("/home/fpp/media/config/gpio.json", root)) {
+        for (int x = 0; x < root.size(); x++) {
+            if (!root[x]["enabled"].asBool()) {
+                continue;
+            }
+            bool nav = (root[x].isMember("falling") && root[x]["falling"]["command"].asString() == "OLED Navigation") ||
+                       (root[x].isMember("rising") && root[x]["rising"]["command"].asString() == "OLED Navigation");
+            if (!nav) {
+                continue;
+            }
+            std::string pin = root[x]["pin"].asString();
+            if (!pin.empty()) {
+                names.insert(pin);
+            }
+        }
+    }
+    return names;
+}
+
+// Cape GPIO expanders (e.g. the pca9675 the buttons live on) are instantiated by
+// a device-tree overlay applied during cape detection, and their I2C driver
+// probes asynchronously -- the gpiochip (and its named lines) can appear a short
+// time after cape_detect_done. If we configure the inputs before then, every pin
+// resolves to the null pin and the menu floods with phantom presses. Wait, re-
+// scanning as chips appear, until all configured input pins resolve (or we hit
+// the timeout, after which the null-pin guards keep us from flooding).
+static void waitForInputPins() {
+    std::set<std::string> names = collectConfiguredGpioPins();
+    if (names.empty()) {
+        return;
+    }
+    const int maxWaitMS = 15000;
+    int waited = 0;
+    while (true) {
+        std::vector<std::string> missing;
+        for (const auto& n : names) {
+            if (PinCapabilities::getPinByName(n).ptr() == nullptr) {
+                missing.push_back(n);
+            }
+        }
+        if (missing.empty()) {
+            if (waited) {
+                printf("All %d configured input pin(s) resolved after %dms\n", (int)names.size(), waited);
+                fflush(stdout);
+            }
+            return;
+        }
+        if (waited >= maxWaitMS) {
+            printf("Timed out after %dms waiting for %d input pin(s) to appear:", waited, (int)missing.size());
+            for (const auto& n : missing) {
+                printf(" %s", n.c_str());
+            }
+            printf("\n");
+            fflush(stdout);
+            return;
+        }
+        usleep(200000);
+        waited += 200;
+        PinCapabilities::RescanGPIO();
+    }
+}
+
 void FPPOLEDUtils::run() {
     char vbuffer[256];
+    waitForInputPins();
     setupControlPin("/home/fpp/media/tmp/cape-info.json");
     bool needsPolling = parseInputActionFromGPIO("/home/fpp/media/config/gpio.json");
     needsPolling |= parseInputActions("/home/fpp/media/tmp/cape-inputs.json");
