@@ -261,6 +261,23 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Free disk space
+        # The four platforms' artifacts total ~11 GB. Strip unused preinstalled
+        # SDKs so the download + release staging can't exhaust the runner's
+        # ~14 GB root disk (see the nightly_release job for the failure this
+        # guards against).
+        run: |
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/share/swift \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            /opt/hostedtoolcache/CodeQL \
+            2>/dev/null || true
+          df -h /
+
       - name: Download all artifacts
         uses: actions/download-artifact@v5
         with:
@@ -269,8 +286,10 @@ jobs:
       - name: Flatten artifact directory
         run: |
           mkdir -p release-files
+          # mv, not cp: copying would keep a second ~11 GB duplicate of every
+          # artifact on disk and can blow the runner's root volume.
           find artifacts -type f \( -name '*.img.zip' -o -name '*.fppos' -o -name 'ccache-*.tar.gz' \) \
-            -exec cp -v {} release-files/ \;
+            -exec mv -v {} release-files/ \;
           ls -la release-files/
 
       - name: Create draft release
@@ -295,6 +314,24 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Free disk space
+        # The four platforms' artifacts total ~11 GB. Downloading them plus
+        # staging for upload previously exhausted the runner's ~14 GB root disk
+        # and crashed the job MID-PUBLISH -- which, with the old
+        # delete-then-create logic below, wiped the nightly release entirely.
+        # Strip unused preinstalled SDKs for ~20 GB of headroom.
+        run: |
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/share/swift \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            /opt/hostedtoolcache/CodeQL \
+            2>/dev/null || true
+          df -h /
+
       - name: Checkout (for gh CLI to know the repo)
         uses: actions/checkout@v5
         with:
@@ -308,36 +345,27 @@ jobs:
       - name: Flatten artifact directory
         run: |
           mkdir -p release-files
+          # mv, not cp: copying kept a second ~11 GB duplicate of every artifact
+          # on disk, which is what tipped the runner over into "No space left on
+          # device" and triggered the wipeout.
           find artifacts -type f \( -name '*.img.zip' -o -name '*.fppos' -o -name 'ccache-*.tar.gz' \) \
-            -exec cp -v {} release-files/ \;
+            -exec mv -v {} release-files/ \;
           ls -la release-files/
 
-      - name: Replace nightly pre-release
+      - name: Publish / update nightly pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           BUILD_DATE="$(date -u +%Y-%m-%d)"
-          COMMIT="$(git rev-parse HEAD)"
-          SHORT="$(git rev-parse --short HEAD)"
+          SHORT="${GH_SHA:0:7}"
 
-          # Nuke any existing nightly release + tag so assets are cleanly
-          # replaced (softprops overwrites same-named files but doesn't
-          # remove orphans from prior runs with different filenames).
-          if gh release view nightly >/dev/null 2>&1; then
-            echo "Deleting existing 'nightly' release..."
-            gh release delete nightly --yes --cleanup-tag
-          fi
-
-          echo "Creating fresh 'nightly' pre-release..."
-          gh release create nightly \
-            --prerelease \
-            --target "$GITHUB_SHA" \
-            --title "FPP Nightly ($BUILD_DATE)" \
-            --notes "Automated nightly build (unreleased development snapshot).
+          NOTES="Automated nightly build (unreleased development snapshot).
 
           **Build date:** $BUILD_DATE UTC
-          **Commit:** [\`$SHORT\`](../../commit/$COMMIT)
+          **Commit:** [\`$SHORT\`](../../commit/$GH_SHA)
 
           Static download URLs (always point at the most recent nightly):
           - \`releases/download/nightly/FPP-vnightly-Pi.img.zip\`
@@ -346,5 +374,47 @@ jobs:
           - \`releases/download/nightly/FPP-vnightly-BBB.img.zip\`
 
           > :warning: Nightly builds are unreleased development snapshots.
-          > Latest production release can be found at https://github.com/FalconChristmas/fpp/releases/latest" \
-            release-files/*
+          > Latest production release can be found at https://github.com/FalconChristmas/fpp/releases/latest"
+
+          # NON-DESTRUCTIVE replacement. The old code deleted the release+tag
+          # BEFORE recreating it, so any failure between the two (a disk-full
+          # runner, a transient API error, a cancelled job) left the repo with
+          # NO nightly release at all. Instead:
+          #   1. force-move the 'nightly' tag to this commit,
+          #   2. create the release only if missing, else edit it in place,
+          #   3. overwrite assets with --clobber.
+          # The release is never in a deleted state, so a partial run can only
+          # ever leave last night's assets -- never zero.
+
+          # 1. Move (or create) the nightly tag to this commit.
+          if gh api "repos/$REPO/git/refs/tags/nightly" >/dev/null 2>&1; then
+            echo "Moving 'nightly' tag to $SHORT..."
+            gh api -X PATCH "repos/$REPO/git/refs/tags/nightly" \
+              -f sha="$GH_SHA" -F force=true >/dev/null
+          else
+            echo "Creating 'nightly' tag at $SHORT..."
+            gh api -X POST "repos/$REPO/git/refs" \
+              -f ref="refs/tags/nightly" -f sha="$GH_SHA" >/dev/null
+          fi
+
+          # 2. Create the release if it doesn't exist, else refresh its notes.
+          if gh release view nightly >/dev/null 2>&1; then
+            echo "Updating existing 'nightly' release..."
+            gh release edit nightly \
+              --prerelease \
+              --title "FPP Nightly ($BUILD_DATE)" \
+              --notes "$NOTES"
+          else
+            echo "Creating 'nightly' pre-release..."
+            gh release create nightly \
+              --prerelease \
+              --verify-tag \
+              --title "FPP Nightly ($BUILD_DATE)" \
+              --notes "$NOTES"
+          fi
+
+          # 3. Upload/overwrite assets. Filenames are deterministic (fixed
+          # "nightly" version + fixed platform suffixes) so there are no orphans
+          # to prune; --clobber replaces each asset in place.
+          echo "Uploading assets..."
+          gh release upload nightly release-files/* --clobber
