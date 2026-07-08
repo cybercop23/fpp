@@ -12,9 +12,12 @@
  * personal use, but modified copies MAY NOT be redistributed in any form.
  */
 
+#include <atomic>
 #include <queue>
 #include "fpp-json-fwd.h"
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include "channeloutput/ChannelOutput.h"
@@ -78,6 +81,9 @@ public:
     virtual void OverlayTestData(unsigned char* channelData, int cycleNum, float percentOfCycle, int testType, const Json::Value& config) override;
     virtual bool SupportsTesting() const { return true; }
 
+    virtual void StartingOutput() override;
+    virtual void StoppingOutput() override;
+
 private:
     void PrepDataShift();
     void PrepDataPWM();
@@ -90,6 +96,8 @@ private:
     void setupGamma(float gamma);
     bool setupChannelOffsets();
 
+    void buildStrideSchedule();
+    uint32_t computeMaxBrightnessCycles();
     void setupBrightnessValues();
     void setupPWMRegisters();
 
@@ -138,8 +146,44 @@ private:
     uint32_t numRows = 0;
     uint32_t rowLen = 0;
 
+    // Schedule of strides within one pass of all rows.  Bits whose on-time is
+    // a multiple of the stride shift-out time are split into multiple shorter
+    // pulses spread across the frame which multiplies the perceived refresh
+    // rate without changing the total light output (same total on-time).
+    struct StrideSlot {
+        uint8_t bit;     // color depth bit this slot displays
+        bool primary;    // first slot for this bit; the pixel mapping writes here
+        uint32_t onTime; // PRU cycles the display is on for this slot
+    };
+    std::vector<StrideSlot> m_strideSchedule;
+    // per row: (dstOffset, srcOffset) frame buffer copies for the duplicated
+    // strides of split bits
+    std::vector<std::vector<std::pair<uint32_t, uint32_t>>> m_dupCopies;
+
+    // Real-time thread that streams the current frame buffer into a ring in
+    // the 32KB PRU shared memory.  The PRU cannot read DDR fast enough to
+    // keep 16 outputs fed (~1.1-1.8us per 64 byte read) but reads shared
+    // memory in 18 predictable cycles.  See runPumpThread() and
+    // pru/SMEMRing.hp for the layout.
+    std::thread m_pumpThread;
+    std::atomic<bool> m_pumpRunning{ false };
+    std::atomic<uint8_t*> m_frontBuffer{ nullptr };
+    // PWM panels send one frame per DATA command; the pump streams once per
+    // sequence bump so the byte flow stays in step with the commands
+    std::atomic<uint32_t> m_pumpSeq{ 0 };
+    uint32_t m_pumpedSeq = 0;
+    uint32_t m_frameBytes = 0;
+    BBBPruSMEMRing m_ring;
+    bool m_heapBuffers = false;
+    void runPumpThread();
+
     bool singlePRU = false;
     std::string m_autoCreatedModelName;
+
+    // guards against the output being torn down (config reload) while the
+    // channel output thread is still inside PrepData/SendData
+    std::atomic<bool> m_stopping{ false };
+    std::atomic<int> m_inFlight{ 0 };
 
     std::queue<std::function<void()>> bgTasks;
     volatile bool bgThreadsRunning = false;

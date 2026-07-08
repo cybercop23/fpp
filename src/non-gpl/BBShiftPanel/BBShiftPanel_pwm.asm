@@ -20,6 +20,7 @@
 
 #include "FalconUtils.asm"
 #include "FalconPRUDefs.hp"
+#include "SMEMRing.hp"
 
 
 // Register mappings
@@ -38,19 +39,21 @@
 #define SEL4_PIN    15
 
 /** Register map */
-#define xshiftReg   r0.b0
 #define curReg      r0.b1
 #define numReg      r0.b2
-#define flags		r0.b3
 #define dataOutReg  r1.b0
 #define curBlock    r1.b1
 #define outputData  r2
-#define xferR1      r18
-#define xferR2      r19
-#define xferR3      r20
 
+// SMEM ring buffer (filled by the ARM pump thread, see BBShiftPanel.cpp and
+// SMEMRing.hp).  Same counter convention as BBShiftPanel.asm; ringCtrl
+// doubles as the ring end address for the wrap compare.
+#define ringReadPtr r14
+#define ringBase    r15
+#define availBytes  r16
+#define consumedCnt r17
+#define ringCtrl    r18
 
-// these can co-exist with xferR2/R3
 #define tmpReg1     r19
 #define tmpReg2     r20
 
@@ -565,93 +568,31 @@ DONEPOSTLATCH?
 
 
 
-WAITFORXFRBUS .macro bus
-    .newblock
-WAITXFRLOOP?:
-    XIN     bus, &xferR1, 4
-    // check to see if it's "busy" due to data waiting to be read, if so, clear it
-    QBBC    NODATA?, xferR1, 2     
-        XIN bus, &r2, 32
-        XIN bus, &xferR1, 4
-NODATA?:
-    QBBS    WAITXFRLOOP?, xferR1, 0
-    .endm
-
-
-STARTXFRBUS .macro bus
-    LDI32   xferR1, 7
-    MOV     xferR2, data_addr
-    LDI32   xferR3, 0
-    XOUT    bus, &xferR1, 12
-    .endm
-
-
-PRELOAD_DATA .macro
-    WAITFORXFRBUS 0x60
-    STARTXFRBUS 0x60    
-    .endm
-
-
-WAITFORDATA_READY .macro
-WAITFORDATA1?:
-    XIN     0x60, &xferR1, 4
-    QBBC    WAITFORDATA1?, xferR1, 2
-WAITFORDATA2?:
-    XIN     0x60, &xferR1, 4
-    QBBS    WAITFORDATA2?, xferR1, 3
-    NOP     // spec says we need an extra NOP after this flag is set
-    .endm
-
-UNPRELOAD_DATA .macro
-    WAITFORDATA_READY
-    LDI32   xferR1, 6
-    MOV     xferR2, data_addr
-    LDI32   xferR3, 0
-    XOUT    0x60, &xferR1, 12
-    XIN     0x60, &r2, 64
-    .endm
-
+// Load the next 48 bytes of output data from the shared-memory ring.
+//
+// Frame data is streamed into the 32KB PRU shared RAM by a real-time thread
+// on the ARM (see runPumpThread in BBShiftPanel.cpp and SMEMRing.hp); the
+// XFR2VBUS/DDR reads this replaced have a 1.1-1.8us round trip on the AM62x
+// and stalled the data shifting.  Only the DATA command consumes ring data;
+// the register configs come from the PRU data RAM.
 LOAD_DATA .macro
     .newblock
-
-    QBEQ  READPART1?, flags, 0
-    QBEQ  READPART2?, flags, 1
-    QBEQ  READPART3?, flags, 2
-
-    XIN     10, &r2, 48
-    LDI     flags, 0
-    JMP     ENDREAD?
-READPART1?:
-    WAITFORDATA_READY
-    XIN     0x60, &r2, 64
-    LDI     flags, 1
-    JMP     ENDREAD?
-READPART2?:
-    LDI     xshiftReg, 18
-    XOUT    10, &r14, 16
-    LDI     xshiftReg, 0
-    WAITFORDATA_READY
-    XIN     0x60, &r2, 64
-    LDI     xshiftReg, 4
-    XOUT    10, &r2, 32
-    LDI     xshiftReg, 22
-    XOUT    11, &r10, 32
-    LDI     xshiftReg, 0
-    XIN     10, &r2, 48
-    LDI     flags, 2
-    JMP     ENDREAD?
-READPART3?:
-    WAITFORDATA_READY
-    XIN     0x60, &r2, 64
-    LDI     xshiftReg, 8
-    XOUT    11, &r2, 16
-    LDI     xshiftReg, 26
-    XOUT    10, &r6, 48
-    LDI     xshiftReg, 0
-    XIN     11, &r2, 48
-    LDI     flags, 3    
-ENDREAD?:
-    LDI     dataOutReg, &outputData
+    QBLE  HAVEDATA?, availBytes, 48
+RINGWAIT?:
+    LBBO  &tmpReg1, ringCtrl, 0, 4
+    SUB   availBytes, tmpReg1, consumedCnt
+    QBGT  RINGWAIT?, availBytes, 48
+HAVEDATA?:
+    LBBO  &outputData, ringReadPtr, 0, 48
+    ADD   ringReadPtr, ringReadPtr, 48
+    ADD   consumedCnt, consumedCnt, 48
+    SUB   availBytes, availBytes, 48
+    SBBO  &consumedCnt, ringCtrl, 4, 4
+    // ringCtrl is also the first address past the ring
+    QBNE  NOWRAP?, ringReadPtr, ringCtrl
+    MOV   ringReadPtr, ringBase
+NOWRAP?:
+    LDI   dataOutReg, &outputData
     .endm
 
 
@@ -697,6 +638,10 @@ WAITFORSTOPPED?:
     LDI32   r0, 0x03
     LDI32   r1, PRU_CONFIG_REG
     SBBO    &r0, r1, 0x34, 4
+    // with the shift feature enabled, r0.b0 is the shift amount applied to
+    // every XIN/XOUT - it MUST stay 0 or the bank 12 GCLK handshake with the
+    // other PRU lands in the wrong registers
+    LDI     r0.b0, 0
 
 
     // Make sure the data address and command are cleared at start
@@ -713,9 +658,20 @@ WAITFORSTOPPED?:
     CLR     r30, r30, LE_PIN
     CLR     r30, r30, DCLK_PIN
 
-    // Make sure variables and such are clear
-    LDI     flags, 0
-    LDI     xshiftReg, 0
+    // Wait for the ARM side to publish the ring location/size into our data
+    // RAM (see SMEMRing.hp); it is written after the firmware starts since
+    // the firmware load clears the PRU memories.  The base is written first,
+    // then the (nonzero) size.  Publish the consumed counter so the ARM pump
+    // thread starts consistent.
+    LDI     tmpReg1, SMEM_RING_CONFIG_OFFSET
+RINGCFGWAIT:
+    LBCO    &ringBase, CONST_PRUDRAM, tmpReg1, 8    // base, size (into availBytes)
+    QBEQ    RINGCFGWAIT, availBytes, 0
+    MOV     ringReadPtr, ringBase
+    ADD     ringCtrl, ringBase, availBytes
+    LDI     consumedCnt, 0
+    LDI     availBytes, 0
+    SBBO    &consumedCnt, ringCtrl, 4, 4
   
 	// Wait for the start condition from the main program to indicate
 	// that we have a rendered frame ready to clock out.  This also
@@ -764,9 +720,6 @@ NOEXIT:
     LDI     tmpReg1, 0
     SBCO    &tmpReg1, CONST_PRUDRAM, 4, 2
 
-    // Start pre-load of data
-    PRELOAD_DATA
-
     QBBC    SKIPSYNC, command, 0
     STOP_GCLK
     LOW_FOR_CLOCKS 2
@@ -790,8 +743,6 @@ SKIPSTARTGCLK:
     JMP  OUTPUT_DATA
 
 SKIPDATA:
-
-    UNPRELOAD_DATA
     JMP  _LOOP
 
 
@@ -808,8 +759,14 @@ DOREGISTEROUTPUT:
     QBEQ  DONEREGISTEROUT, curReg, 0
     MOV   curBlock, numBlocks
 #ifdef OUTPUTS16
+// each block is 16 pixels (matching numBlocks = rowLen / 16), which for 16
+// outputs is four 48 byte loads of four pixels each
 DOROWOUT:
     QBEQ  LASTINROW, curBlock, 1
+        LOAD_DATA
+        JAL     r29, OUTPUT_4_PIXELS_CLRLE_SUBR
+        LOAD_DATA
+        JAL     r29, OUTPUT_4_PIXELS_CLRLE_SUBR
         LOAD_DATA
         JAL     r29, OUTPUT_4_PIXELS_CLRLE_SUBR
         LOAD_DATA
@@ -817,6 +774,10 @@ DOROWOUT:
         SUB   curBlock, curBlock, 1
         JMP   DOROWOUT
 LASTINROW:
+    LOAD_DATA
+    JAL     r29, OUTPUT_4_PIXELS_CLRLE_SUBR
+    LOAD_DATA
+    JAL     r29, OUTPUT_4_PIXELS_CLRLE_SUBR
     LOAD_DATA
     JAL     r29, OUTPUT_4_PIXELS_CLRLE_SUBR
     LOAD_DATA

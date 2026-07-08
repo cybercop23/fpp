@@ -15,13 +15,19 @@
 
 #include "fpp-json.h"
 
+#include <pthread.h>
+#include <sched.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <tuple>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 
 // FPP includes
 #include "../../Sequence.h"
@@ -32,6 +38,7 @@
 
 #include "BBShiftPanel.h"
 #include "../CapeUtils/CapeUtils.h"
+#include "../../pru/SMEMRing.hp"
 #include "util/BBBUtils.h"
 
 #include "MapPixelsByDepth16.h"
@@ -66,18 +73,10 @@ constexpr int PWM_COMMAND_STARTGCLK = 0x0004;
 constexpr int PWM_COMMAND_DATA = 0x0008;
 constexpr int PWM_COMMAND_HALT = 0xFFFF;
 
-static std::map<int, std::vector<int>> BIT_ORDERS = {
-    //{ 6, { 5, 4, 3, 2, 1, 0 } },
-    { 6, { 5, 2, 1, 4, 3, 0 } },
-    { 7, { 6, 2, 1, 4, 5, 3, 0 } },
-    { 8, { 7, 3, 5, 1, 2, 6, 4, 0 } },
-    //{ 8, { 7, 6, 5, 4, 3, 2, 1, 0 } },
-    { 9, { 8, 3, 5, 1, 7, 2, 6, 4, 0 } },
-    { 10, { 9, 4, 1, 6, 3, 8, 2, 7, 5, 0 } },
-    { 11, { 10, 4, 7, 2, 3, 1, 6, 9, 8, 5, 0 } },
-    //{ 12, { 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 } }
-    { 12, { 11, 5, 8, 2, 4, 1, 7, 10, 3, 9, 6, 0 } }
-};
+// Note: the ordering of the bit planes within a frame (formerly a set of
+// hand-tuned BIT_ORDERS tables) is now computed by buildStrideSchedule(),
+// which also splits the long MSB on-times into multiple pulses spread
+// across the frame to raise the perceived refresh rate.
 
 static const std::vector<std::string> PRU_PINS = { "P1-20", "P1-29", "P1-31", "P1-33", "P1-36",
                                                    "P2-02", "P2-04", "P2-06", "P2-08",
@@ -91,15 +90,40 @@ static const std::vector<std::string> PRU0_PWM_PINS = {
 
 constexpr int MAX_OUTPUTS = 16;
 
+// how much the pump thread copies into the shared memory ring at a time;
+// a multiple of 48 and 8 that divides SMEM_RING_DEFAULT_SIZE evenly
+constexpr uint32_t PUMP_BLOCK_SIZE = 3072;
+
 BBShiftPanelOutput::BBShiftPanelOutput(unsigned int startChannel, unsigned int channelCount) :
     ChannelOutput(startChannel, channelCount) {
     LogDebug(VB_CHANNELOUT, "BBShiftPanelOutput::BBShiftPanelOutput(%u, %u)\n",
              startChannel, channelCount);
 }
 
+void BBShiftPanelOutput::StartingOutput() {
+    // StoppingOutput is also called when the channel output thread simply
+    // goes idle, so the stopping flag has to clear when output resumes
+    m_stopping = false;
+}
+
+void BBShiftPanelOutput::StoppingOutput() {
+    // Called when the channel output thread stops and before the output is
+    // deleted on a config reload; the thread may still be inside
+    // PrepData/SendData, so refuse new work and wait for any in-flight call
+    // to drain so a teardown cannot race them.
+    m_stopping = true;
+    while (m_inFlight > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 BBShiftPanelOutput::~BBShiftPanelOutput() {
     LogDebug(VB_CHANNELOUT, "BBShiftPanelOutput::~BBShiftPanelOutput()\n");
 
+    m_stopping = true;
+    while (m_inFlight > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     bgThreadsRunning = false;
     bgTaskCondVar.notify_all();
     while (bgThreadCount > 0) {
@@ -107,6 +131,15 @@ BBShiftPanelOutput::~BBShiftPanelOutput() {
     }
 
     StopPRU();
+
+    if (m_heapBuffers) {
+        for (auto& b : outputBuffers) {
+            if (b) {
+                free(b);
+                b = nullptr;
+            }
+        }
+    }
 
     if (channelOffsets)
         delete[] channelOffsets;
@@ -293,6 +326,11 @@ int BBShiftPanelOutput::Init(Json::Value config) {
     if (!setupChannelOffsets()) {
         return 0;
     }
+    pru = new BBBPru(1, true, true);
+    pruData = (BBShiftPanelData*)pru->data_ram;
+    if (!isPWMPanel()) {
+        buildStrideSchedule();
+    }
     if (StartPRU() == 0) {
         return 0;
     }
@@ -332,8 +370,10 @@ int BBShiftPanelOutput::Init(Json::Value config) {
 }
 
 int BBShiftPanelOutput::StartPRU() {
-    pru = new BBBPru(1, true, true);
-    pruData = (BBShiftPanelData*)pru->data_ram;
+    if (!pru) {
+        pru = new BBBPru(1, true, true);
+        pruData = (BBShiftPanelData*)pru->data_ram;
+    }
     bool started = true;
     if (isPWMPanel()) {
         pwmPru = new BBBPru(0);
@@ -365,35 +405,92 @@ int BBShiftPanelOutput::StartPRU() {
         WarningHolder::AddWarning("BBShiftPanel: Unable to start PRU(s). May require a reboot.");
         return 0;
     }
+    // Both panel types are fed through a ring in the PRU shared memory (see
+    // SMEMRing.hp); attach() must happen after run() since the firmware load
+    // clears the PRU memories (and writes while the PRUSS is powered down
+    // are silently dropped).  For now the panels get the entire shared RAM;
+    // when panels later share the PRUSS with a pixel string program on the
+    // other PRU this becomes the SMEM_RING_SPLIT configuration.
+    m_ring.attach(pru, SMEM_RING_DEFAULT_BASE, SMEM_RING_DEFAULT_SIZE, false);
     uint32_t bytesPerPixel = (m_numOutputSlots * 6 * 2) / 16;
     uint32_t strideLen = rowLen * bytesPerPixel;
-    uint32_t numStride = numRows * m_colorDepth;
+    uint32_t numStride = m_strideSchedule.empty() ? (numRows * m_colorDepth) : (m_strideSchedule.size() * numRows);
     uint32_t oframeSize = numStride * strideLen;
-    // round up to a page boundary
-    uint32_t frameSize = oframeSize + 8192;
-    frameSize &= 0xFFFFFF000;
-    uintptr_t addr = (uintptr_t)pru->ddr;
-    uintptr_t maxaddr = addr + pru->ddr_size;
-    outputBuffers[0] = pru->ddr;
-    addr += frameSize;
-    int n = 1;
-    for (int x = 1; x < NUM_OUTPUT_BUFFERS; x++) {
-        addr += frameSize;
-        if (addr < maxaddr) {
-            outputBuffers[x] = outputBuffers[x - 1] + frameSize;
-            n++;
-        }
-    }
-    for (int x = 0; x < NUM_OUTPUT_BUFFERS; x++) {
-        if (outputBuffers[x]) {
-            memset(outputBuffers[x], 0, frameSize);
-        }
-    }
-    if (isPWMPanel()) {
-    } else {
+    // PWM panels consume numRows passes of 16 PWM bit planes of numBlocks
+    // (rowLen / 16) blocks of 16 pixels, which works out to the same full
+    // frame the pixel mapping produces
+    m_frameBytes = oframeSize;
+    if (!isPWMPanel()) {
         pruData->numStrides = numStride;
     }
+    // Frames live in normal cached memory now that the pump thread streams
+    // them to the PRU; the prep threads write cached memory much faster than
+    // the uncached PRU DDR region this replaced
+    uint32_t allocSize = (oframeSize + 4095) & ~4095;
+    for (int x = 0; x < NUM_OUTPUT_BUFFERS; x++) {
+        outputBuffers[x] = (uint8_t*)aligned_alloc(4096, allocSize);
+        memset(outputBuffers[x], 0, allocSize);
+    }
+    m_heapBuffers = true;
+    m_frontBuffer = nullptr;
+    m_pumpRunning = true;
+    m_pumpThread = std::thread(&BBShiftPanelOutput::runPumpThread, this);
     return 1;
+}
+
+void BBShiftPanelOutput::runPumpThread() {
+    struct sched_param sp;
+    sp.sched_priority = 50;
+    int err = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    if (err) {
+        LogWarn(VB_CHANNELOUT, "BBShiftPanel: could not set pump thread to SCHED_FIFO: %s\n", strerror(err));
+    }
+    if (isPWMPanel()) {
+        // PWM panels send one frame per DATA command (the panels refresh
+        // themselves from their internal PWM); stream once per queued
+        // command so the byte flow stays in step with the commands
+        while (m_pumpRunning) {
+            if (m_pumpedSeq == m_pumpSeq.load(std::memory_order_acquire)) {
+                struct timespec ts = { 0, 500000 };
+                nanosleep(&ts, nullptr);
+                continue;
+            }
+            ++m_pumpedSeq;
+            uint8_t* src = m_frontBuffer.load(std::memory_order_acquire);
+            uint32_t srcOff = 0;
+            while (srcOff < m_frameBytes && m_pumpRunning) {
+                uint32_t n = m_ring.write(src + srcOff, std::min(PUMP_BLOCK_SIZE, m_frameBytes - srcOff));
+                if (n == 0) {
+                    struct timespec ts = { 0, 150000 };
+                    nanosleep(&ts, nullptr);
+                    continue;
+                }
+                srcOff += n;
+            }
+        }
+        return;
+    }
+    while (m_pumpRunning) {
+        // frames stream back to back; a new frame from SendData is picked up
+        // at the frame boundary so the PRU always sees whole frames
+        uint8_t* src = m_frontBuffer.load(std::memory_order_acquire);
+        if (!src) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        uint32_t srcOff = 0;
+        while (srcOff < m_frameBytes && m_pumpRunning) {
+            uint32_t n = m_ring.write(src + srcOff, std::min(PUMP_BLOCK_SIZE, m_frameBytes - srcOff));
+            if (n == 0) {
+                // ring full; a full ring lasts ~480us at the max drain rate
+                // so a short sleep cannot underrun the PRU
+                struct timespec ts = { 0, 150000 };
+                nanosleep(&ts, nullptr);
+                continue;
+            }
+            srcOff += n;
+        }
+    }
 }
 void BBShiftPanelOutput::StopPRU(bool wait) {
     // Send the stop command
@@ -406,12 +503,21 @@ void BBShiftPanelOutput::StopPRU(bool wait) {
 
     if (pru) {
         int cnt = 0;
+        // the pump keeps feeding the ring here so the PRU can reach the end
+        // of the frame, which is where the halt command is checked
         while (wait && cnt < 25 && pruData->result == PWM_COMMAND_HALT) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             cnt++;
             __asm__ __volatile__("" ::
                                      : "memory");
         }
+    }
+    // stop the pump before the PRU memory mappings go away
+    m_pumpRunning = false;
+    if (m_pumpThread.joinable()) {
+        m_pumpThread.join();
+    }
+    if (pru) {
         pru->stop();
         delete pru;
         pru = nullptr;
@@ -467,8 +573,13 @@ void BBShiftPanelOutput::runBackgroundTasks() {
 }
 
 void BBShiftPanelOutput::processTasks(std::atomic<int>& counter) {
+    // This must always drain to zero, even during shutdown: the queued tasks
+    // reference the calling frame's stack (counter, results) and this object,
+    // so returning while any are queued or running leaves them with dangling
+    // references.  The pool threads exit without draining the queue, but this
+    // loop executes leftover tasks itself so it cannot deadlock.
     std::unique_lock<std::mutex> lock(bgTaskMutex);
-    while (counter > 0 && bgThreadsRunning) {
+    while (counter > 0) {
         std::function<void()> task;
         if (!bgTasks.empty()) {
             task = bgTasks.front();
@@ -489,6 +600,11 @@ void BBShiftPanelOutput::PrepData(unsigned char* channelData) {
     //     setupBrightnessValues();
     // }
     LogExcess(VB_CHANNELOUT, "BBShiftPanelOutput::PrepData(%p)\n", channelData);
+    ++m_inFlight;
+    if (m_stopping) {
+        --m_inFlight;
+        return;
+    }
     m_matrix->OverlaySubMatrices(channelData);
     channelData += m_startChannel;
 
@@ -519,13 +635,14 @@ void BBShiftPanelOutput::PrepData(unsigned char* channelData) {
     lock.unlock();
     bgTaskCondVar.notify_all();
     processTasks(counter);
-    if (bgThreadsRunning) {
+    if (bgThreadsRunning && !m_stopping) {
         if (isPWMPanel()) {
             PrepDataPWM();
         } else {
             PrepDataShift();
         }
     }
+    --m_inFlight;
 }
 
 void BBShiftPanelOutput::PrepDataPWM() {
@@ -571,25 +688,18 @@ void BBShiftPanelOutput::PrepDataPWM() {
     printf("\n");
     */
 
-    int frameSize = rowLen * (m_numOutputSlots * 6) * numRows * 2;
-    // make sure memory is flushed before command is set
-    msync(buf, frameSize, MS_SYNC | MS_INVALIDATE);
-    __builtin___clear_cache(buf, buf + frameSize);
-    while (pruData->command) {
+    // wait for the PRU to take the previous command before queueing the next
+    while (pruData->command && !m_stopping) {
         std::this_thread::sleep_for(std::chrono::microseconds(100));
         __asm__ __volatile__("" ::
                                  : "memory");
     }
 
-    uint32_t dataOffset = (buf - outputBuffers[0]);
-    uint32_t addr = (pru->ddr_addr + dataOffset);
+    // hand the frame to the pump thread; the PRU is paced by the ring so the
+    // DATA command can be queued immediately
+    m_frontBuffer.store(buf, std::memory_order_release);
+    m_pumpSeq.fetch_add(1, std::memory_order_release);
 
-    // make sure memory is flushed before command is set to 1
-    msync(outputBuffers[currOutputBuffer], frameSize, MS_SYNC | MS_INVALIDATE);
-    __builtin___clear_cache(outputBuffers[currOutputBuffer], outputBuffers[currOutputBuffer] + frameSize);
-
-    // Send the command to start shifting out the data
-    pruData->address_dma = addr;
     pruData->numBlocks = rowLen / 16;
     pruData->numRows = numRows;
     pruData->cmd = PWM_COMMAND_DATA;
@@ -602,20 +712,16 @@ void BBShiftPanelOutput::PrepDataShift() {
 
     uint32_t bytesPerPixel = (m_numOutputSlots * 6 * 2) / 16;
     uint32_t strideLen = rowLen * bytesPerPixel;
-    uint8_t* buf = outputBuffers[currOutputBuffer];
-    if (m_outputByRow) {
-        for (int r = 0; r < numRows; r++) {
-            for (int d = 0; d < m_colorDepth; d++) {
-                results[r][m_colorDepth - d - 1] = (uint16_t*)buf;
-                buf += strideLen;
-            }
+    uint8_t* base = outputBuffers[currOutputBuffer];
+    int numSlots = m_strideSchedule.size();
+    for (int s = 0; s < numSlots; s++) {
+        if (!m_strideSchedule[s].primary) {
+            continue;
         }
-    } else {
-        for (int d = 0; d < m_colorDepth; d++) {
-            for (int r = 0; r < numRows; r++) {
-                results[r][BIT_ORDERS[m_colorDepth][d]] = (uint16_t*)buf;
-                buf += strideLen;
-            }
+        int b = m_strideSchedule[s].bit;
+        for (int r = 0; r < numRows; r++) {
+            uint32_t idx = m_outputByRow ? (r * numSlots + s) : (s * numRows + r);
+            results[r][b] = (uint16_t*)(base + idx * strideLen);
         }
     }
 
@@ -643,7 +749,7 @@ void BBShiftPanelOutput::PrepDataShift() {
     for (int curRow = 0; curRow < numRows; curRow++) {
         // Map the pixels for this row
         ++counter;
-        bgTasks.push([this, curRow, strideLen, &results, &counter]() {
+        bgTasks.push([this, curRow, strideLen, base, &results, &counter]() {
             uint32_t start = curRow * rowLen * 6 * m_numOutputSlots;
             uint32_t end = start + (rowLen * 6 * m_numOutputSlots);
             ispc::MapPixelsByDepth16(currentChannelData, start, end, m_colorDepth,
@@ -655,6 +761,10 @@ void BBShiftPanelOutput::PrepDataShift() {
                                      results[curRow][10], results[curRow][11],
                                      results[curRow][12], results[curRow][13],
                                      results[curRow][14], results[curRow][15]);
+            // fill in the duplicated strides for bits that display as multiple pulses
+            for (auto& dup : m_dupCopies[curRow]) {
+                memcpy(base + dup.first, base + dup.second, strideLen);
+            }
             --counter;
         });
     }
@@ -665,27 +775,23 @@ void BBShiftPanelOutput::PrepDataShift() {
 
 int BBShiftPanelOutput::SendData(unsigned char* channelData) {
     LogExcess(VB_CHANNELOUT, "BBShiftPanelOutput::SendData(%p)\n", channelData);
-    if (!bgThreadsRunning) {
+    if (!bgThreadsRunning || m_stopping) {
+        return m_channelCount;
+    }
+    ++m_inFlight;
+    if (m_stopping) {
+        --m_inFlight;
         return m_channelCount;
     }
 
     if (!isPWMPanel()) {
-        uint32_t dataOffset = (outputBuffers[currOutputBuffer] - outputBuffers[0]);
-        uint32_t addr = (pru->ddr_addr + dataOffset);
-        uint32_t bytesPerPixel = (m_numOutputSlots * 6 * 2) / 16;
-        uint32_t strideLen = rowLen * bytesPerPixel;
-        uint32_t numStride = numRows * m_colorDepth;
-        uint32_t frameSize = numStride * strideLen;
-
-        // make sure memory is flushed before command is set to 1
-        msync(outputBuffers[currOutputBuffer], frameSize, MS_SYNC | MS_INVALIDATE);
-        __builtin___clear_cache(outputBuffers[currOutputBuffer], outputBuffers[currOutputBuffer] + frameSize);
-
-        pruData->address_dma = addr;
-        pruData->numStrides = numStride;
+        // hand the just-prepared frame to the pump thread; it picks it up at
+        // its next frame boundary so the PRU always sees whole frames
+        m_frontBuffer.store(outputBuffers[currOutputBuffer], std::memory_order_release);
+        pruData->numStrides = m_strideSchedule.size() * numRows;
         pruData->pixelsPerStride = rowLen;
     } else {
-        while (pruData->command) {
+        while (pruData->command && !m_stopping) {
             std::this_thread::sleep_for(std::chrono::microseconds(100));
             __asm__ __volatile__("" ::
                                      : "memory");
@@ -703,6 +809,7 @@ int BBShiftPanelOutput::SendData(unsigned char* channelData) {
     while (outputBuffers[currOutputBuffer] == nullptr) {
         currOutputBuffer = (currOutputBuffer + 1) % NUM_OUTPUT_BUFFERS;
     }
+    --m_inFlight;
     return m_channelCount;
 }
 inline int mapRow(int row, int mode) {
@@ -851,16 +958,19 @@ void BBShiftPanelOutput::setupPWMRegisters() {
                              : "memory");
 }
 
-void BBShiftPanelOutput::setupBrightnessValues() {
-    static uint32_t lastBright = 0;
+uint32_t BBShiftPanelOutput::computeMaxBrightnessCycles() {
+    // Scale the row length by the amount of data actually shifted per pixel
+    // clock: 16 output slots shift twice the bytes of 8 slots, so the same
+    // physical row takes twice as long to shift out
+    uint32_t effLen = rowLen * m_numOutputSlots / 8;
     uint32_t maxBright = 0x8800;
-    if (rowLen >= 384) {
+    if (effLen >= 384) {
         maxBright += 0x2000;
     }
-    if (rowLen >= 512) {
+    if (effLen >= 512) {
         maxBright += 0x2000;
     }
-    if (rowLen >= 640) {
+    if (effLen >= 640) {
         maxBright += 0x2000;
     }
     if (FileExists(FPP_DIR_MEDIA("/config/panel_timing.txt"))) {
@@ -869,44 +979,140 @@ void BBShiftPanelOutput::setupBrightnessValues() {
             maxBright = std::stoi(v, nullptr, 16);
         }
     }
-    /*
-    static uint32_t lastBright = 0;
-    if (maxBright != lastBright) {
-        printf("Using max bright: %04X\n", maxBright);
-        lastBright = maxBright;
-    }
-    */
-    uint32_t* cur = &pruData->brightness[0];
+    return maxBright;
+}
 
+void BBShiftPanelOutput::buildStrideSchedule() {
+    m_strideSchedule.clear();
+    m_dupCopies.clear();
+
+    uint32_t maxBright = computeMaxBrightnessCycles();
+    // Approximate PRU cycles to shift one full stride out to the panels
+    // (per-pixel cost including the amortized ring load overhead)
+    uint32_t cyclesPerPixel = (m_numOutputSlots == 16) ? 48 : 26;
+    uint32_t shiftCycles = rowLen * cyclesPerPixel + 100;
+
+    // Capacity limit: the PRU brightness table holds 384 stride entries
+    uint32_t bytesPerPixel = (m_numOutputSlots * 6 * 2) / 16;
+    uint32_t strideLen = rowLen * bytesPerPixel;
+    int maxSlots = 384 / (int)numRows;
+    if (maxSlots < m_colorDepth) {
+        // no room for splitting, the base schedule has to fit regardless
+        maxSlots = m_colorDepth;
+    }
+
+    // Decide how many pulses each bit is displayed as.  A bit whose on-time
+    // is >= k * shift time can be shown as k shorter pulses spread across the
+    // frame at zero cost in frame time (the shifting still fits under each
+    // pulse), which multiplies the perceived refresh rate.
+    int budget = maxSlots - m_colorDepth;
+    std::vector<int> pieces(m_colorDepth, 1);
+    for (int b = m_colorDepth - 1; b >= 0 && budget > 0; b--) {
+        uint32_t on = (m_brightness * maxBright / 10) >> (m_colorDepth - 1 - b);
+        int k = std::min((int)(on / shiftCycles), 4);
+        k = std::min(k, budget + 1);
+        if (k <= 1) {
+            // lower bits have shorter on-times, no more splits are free
+            break;
+        }
+        pieces[b] = k;
+        budget -= k - 1;
+    }
+
+    // Place the pieces on the timeline.  Each bit's pieces are spread evenly
+    // across the frame with a half-spacing phase offset so that every pixel
+    // value, not just full white, sees its light distributed across the whole
+    // frame (e.g. 4 pieces land at 1/8, 3/8, 5/8, 7/8 and interleave with the
+    // 2-piece bit at 1/4, 3/4).  Bits place MSB first; a collision moves to
+    // the nearest free slot.
+    int n = 0;
+    for (int b = 0; b < m_colorDepth; b++) {
+        n += pieces[b];
+    }
+    m_strideSchedule.assign(n, StrideSlot{ 0, false, 0 });
+    std::vector<bool> used(n, false);
+    for (int b = m_colorDepth - 1; b >= 0; b--) {
+        uint32_t on = (m_brightness * maxBright / 10) >> (m_colorDepth - 1 - b);
+        uint32_t per = on / pieces[b];
+        for (int i = 0; i < pieces[b]; i++) {
+            int target = (int)(((i + 0.5f) * n) / pieces[b]);
+            int slot = target;
+            for (int d = 0; d < n; d++) {
+                // search outward from the target, alternating below/above
+                int cand = (target + ((d & 1) ? (n - (d + 1) / 2) : (d / 2))) % n;
+                if (!used[cand]) {
+                    slot = cand;
+                    break;
+                }
+            }
+            used[slot] = true;
+            // keep the total on-time exact, first piece takes the remainder
+            uint32_t t = (i == 0) ? (on - per * (pieces[b] - 1)) : per;
+            m_strideSchedule[slot] = { (uint8_t)b, false, t };
+        }
+    }
+    bool seen[16] = { false };
+    for (auto& slot : m_strideSchedule) {
+        slot.primary = !seen[slot.bit];
+        seen[slot.bit] = true;
+    }
+
+    // Frame buffer copies needed for the non-primary (duplicated) strides
+    m_dupCopies.assign(numRows, {});
+    int primarySlot[16];
+    for (int s = 0; s < n; s++) {
+        if (m_strideSchedule[s].primary) {
+            primarySlot[m_strideSchedule[s].bit] = s;
+        }
+    }
+    for (int s = 0; s < n; s++) {
+        if (m_strideSchedule[s].primary) {
+            continue;
+        }
+        int ps = primarySlot[m_strideSchedule[s].bit];
+        for (int r = 0; r < numRows; r++) {
+            uint32_t dstIdx = m_outputByRow ? (r * n + s) : (s * numRows + r);
+            uint32_t srcIdx = m_outputByRow ? (r * n + ps) : (ps * numRows + r);
+            m_dupCopies[r].emplace_back(dstIdx * strideLen, srcIdx * strideLen);
+        }
+    }
+
+    // log what this schedule works out to
+    uint64_t rowCycles = 0;
+    uint64_t onCycles = 0;
+    for (auto& slot : m_strideSchedule) {
+        rowCycles += std::max(shiftCycles, slot.onTime) + 60;
+        onCycles += slot.onTime;
+    }
+    uint64_t frameCycles = rowCycles * numRows;
+    float refresh = 250000000.0f / (float)frameCycles;
+    LogInfo(VB_CHANNELOUT, "BBShiftPanel: %d strides/row (%d bit color, MSB split %d ways), est refresh %d Hz, duty %d%%\n",
+            n, m_colorDepth, pieces[m_colorDepth - 1], (int)refresh, (int)(onCycles * 100 / rowCycles));
+}
+
+void BBShiftPanelOutput::setupBrightnessValues() {
+    uint32_t* cur = &pruData->brightness[0];
+    int n = m_strideSchedule.size();
+    auto writeEntry = [&](int s, int r) {
+        int mappedRow = mapRow(r, m_addressingMode);
+        cur[0] = m_strideSchedule[s].onTime;
+        cur[1] = (mappedRow << 24) & 0x7F000000;
+        if (m_outputByRow && m_outputBlankData && (s == 0)) {
+            cur[1] |= 0x80000000;
+        }
+        // printf("Brightness[%d %d] = %08x  %08x\n", s, r, cur[0], cur[1]);
+        cur += 2;
+    };
     if (m_outputByRow) {
         for (int r = 0; r < numRows; r++) {
-            int mappedRow = mapRow(r, m_addressingMode);
-            for (int d = 0; d < m_colorDepth; d++) {
-                uint32_t bright = m_brightness * maxBright / 10;
-                uint32_t extra = 0;
-                uint32_t div = d;
-                bright >>= div;
-                cur[0] = bright;
-                cur[1] = extra + ((mappedRow << 24) & 0x7F000000);
-                if (m_outputBlankData && (d == 0)) {
-                    cur[1] |= 0x80000000;
-                }
-                // printf("Brightness[%d %d] = %08x  %08x\n", r, d, cur[0], cur[1]);
-                cur += 2;
+            for (int s = 0; s < n; s++) {
+                writeEntry(s, r);
             }
         }
     } else {
-        for (int d = 0; d < m_colorDepth; d++) {
-            uint32_t bright = m_brightness * maxBright / 10;
-            uint32_t div = m_colorDepth - BIT_ORDERS[m_colorDepth][d] - 1;
-            bright >>= div;
-            uint32_t extra = 0;
+        for (int s = 0; s < n; s++) {
             for (int r = 0; r < numRows; r++) {
-                int mappedRow = mapRow(r, m_addressingMode);
-                cur[0] = bright;
-                cur[1] = extra + ((mappedRow << 24) & 0x7F000000);
-                // printf("Brightness[%d %d] = %08x  %08x\n", r, d, cur[0], cur[1]);
-                cur += 2;
+                writeEntry(s, r);
             }
         }
     }
@@ -1122,6 +1328,13 @@ void BBShiftPanelOutput::DumpConfig(void) {
     LogDebug(VB_CHANNELOUT, "    Output Length  : %d\n", rowLen);
     LogDebug(VB_CHANNELOUT, "    Num Outputs    : %d (%d slots)\n", m_numOutputs, m_numOutputSlots);
     LogDebug(VB_CHANNELOUT, "    Addressing Mode: %d %s\n", m_addressingMode, isPWMPanel() ? "PWM" : "Shift");
+    if (!m_strideSchedule.empty()) {
+        std::string sched;
+        for (auto& slot : m_strideSchedule) {
+            sched += " " + std::to_string(slot.bit) + (slot.primary ? "" : "*") + "/" + std::to_string(slot.onTime);
+        }
+        LogDebug(VB_CHANNELOUT, "    Stride Schedule:%s\n", sched.c_str());
+    }
 
     ChannelOutput::DumpConfig();
 }

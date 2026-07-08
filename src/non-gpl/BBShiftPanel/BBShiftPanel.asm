@@ -23,6 +23,7 @@
 
 #include "FalconUtils.asm"
 #include "FalconPRUDefs.hp"
+#include "SMEMRing.hp"
 
 
 
@@ -41,15 +42,20 @@
 #define SEL4_PIN    15
 
 /** Register map */
-#define xshiftReg   r0.b0
 #define dataOutReg  r1.b0
 #define outputData  r2
-#define xferR1      r18
-#define xferR2      r19
-#define xferR3      r20
 
-#define flags       r23.b0
-#define readFlags   r23.b3
+// SMEM ring buffer (filled by the ARM pump thread, see BBShiftPanel.cpp and
+// SMEMRing.hp).  ringCtrl doubles as the ring end address for the wrap
+// compare.  ringBase and the size are read from data RAM at startup so the
+// same firmware can use the whole shared RAM or share it with a program on
+// the other PRU.
+#define ringReadPtr r14
+#define ringBase    r15
+#define availBytes  r16
+#define consumedCnt r17
+#define ringCtrl    r18
+
 #define curPixel    r24.w0
 #define curStride   r24.w2
 #define curBright   r25
@@ -58,9 +64,14 @@
 #define numPixels   r28.w0
 #define numStrides  r28.w2
 
-// these can co-exist with xferR2/R3
 #define tmpReg1     r19
 #define tmpReg2     r20
+
+// instrumentation: counts iterations spent waiting for the ARM pump thread
+// to fill the ring and total frames output; exported to PRU DRAM at
+// SMEM_RING_STATS_OFFSET each frame
+#define stallCount  r21
+#define frameCount  r22
 
 #define DATA_BYTE   r30.b0
 
@@ -101,8 +112,15 @@ DISPLAY_OFF .macro
 DISPLAY_ON .macro
     .newblock
     // need to wait a bit between latch and ON
+#ifdef OUTPUTS16
+    // the 16 output hardware regenerates the control signals per group of
+    // four outputs so the latch settles much faster than the original
+    // single-buffer 8 output hardware
+    LOOP NOPLOOP?, 8
+#else
     LOOP NOPLOOP?, 16
-        NOP 
+#endif
+        NOP
 NOPLOOP?:
     XOUT  12, &curBright, 4
     .endm
@@ -154,6 +172,15 @@ TOGGLE_LATCH .macro
     .endm
 
 // output a full rgb/rgb2 for a pixel
+//
+// The panel clock (CLOCK_PIN) rising edge that captures pixel N into the
+// panels is emitted in the middle of shifting pixel N+1's data instead of
+// via a dedicated NOP-padded TOGGLE_CLOCK after the latch.  This costs no
+// extra instructions and gives both clock phases, as well as the data setup
+// time through the output buffers, roughly half a pixel time of margin -
+// considerably more than the old NOP delays provided.  The caller must emit
+// a final rising edge after the last pixel of a stride (see
+// FINISH_STRIDE_CLOCK) since that pixel's edge would otherwise never occur.
 OUTPUT_PIXEL .macro
     .newblock
     MVIB DATA_BYTE, *r1.b0++
@@ -162,6 +189,17 @@ OUTPUT_PIXEL .macro
     TOGGLE_OSHIFT
     MVIB DATA_BYTE, *r1.b0++
     TOGGLE_OSHIFT
+#ifdef OUTPUTS16
+    MVIB DATA_BYTE, *r1.b0++
+    TOGGLE_OSHIFT
+    MVIB DATA_BYTE, *r1.b0++
+    TOGGLE_OSHIFT
+    MVIB DATA_BYTE, *r1.b0++
+    TOGGLE_OSHIFT
+#endif
+    // rising edge captures the previous pixel, its data has been stable
+    // on the panel data lines since its OLATCH half a pixel ago
+    SET r30, r30, CLOCK_PIN
     MVIB DATA_BYTE, *r1.b0++
     TOGGLE_OSHIFT
     MVIB DATA_BYTE, *r1.b0++
@@ -176,16 +214,23 @@ OUTPUT_PIXEL .macro
     TOGGLE_OSHIFT
     MVIB DATA_BYTE, *r1.b0++
     TOGGLE_OSHIFT
-    MVIB DATA_BYTE, *r1.b0++
-    TOGGLE_OSHIFT
-    MVIB DATA_BYTE, *r1.b0++
-    TOGGLE_OSHIFT
-    MVIB DATA_BYTE, *r1.b0++
-    TOGGLE_OSHIFT
 #endif
     TOGGLE_OLATCH
+    CLR r30, r30, CLOCK_PIN
+    .endm
 
-    TOGGLE_CLOCK
+// The last pixel of a stride has been latched onto the data lines but its
+// clock rising edge has not happened yet - allow the data to settle through
+// the buffers, then clock it into the panels.  The clock is left high, which
+// SETADDRESS and the first pixel of the next stride expect.
+FINISH_STRIDE_CLOCK .macro
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    SET r30, r30, CLOCK_PIN
     .endm
 
 SETADDRESS .macro
@@ -217,110 +262,39 @@ DEBUGTOGGLE .macro pin
     .endm
 
 
-#define XFERBUS
-#ifdef XFERBUS
-
-WAITFORXFRBUS .macro bus
-    .newblock
-WAITXFRLOOP?:
-    XIN     bus, &xferR1, 4
-    // check to see if it's "busy" due to data waiting to be read, if so, clear it
-    QBBC    NODATA?, xferR1, 2     
-        XIN bus, &r2, 32
-        XIN bus, &xferR1, 4
-NODATA?:
-    QBBS    WAITXFRLOOP?, xferR1, 0
-    .endm
-
-
-STARTXFRBUS .macro bus
-    LDI32   xferR1, 7
-    MOV     xferR2, data_addr
-    LDI32   xferR3, 0
-    XOUT    bus, &xferR1, 12
-    .endm
-
-
-PRELOAD_DATA .macro
-    WAITFORXFRBUS 0x60
-    STARTXFRBUS 0x60    
-    .endm
-
-
-WAITFORDATA_READY .macro
-WAITFORDATA1?:
-    XIN     0x60, &xferR1, 4
-    QBBC    WAITFORDATA1?, xferR1, 2
-WAITFORDATA2?:
-    XIN     0x60, &xferR1, 4
-    QBBS    WAITFORDATA2?, xferR1, 3
-    NOP     // spec says we need an extra NOP after this flag is set
-    .endm
-
-UNPRELOAD_DATA .macro
-    WAITFORDATA_READY
-    LDI32   xferR1, 6
-    MOV     xferR2, data_addr
-    LDI32   xferR3, 0
-    XOUT    0x60, &xferR1, 12
-    XIN     0x60, &r2, 64
-    .endm
-
+// Load the next 48 bytes of output data from the shared-memory ring.
+//
+// Frame data is streamed into the 32KB PRU shared RAM by a real-time thread
+// on the ARM (see runPumpThread in BBShiftPanel.cpp).  DDR reads from the
+// PRU (XFR2VBUS or LBBO) have a 1.1-1.8us round trip on the AM62x and cannot
+// sustain the data rate that 16 outputs require, which showed up as visible
+// pauses in the output clock.  Shared RAM reads are 18 cycles and fully
+// predictable.  The ARM streams whole frames back to back, so both sides
+// stay frame-aligned as long as they agree on the frame byte count.
+//
+// availBytes caches how far ahead the producer is so the producer counter
+// is only re-read from shared RAM when the cached window is exhausted.
 LOAD_DATA .macro
     .newblock
-
-    QBEQ  READPART1?, readFlags, 0
-    QBEQ  READPART2?, readFlags, 1
-    QBEQ  READPART3?, readFlags, 2
-
-    XIN     10, &r2, 48
-    LDI     readFlags, 0
-    JMP     ENDREAD?
-READPART1?:
-    WAITFORDATA_READY
-    XIN     0x60, &r2, 64
-    LDI     readFlags, 1
-    JMP     ENDREAD?
-READPART2?:
-    LDI     xshiftReg, 18
-    XOUT    10, &r14, 16
-    LDI     xshiftReg, 0
-    WAITFORDATA_READY
-    XIN     0x60, &r2, 64
-    LDI     xshiftReg, 4
-    XOUT    10, &r2, 32
-    LDI     xshiftReg, 22
-    XOUT    11, &r10, 32
-    LDI     xshiftReg, 0
-    XIN     10, &r2, 48
-    LDI     readFlags, 2
-    JMP     ENDREAD?
-READPART3?:
-    WAITFORDATA_READY
-    XIN     0x60, &r2, 64
-    LDI     xshiftReg, 8
-    XOUT    11, &r2, 16
-    LDI     xshiftReg, 26
-    XOUT    10, &r6, 48
-    LDI     xshiftReg, 0
-    XIN     11, &r2, 48
-    LDI     readFlags, 3    
-ENDREAD?:
-    LDI     dataOutReg, &outputData
+    QBLE  HAVEDATA?, availBytes, 48
+RINGWAIT?:
+    ADD   stallCount, stallCount, 1
+    LBBO  &tmpReg1, ringCtrl, 0, 4
+    SUB   availBytes, tmpReg1, consumedCnt
+    CHECK_FOR_DISPLAY_OFF
+    QBGT  RINGWAIT?, availBytes, 48
+HAVEDATA?:
+    LBBO  &outputData, ringReadPtr, 0, 48
+    ADD   ringReadPtr, ringReadPtr, 48
+    ADD   consumedCnt, consumedCnt, 48
+    SUB   availBytes, availBytes, 48
+    SBBO  &consumedCnt, ringCtrl, 4, 4
+    // ringCtrl is also the first address past the ring
+    QBNE  NOWRAP?, ringReadPtr, ringCtrl
+    MOV   ringReadPtr, ringBase
+NOWRAP?:
+    LDI   dataOutReg, &outputData
     .endm
-
-#else
-
-LOAD_DATA .macro
-    .newblock
-    LBBO    &outputData, data_addr, 0, 48
-    ADD     data_addr, data_addr, 48
-    LDI     dataOutReg, &outputData
-    .endm
-
-#define PRELOAD_DATA
-#define UNPRELOAD_DATA
-#endif
 
 
 CLEARBITS .macro
@@ -363,6 +337,10 @@ ENDLOOP?:
     LDI32   r0, 0x03
     LDI32   r1, PRU_CONFIG_REG
     SBBO    &r0, r1, 0x34, 4
+    // with the shift feature enabled, r0.b0 is the shift amount applied to
+    // every XIN/XOUT - it MUST stay 0 or the bank 12 OE handshake with the
+    // other PRU lands in the wrong registers
+    LDI     r0.b0, 0
 
 
     // Make sure the data address and command are cleared at start
@@ -382,10 +360,25 @@ ENDLOOP?:
     SETADDRESS 
 
     // Make sure variables and such are clear
-    LDI     flags, 0
-    LDI     readFlags, 0
     LDI     curStride, 0
-    LDI     xshiftReg, 0
+    LDI     stallCount, 0
+    LDI     frameCount, 0
+
+    // Wait for the ARM side to publish the ring location/size into our data
+    // RAM.  It cannot be written before the firmware starts: the firmware
+    // load clears the PRU memories and writes while the PRUSS is powered
+    // down are silently dropped.  The ARM writes the base first, then the
+    // (nonzero) size.  The consumed counter is published afterwards so the
+    // ARM pump thread starts consistent.
+    LDI     tmpReg1, SMEM_RING_CONFIG_OFFSET
+RINGCFGWAIT:
+    LBCO    &ringBase, CONST_PRUDRAM, tmpReg1, 8    // base, size (into availBytes)
+    QBEQ    RINGCFGWAIT, availBytes, 0
+    MOV     ringReadPtr, ringBase
+    ADD     ringCtrl, ringBase, availBytes
+    LDI     consumedCnt, 0
+    LDI     availBytes, 0
+    SBBO    &consumedCnt, ringCtrl, 4, 4
   
 	// Wait for the start condition from the main program to indicate
 	// that we have a rendered frame ready to clock out.  This also
@@ -408,17 +401,12 @@ _LOOP:
 
 
 DOOUTPUT
-    PRELOAD_DATA
-
     // uncomment to do only one frame
     //LDI     tmpReg1, 0
     //SBCO    &tmpReg1, CONST_PRUDRAM, 4, 4
 
     //LDI     numStrides, 9
 
-
-    LDI     flags, 0
-    LDI     readFlags, 0
     LDI     curStride, 0
     LDI     curBright, 0
 STRIDE_START:
@@ -476,6 +464,7 @@ ENDLOOPPIXEL2:
     CHECK_FOR_DISPLAY_OFF
     QBNE OUTPUTPIXELS, curPixel, 0
 
+    FINISH_STRIDE_CLOCK
     WAIT_FOR_DISLAY_OFF
 
     LSL tmpReg1, curStride, 3
@@ -492,7 +481,12 @@ DOSETADDRESS:
     QBNE STRIDE_START, numStrides, curStride
 
     WAIT_FOR_DISLAY_OFF
-    UNPRELOAD_DATA
+
+    // export the cumulative ring-wait iteration count and frame count so the
+    // ARM side can quantify how much time is lost waiting on the pump
+    ADD     frameCount, frameCount, 1
+    LDI     tmpReg1, SMEM_RING_STATS_OFFSET
+    SBCO    &stallCount, CONST_PRUDRAM, tmpReg1, 8
 
 	// Go back to waiting for the next frame buffer
 	JMP	_LOOP
