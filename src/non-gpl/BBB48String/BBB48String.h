@@ -73,6 +73,9 @@ private:
         uint32_t outputStringLen;
     } m_gpio0Data, m_gpioData;
     std::vector<PixelString*> m_strings;
+    // per string, per virtual string: nonzero when chMap[i+3] == chMap[i]+3
+    // for the whole map, letting prepData skip the map indirection
+    std::vector<std::vector<uint8_t>> m_vsAffine;
 
     uint32_t m_curFrame;
     int m_stallCount;

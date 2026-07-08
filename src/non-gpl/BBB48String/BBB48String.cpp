@@ -18,6 +18,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <arm_neon.h>
+
 #include <fstream>
 
 #define BBB_PRU 1
@@ -495,6 +497,24 @@ int BBB48StringOutput::Init(Json::Value config) {
     offset = ((m_gpio0Data.frameSize / 4096) + 2) * 4096;
     m_gpio0Data.lastData = m_gpio0Data.curData + offset;
 
+    // flag the virtual strings whose channel map is a plain run so prepData
+    // can walk the channel data directly instead of through the map
+    m_vsAffine.resize(m_strings.size());
+    for (size_t s = 0; s < m_strings.size(); s++) {
+        m_vsAffine[s].resize(m_strings[s]->m_virtualStrings.size());
+        for (size_t v = 0; v < m_strings[s]->m_virtualStrings.size(); v++) {
+            auto& vs = m_strings[s]->m_virtualStrings[v];
+            bool affine = true;
+            for (int i = 0; i + 3 < vs.chMapCount; i++) {
+                if (vs.chMap[i + 3] != vs.chMap[i] + 3) {
+                    affine = false;
+                    break;
+                }
+            }
+            m_vsAffine[s][v] = affine;
+        }
+    }
+
     PixelString::AutoCreateOverlayModels(m_strings, m_autoCreatedModelNames);
     return retVal;
 }
@@ -611,40 +631,147 @@ void BBB48StringOutput::OverlayTestData(unsigned char* channelData,
     // that in prepData
 }
 
+// 8x8 byte transpose: in, rows are 8 consecutive bytes of 8 strings; out,
+// rows are the 8 strings' bytes for 8 consecutive positions.  (Same helper
+// as BBShiftString.)
+static inline void transpose8x8(uint8x8_t r[8]) {
+    uint8x8x2_t t0 = vtrn_u8(r[0], r[1]);
+    uint8x8x2_t t1 = vtrn_u8(r[2], r[3]);
+    uint8x8x2_t t2 = vtrn_u8(r[4], r[5]);
+    uint8x8x2_t t3 = vtrn_u8(r[6], r[7]);
+    uint16x4x2_t s0 = vtrn_u16(vreinterpret_u16_u8(t0.val[0]), vreinterpret_u16_u8(t1.val[0]));
+    uint16x4x2_t s1 = vtrn_u16(vreinterpret_u16_u8(t0.val[1]), vreinterpret_u16_u8(t1.val[1]));
+    uint16x4x2_t s2 = vtrn_u16(vreinterpret_u16_u8(t2.val[0]), vreinterpret_u16_u8(t3.val[0]));
+    uint16x4x2_t s3 = vtrn_u16(vreinterpret_u16_u8(t2.val[1]), vreinterpret_u16_u8(t3.val[1]));
+    uint32x2x2_t u0 = vtrn_u32(vreinterpret_u32_u16(s0.val[0]), vreinterpret_u32_u16(s2.val[0]));
+    uint32x2x2_t u1 = vtrn_u32(vreinterpret_u32_u16(s1.val[0]), vreinterpret_u32_u16(s3.val[0]));
+    uint32x2x2_t u2 = vtrn_u32(vreinterpret_u32_u16(s0.val[1]), vreinterpret_u32_u16(s2.val[1]));
+    uint32x2x2_t u3 = vtrn_u32(vreinterpret_u32_u16(s1.val[1]), vreinterpret_u32_u16(s3.val[1]));
+    r[0] = vreinterpret_u8_u32(u0.val[0]);
+    r[1] = vreinterpret_u8_u32(u1.val[0]);
+    r[2] = vreinterpret_u8_u32(u2.val[0]);
+    r[3] = vreinterpret_u8_u32(u3.val[0]);
+    r[4] = vreinterpret_u8_u32(u0.val[1]);
+    r[5] = vreinterpret_u8_u32(u1.val[1]);
+    r[6] = vreinterpret_u8_u32(u2.val[1]);
+    r[7] = vreinterpret_u8_u32(u3.val[1]);
+}
+
 void BBB48StringOutput::prepData(FrameData& d, unsigned char* channelData) {
-    int count = 0;
-
-    uint8_t* out = d.curData;
-
-    PixelString* ps = NULL;
-    uint8_t* c = NULL;
-
     PixelStringTester* tester = nullptr;
     if (m_testType && m_testCycle >= 0) {
         tester = PixelStringTester::getPixelStringTester(m_testType);
         tester->prepareTestData(m_testCycle, m_testPercent);
     }
-    int numStrings = d.gpioStringMap.size();
+    const int numStrings = d.gpioStringMap.size();
+    // per string slot: either a fully prepared buffer (test mode) or the
+    // PixelString whose virtual strings are rendered on the fly per tile,
+    // with a cursor tracking where in the virtual string list the next tile
+    // continues.  (Same scheme as BBShiftString::prepData.)
+    struct SlotSrc {
+        const uint8_t* buf = nullptr;
+        PixelString* ps = nullptr;
+        const uint8_t* affine = nullptr;
+        uint32_t len = 0;
+        uint32_t vsIdx = 0;
+        uint32_t vsOff = 0;
+    };
+    std::vector<SlotSrc> slots(numStrings);
     uint32_t newMaxLen = 0;
     for (int s = 0; s < numStrings; s++) {
         int idx = d.gpioStringMap[s];
         if (idx >= 0) {
-            ps = m_strings[idx];
-            c = out + s;
+            PixelString* ps = m_strings[idx];
             uint32_t newLen = ps->m_outputChannels;
-            uint8_t* d = tester
-                             ? tester->createTestData(ps, m_testCycle, m_testPercent,
-                                                      channelData, newLen)
-                             : ps->prepareOutput(channelData);
-            newMaxLen = std::max(newLen, newMaxLen);
-            for (int p = 0; p < newLen; p++) {
-                *c = *d;
-                c += numStrings;
-                ++d;
+            SlotSrc& sl = slots[s];
+            if (tester) {
+                sl.buf = tester->createTestData(ps, m_testCycle, m_testPercent,
+                                                channelData, newLen);
+            } else {
+                sl.ps = ps;
+                sl.affine = m_vsAffine[idx].data();
             }
+            sl.len = newLen;
+            newMaxLen = std::max(newLen, newMaxLen);
         }
     }
     d.outputStringLen = newMaxLen;
+
+    // Interleave the string data in tiles that stay in the L1 cache instead
+    // of writing a byte every numStrings bytes across the whole frame, with
+    // the brightness/gamma application fused into the tile fill.  Virtual
+    // strings whose channel map is a simple run skip the per-channel map
+    // indirection.  Unmapped slots and the tail of strings shorter than the
+    // longest now output zeros instead of stale buffer content.
+    uint8_t* out = d.curData;
+    constexpr uint32_t TILE = 64;
+    uint8_t col[8][TILE];
+    for (uint32_t p0 = 0; p0 < newMaxLen; p0 += TILE) {
+        const uint32_t n = std::min(TILE, newMaxLen - p0);
+        const uint32_t nFull = n & ~7;
+        for (int s0 = 0; s0 < numStrings; s0 += 8) {
+            const int ns = std::min(8, numStrings - s0);
+            for (int x = 0; x < ns; ++x) {
+                SlotSrc& sl = slots[s0 + x];
+                uint32_t avail = sl.len > p0 ? std::min(n, sl.len - p0) : 0;
+                uint32_t p = 0;
+                if (sl.buf) {
+                    memcpy(col[x], sl.buf + p0, avail);
+                    p = avail;
+                } else if (sl.ps) {
+                    auto& vstrings = sl.ps->m_virtualStrings;
+                    while (p < avail && sl.vsIdx < vstrings.size()) {
+                        auto& vs = vstrings[sl.vsIdx];
+                        uint32_t m = std::min(avail - p, (uint32_t)vs.chMapCount - sl.vsOff);
+                        const uint8_t* br = vs.brightnessMap;
+                        const int* mp = vs.chMap;
+                        if (sl.affine[sl.vsIdx]) {
+                            uint32_t c = sl.vsOff % 3;
+                            int32_t base = (int32_t)(sl.vsOff - c);
+                            for (uint32_t k = 0; k < m; ++k) {
+                                col[x][p++] = br[channelData[mp[c] + base]];
+                                if (++c == 3) {
+                                    c = 0;
+                                    base += 3;
+                                }
+                            }
+                        } else {
+                            const int* mo = mp + sl.vsOff;
+                            for (uint32_t k = 0; k < m; ++k) {
+                                col[x][p++] = br[channelData[mo[k]]];
+                            }
+                        }
+                        sl.vsOff += m;
+                        if (sl.vsOff >= (uint32_t)vs.chMapCount) {
+                            sl.vsOff = 0;
+                            sl.vsIdx++;
+                        }
+                    }
+                }
+                if (p < n) {
+                    memset(&col[x][p], 0, n - p);
+                }
+            }
+            uint32_t g = 0;
+            if (ns == 8) {
+                for (; g < nFull; g += 8) {
+                    uint8x8_t r[8];
+                    for (int x = 0; x < 8; ++x) {
+                        r[x] = vld1_u8(&col[x][g]);
+                    }
+                    transpose8x8(r);
+                    for (int i = 0; i < 8; i++) {
+                        vst1_u8(&out[(size_t)(p0 + g + i) * numStrings + s0], r[i]);
+                    }
+                }
+            }
+            for (uint32_t p = g; p < n; ++p) {
+                for (int x = 0; x < ns; ++x) {
+                    out[(size_t)(p0 + p) * numStrings + s0 + x] = col[x][p];
+                }
+            }
+        }
+    }
 }
 
 /*
