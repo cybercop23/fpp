@@ -326,7 +326,6 @@ int BBShiftStringOutput::Init(Json::Value config) {
     int offset = ((m_pru0.frameSize / 4096) + 2) * 4096;
     m_pru0.lastData = m_pru0.curData + offset;
 
-    m_pru0.channelData = (uint8_t*)calloc(1, m_pru0.frameSize);
     m_pru0.formattedData = (uint8_t*)calloc(1, m_pru0.frameSize);
 
     m_pru1.frameSize = NUM_STRINGS_PER_PIN * MAX_PINS_PER_PRU * std::max(2400, m_pru1.maxStringLen);
@@ -334,7 +333,6 @@ int BBShiftStringOutput::Init(Json::Value config) {
     offset = ((m_pru1.frameSize / 4096) + 2) * 4096;
     m_pru1.lastData = m_pru1.curData + offset;
 
-    m_pru1.channelData = (uint8_t*)calloc(1, m_pru1.frameSize);
     m_pru1.formattedData = (uint8_t*)calloc(1, m_pru1.frameSize);
 #else
     // AM62x: the frame flipping buffers live in normal cached memory; the
@@ -343,14 +341,12 @@ int BBShiftStringOutput::Init(Json::Value config) {
     m_pru0.curData = (uint8_t*)calloc(1, m_pru0.frameSize);
     m_pru0.lastData = (uint8_t*)calloc(1, m_pru0.frameSize);
     m_pru0.heapData = true;
-    m_pru0.channelData = (uint8_t*)calloc(1, m_pru0.frameSize);
     m_pru0.formattedData = (uint8_t*)calloc(1, m_pru0.frameSize);
 
     m_pru1.frameSize = NUM_STRINGS_PER_PIN * MAX_PINS_PER_PRU * std::max(2400, m_pru1.maxStringLen);
     m_pru1.curData = (uint8_t*)calloc(1, m_pru1.frameSize);
     m_pru1.lastData = (uint8_t*)calloc(1, m_pru1.frameSize);
     m_pru1.heapData = true;
-    m_pru1.channelData = (uint8_t*)calloc(1, m_pru1.frameSize);
     m_pru1.formattedData = (uint8_t*)calloc(1, m_pru1.frameSize);
 #endif
 
@@ -522,6 +518,31 @@ void BBShiftStringOutput::OverlayTestData(unsigned char* channelData, int cycleN
     // that in prepData
 }
 
+// 8x8 byte transpose: in, rows are 8 consecutive bytes of 8 strings; out,
+// rows are the 8 strings' bytes for 8 consecutive positions
+static inline void transpose8x8(uint8x8_t r[8]) {
+    uint8x8x2_t t0 = vtrn_u8(r[0], r[1]);
+    uint8x8x2_t t1 = vtrn_u8(r[2], r[3]);
+    uint8x8x2_t t2 = vtrn_u8(r[4], r[5]);
+    uint8x8x2_t t3 = vtrn_u8(r[6], r[7]);
+    uint16x4x2_t s0 = vtrn_u16(vreinterpret_u16_u8(t0.val[0]), vreinterpret_u16_u8(t1.val[0]));
+    uint16x4x2_t s1 = vtrn_u16(vreinterpret_u16_u8(t0.val[1]), vreinterpret_u16_u8(t1.val[1]));
+    uint16x4x2_t s2 = vtrn_u16(vreinterpret_u16_u8(t2.val[0]), vreinterpret_u16_u8(t3.val[0]));
+    uint16x4x2_t s3 = vtrn_u16(vreinterpret_u16_u8(t2.val[1]), vreinterpret_u16_u8(t3.val[1]));
+    uint32x2x2_t u0 = vtrn_u32(vreinterpret_u32_u16(s0.val[0]), vreinterpret_u32_u16(s2.val[0]));
+    uint32x2x2_t u1 = vtrn_u32(vreinterpret_u32_u16(s1.val[0]), vreinterpret_u32_u16(s3.val[0]));
+    uint32x2x2_t u2 = vtrn_u32(vreinterpret_u32_u16(s0.val[1]), vreinterpret_u32_u16(s2.val[1]));
+    uint32x2x2_t u3 = vtrn_u32(vreinterpret_u32_u16(s1.val[1]), vreinterpret_u32_u16(s3.val[1]));
+    r[0] = vreinterpret_u8_u32(u0.val[0]);
+    r[1] = vreinterpret_u8_u32(u1.val[0]);
+    r[2] = vreinterpret_u8_u32(u2.val[0]);
+    r[3] = vreinterpret_u8_u32(u3.val[0]);
+    r[4] = vreinterpret_u8_u32(u0.val[1]);
+    r[5] = vreinterpret_u8_u32(u1.val[1]);
+    r[6] = vreinterpret_u8_u32(u2.val[1]);
+    r[7] = vreinterpret_u8_u32(u3.val[1]);
+}
+
 void BBShiftStringOutput::bitFlipData(uint8_t* stringChannelData, uint8_t* bitSwapped, size_t len) {
     /*
     uint64_t *iframe = (uint64_t*)bitSwapped;
@@ -639,14 +660,6 @@ void BBShiftStringOutput::prepData(FrameData& d, unsigned char* channelData) {
     if (d.maxStringLen == 0) {
         return;
     }
-    int count = 0;
-
-    uint8_t* out = d.channelData;
-
-    PixelString* ps = NULL;
-    uint8_t* frame = NULL;
-    uint8_t value;
-
     PixelStringTester* tester = nullptr;
     if (m_testType && m_testCycle >= 0) {
         if (m_testType == 999 && falconV5Support && m_testCycle == 0) {
@@ -655,31 +668,74 @@ void BBShiftStringOutput::prepData(FrameData& d, unsigned char* channelData) {
         tester = PixelStringTester::getPixelStringTester(m_testType);
         tester->prepareTestData(m_testCycle, m_testPercent);
     }
+    constexpr int NSTR = MAX_PINS_PER_PRU * NUM_STRINGS_PER_PIN;
+    const uint8_t* srcs[MAX_PINS_PER_PRU][NUM_STRINGS_PER_PIN];
+    uint32_t lens[MAX_PINS_PER_PRU][NUM_STRINGS_PER_PIN];
     uint32_t newMax = d.maxStringLen;
     for (int y = 0; y < MAX_PINS_PER_PRU; ++y) {
-        uint8_t pinMask = 1 << y;
         for (int x = 0; x < NUM_STRINGS_PER_PIN; ++x) {
             int idx = d.stringMap[y][x];
-            frame = out + x + (y * NUM_STRINGS_PER_PIN);
+            srcs[y][x] = nullptr;
+            lens[y][x] = 0;
             if (idx != -1) {
-                ps = m_strings[idx];
+                PixelString* ps = m_strings[idx];
                 uint32_t newLen = ps->m_outputChannels;
-                uint8_t* d = tester
+                srcs[y][x] = tester
                                  ? tester->createTestData(ps, m_testCycle, m_testPercent, channelData, newLen)
                                  : ps->prepareOutput(channelData);
+                lens[y][x] = newLen;
                 newMax = std::max(newMax, newLen);
-
-                for (int p = 0; p < newLen; p++) {
-                    *frame = *d;
-                    frame += MAX_PINS_PER_PRU * NUM_STRINGS_PER_PIN;
-                    ++d;
-                }
             }
         }
     }
     d.outputStringLen = newMax;
-    bitFlipData(out, d.formattedData, newMax);
-    // memcpy(d.curData, d.formattedData, d.frameSize);
+
+    // Interleave and bit flip the string data in tiles that stay in the L1
+    // cache.  Interleaving the whole frame at once writes a byte every 64
+    // bytes which forces every cache line of the frame to be re-fetched for
+    // every string once the frame no longer fits in cache.
+    constexpr uint32_t TILE = 64;
+    uint8_t tile[TILE * NSTR];
+    static const uint8_t zeros[TILE] = { 0 };
+    for (uint32_t p0 = 0; p0 < newMax; p0 += TILE) {
+        const uint32_t n = std::min(TILE, newMax - p0);
+        for (int y = 0; y < MAX_PINS_PER_PRU; ++y) {
+            // per string: where this tile's bytes come from and how many are
+            // available; strings that are unmapped or already fully consumed
+            // supply zeros
+            const uint8_t* base[NUM_STRINGS_PER_PIN];
+            uint32_t avail[NUM_STRINGS_PER_PIN];
+            uint32_t minAvail = n;
+            for (int x = 0; x < NUM_STRINGS_PER_PIN; ++x) {
+                uint32_t a = lens[y][x] > p0 ? std::min(n, lens[y][x] - p0) : 0;
+                if (a == 0) {
+                    base[x] = zeros;
+                    avail[x] = n;
+                } else {
+                    base[x] = srcs[y][x] + p0;
+                    avail[x] = a;
+                    minAvail = std::min(minAvail, a);
+                }
+            }
+            uint32_t g = 0;
+            for (; g + 8 <= minAvail; g += 8) {
+                uint8x8_t r[8];
+                for (int x = 0; x < NUM_STRINGS_PER_PIN; ++x) {
+                    r[x] = vld1_u8(base[x] + g);
+                }
+                transpose8x8(r);
+                for (int i = 0; i < 8; i++) {
+                    vst1_u8(&tile[(g + i) * NSTR + y * NUM_STRINGS_PER_PIN], r[i]);
+                }
+            }
+            for (uint32_t p = g; p < n; ++p) {
+                for (int x = 0; x < NUM_STRINGS_PER_PIN; ++x) {
+                    tile[p * NSTR + y * NUM_STRINGS_PER_PIN + x] = (p < avail[x]) ? base[x][p] : 0;
+                }
+            }
+        }
+        bitFlipData(tile, d.formattedData + (size_t)p0 * NSTR, n);
+    }
 }
 
 void BBShiftStringOutput::PrepData(unsigned char* channelData) {

@@ -114,8 +114,6 @@ private:
             }
         }
         ~FrameData() {
-            if (channelData)
-                free(channelData);
             if (formattedData)
                 free(formattedData);
             if (heapData) {
@@ -134,7 +132,6 @@ private:
         BBBPru* pru = nullptr;
         BBShiftStringData* pruData = nullptr;
 
-        uint8_t* channelData = nullptr;
         uint8_t* formattedData = nullptr;
 
         uint8_t* lastData = nullptr;
