@@ -12,6 +12,10 @@
 
 #include "fpp-pch.h"
 
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
+
 #include "fpp-json.h"
 
 #include "BBBMatrix.h"
@@ -733,6 +737,8 @@ int BBBMatrix::Init(Json::Value config) {
     }
     */
 
+    buildPrepTables();
+
     // make sure the PRU starts outputting a blank frame to remove any random noise
     // from the panels
     m_fullFrameLen = gpioFrameLen * 4;
@@ -852,6 +858,112 @@ void BBBMatrix::OverlayTestData(unsigned char* channelData, int cycleNum, float 
     }
 }
 
+void BBBMatrix::buildPrepTables() {
+    // per output: the 4 GPIO bank words for every combination of the 6 pins,
+    // so setting the pins for a pixel/bit is 4 unconditional ORs instead of
+    // 6 data dependent branches
+    for (int o = 0; o < m_outputs; o++) {
+        const GPIOPinInfo::Pins& p0 = m_pinInfo[o].row[0];
+        const GPIOPinInfo::Pins& p1 = m_pinInfo[o].row[1];
+        for (int idx = 0; idx < 64; idx++) {
+            uint32_t v[4] = { 0, 0, 0, 0 };
+            if (idx & 1)
+                v[p0.r_gpio] |= p0.r_pin;
+            if (idx & 2)
+                v[p0.g_gpio] |= p0.g_pin;
+            if (idx & 4)
+                v[p0.b_gpio] |= p0.b_pin;
+            if (idx & 8)
+                v[p1.r_gpio] |= p1.r_pin;
+            if (idx & 16)
+                v[p1.g_gpio] |= p1.g_pin;
+            if (idx & 32)
+                v[p1.b_gpio] |= p1.b_pin;
+            for (int g = 0; g < 4; g++) {
+                m_pinLUT[o][idx][g] = v[g];
+            }
+        }
+    }
+    // spread the gamma corrected value so bit b lands in byte b; shifting
+    // six spread values together produces the 6 bit pin combination for
+    // every bit plane of a pixel in a couple of operations
+    for (int v = 0; v < 256; v++) {
+        uint16_t g = gammaCurve[v];
+        uint64_t lo = 0;
+        uint32_t hi = 0;
+        for (int b = 0; b < 8; b++) {
+            if ((g >> b) & 1)
+                lo |= 1ULL << (8 * b);
+        }
+        for (int b = 8; b < 12; b++) {
+            if ((g >> b) & 1)
+                hi |= 1u << (8 * (b - 8));
+        }
+        m_gammaSpreadLo[v] = lo;
+        m_gammaSpreadHi[v] = hi;
+    }
+    // group the panels by chain position; all outputs at the same chain
+    // position write into the same gpio words and can accumulate in registers
+    m_chainPanels.assign(m_longestChain, {});
+    for (int output = 0; output < m_outputs; output++) {
+        for (int i = 0; i < m_panelMatrix->m_outputPanels[output].size(); i++) {
+            int panel = m_panelMatrix->m_outputPanels[output][i];
+            int chain = m_panelMatrix->m_panels[panel].chain;
+            if (chain >= 0 && chain < m_longestChain) {
+                m_chainPanels[chain].emplace_back(output, panel);
+            }
+        }
+    }
+    // the interleave mapping only depends on the coordinates, not the panel
+    // or output, so it can be precomputed once instead of a virtual call per
+    // pixel per frame
+    int h2 = m_panelHeight / 2;
+    m_yOutMap.resize(h2);
+    m_xOutMap.resize(h2 * m_panelWidth);
+    for (int y = 0; y < h2; y++) {
+        int xo = 0;
+        int yo = y;
+        m_handler->map(xo, yo);
+        m_yOutMap[y] = yo;
+        for (int x = 0; x < m_panelWidth; x++) {
+            int xOut = x;
+            int yo2 = y;
+            m_handler->map(xOut, yo2);
+            m_xOutMap[y * m_panelWidth + x] = xOut;
+        }
+    }
+    size_t maxPairs = 1;
+    for (auto& c : m_chainPanels) {
+        maxPairs = std::max(maxPairs, c.size());
+    }
+    m_stageLo.resize(maxPairs * m_panelWidth * 8);
+    m_stageHi.resize(maxPairs * m_panelWidth * 4);
+
+    // PrepData skips the per-frame memset and uses plain stores, which is
+    // only valid if the interleave maps every (y, x) onto a distinct slot of
+    // the chain block (it covers and overwrites everything).  If a handler
+    // is not a clean bijection, fall back to memset + OR accumulation which
+    // matches the historical behavior exactly.
+    m_prepNeedsMemset = false;
+    int blockW = m_panelWidth * m_panelHeight / (m_panelScan * 2);
+    std::vector<uint8_t> covered(m_panelScan * blockW, 0);
+    for (int y = 0; y < h2; y++) {
+        for (int x = 0; x < m_panelWidth; x++) {
+            int yOut = m_yOutMap[y];
+            int xOut = m_xOutMap[y * m_panelWidth + x];
+            if (yOut < 0 || yOut >= m_panelScan || xOut < 0 || xOut >= blockW || covered[yOut * blockW + xOut]) {
+                m_prepNeedsMemset = true;
+            } else {
+                covered[yOut * blockW + xOut] = 1;
+            }
+        }
+    }
+    if (m_prepNeedsMemset) {
+        LogWarn(VB_CHANNELOUT, "BBBMatrix: interleave map for %s is not a clean bijection, using slower PrepData path\n",
+                m_panelInterleave.c_str());
+    }
+}
+
 void BBBMatrix::PrepData(unsigned char* channelData) {
     m_matrix->OverlaySubMatrices(channelData);
 
@@ -872,94 +984,99 @@ void BBBMatrix::PrepData(unsigned char* channelData) {
     size_t fullRowLen = rowLen * m_colorDepth;
 
     uint32_t* gpioFrame = m_gpioFrame;
-    /*
-    if (m_numFrames >= 4) {
-       gpioFrame = (uint32_t*)m_frames[m_curFrame];
+    int h2 = m_panelHeight / 2;
+    size_t bitStride = m_outputByRow ? rowLen : (rowLen * m_panelScan);
+
+    // For each chain position, the packed bit-plane pin indexes for every
+    // output are staged for the row, then each bit plane is written with all
+    // outputs accumulated in a register and stored without a read-modify-
+    // write.  Iterating every chain position and row covers (and thus
+    // clears) the whole frame, so no memset is needed; bit planes past the
+    // color depth were zeroed at init and are never touched.
+    const bool rmw = m_prepNeedsMemset;
+    if (rmw) {
+        memset(gpioFrame, 0, m_fullFrameLen);
     }
-    */
-
-    // long long startTime = GetTime();
-    memset(gpioFrame, 0, m_fullFrameLen);
-    // long long memsetTime = GetTime();
-
-    for (int output = 0; output < m_outputs; output++) {
-        int panelsOnOutput = m_panelMatrix->m_outputPanels[output].size();
-        const GPIOPinInfo::Pins& pinInfo0 = m_pinInfo[output].row[0];
-        const GPIOPinInfo::Pins& pinInfo1 = m_pinInfo[output].row[1];
-
-        for (int i = 0; i < panelsOnOutput; i++) {
-            int panel = m_panelMatrix->m_outputPanels[output][i];
-            int chain = m_panelMatrix->m_panels[panel].chain;
-
-            for (int y = 0; y < (m_panelHeight / 2); y++) {
-                int yw1 = y * m_panelWidth * 3;
-                int yw2 = (y + (m_panelHeight / 2)) * m_panelWidth * 3;
-
-                int yOut = y;
-                int xo2 = 0;
-                m_handler->map(xo2, yOut);
-
-                int offset = yOut * fullRowLen + (m_longestChain - chain - 1) * 4 * m_panelWidth * m_panelHeight / m_panelScan / 2;
-                if (!m_outputByRow) {
-                    offset = yOut * rowLen + (m_longestChain - chain - 1) * 4 * m_panelWidth * m_panelHeight / m_panelScan / 2;
-                }
-
+    for (int chain = 0; chain < m_longestChain; chain++) {
+        auto& pairs = m_chainPanels[chain];
+        int nPairs = (int)pairs.size();
+        size_t chainOff = (size_t)(m_longestChain - chain - 1) * 4 * m_panelWidth * m_panelHeight / m_panelScan / 2;
+        for (int y = 0; y < h2; y++) {
+            int yw1 = y * m_panelWidth * 3;
+            int yw2 = (y + h2) * m_panelWidth * 3;
+            const uint16_t* xMap = &m_xOutMap[y * m_panelWidth];
+            for (int p = 0; p < nPairs; p++) {
+                const int* pixelMap = &m_panelMatrix->m_panels[pairs[p].second].pixelMap[0];
+                uint8_t* stLo = &m_stageLo[p * m_panelWidth * 8];
                 for (int x = 0; x < m_panelWidth; ++x) {
-                    uint16_t r1 = gammaCurve[channelData[m_panelMatrix->m_panels[panel].pixelMap[yw1 + x * 3]]];
-                    uint16_t g1 = gammaCurve[channelData[m_panelMatrix->m_panels[panel].pixelMap[yw1 + x * 3 + 1]]];
-                    uint16_t b1 = gammaCurve[channelData[m_panelMatrix->m_panels[panel].pixelMap[yw1 + x * 3 + 2]]];
-
-                    uint16_t r2 = gammaCurve[channelData[m_panelMatrix->m_panels[panel].pixelMap[yw2 + x * 3]]];
-                    uint16_t g2 = gammaCurve[channelData[m_panelMatrix->m_panels[panel].pixelMap[yw2 + x * 3 + 1]]];
-                    uint16_t b2 = gammaCurve[channelData[m_panelMatrix->m_panels[panel].pixelMap[yw2 + x * 3 + 2]]];
-
-                    int xOut = x;
-                    int yo2 = y;
-                    m_handler->map(xOut, yo2);
-
-                    int xOff = xOut * 4;
-
-                    for (auto bit : m_bitOrder) {
-                        uint16_t mask = 1 << bit;
-                        if (r1 & mask) {
-                            gpioFrame[offset + xOff + pinInfo0.r_gpio] |= pinInfo0.r_pin;
-                        }
-                        if (g1 & mask) {
-                            gpioFrame[offset + xOff + pinInfo0.g_gpio] |= pinInfo0.g_pin;
-                        }
-                        if (b1 & mask) {
-                            gpioFrame[offset + xOff + pinInfo0.b_gpio] |= pinInfo0.b_pin;
-                        }
-                        if (r2 & mask) {
-                            gpioFrame[offset + xOff + pinInfo1.r_gpio] |= pinInfo1.r_pin;
-                        }
-                        if (g2 & mask) {
-                            gpioFrame[offset + xOff + pinInfo1.g_gpio] |= pinInfo1.g_pin;
-                        }
-                        if (b2 & mask) {
-                            gpioFrame[offset + xOff + pinInfo1.b_gpio] |= pinInfo1.b_pin;
-                        }
-                        if (m_outputByRow) {
-                            xOff += rowLen;
-                        } else {
-                            xOff += rowLen * m_panelScan;
-                        }
+                    uint64_t pk = m_gammaSpreadLo[channelData[pixelMap[yw1 + x * 3]]] |
+                                  (m_gammaSpreadLo[channelData[pixelMap[yw1 + x * 3 + 1]]] << 1) |
+                                  (m_gammaSpreadLo[channelData[pixelMap[yw1 + x * 3 + 2]]] << 2) |
+                                  (m_gammaSpreadLo[channelData[pixelMap[yw2 + x * 3]]] << 3) |
+                                  (m_gammaSpreadLo[channelData[pixelMap[yw2 + x * 3 + 1]]] << 4) |
+                                  (m_gammaSpreadLo[channelData[pixelMap[yw2 + x * 3 + 2]]] << 5);
+                    memcpy(&stLo[x * 8], &pk, 8);
+                }
+                if (m_colorDepth > 8) {
+                    uint8_t* stHi = &m_stageHi[p * m_panelWidth * 4];
+                    for (int x = 0; x < m_panelWidth; ++x) {
+                        uint32_t pk = m_gammaSpreadHi[channelData[pixelMap[yw1 + x * 3]]] |
+                                      (m_gammaSpreadHi[channelData[pixelMap[yw1 + x * 3 + 1]]] << 1) |
+                                      (m_gammaSpreadHi[channelData[pixelMap[yw1 + x * 3 + 2]]] << 2) |
+                                      (m_gammaSpreadHi[channelData[pixelMap[yw2 + x * 3]]] << 3) |
+                                      (m_gammaSpreadHi[channelData[pixelMap[yw2 + x * 3 + 1]]] << 4) |
+                                      (m_gammaSpreadHi[channelData[pixelMap[yw2 + x * 3 + 2]]] << 5);
+                        memcpy(&stHi[x * 4], &pk, 4);
                     }
                 }
+            }
+            size_t offset = (m_outputByRow ? (size_t)m_yOutMap[y] * fullRowLen : (size_t)m_yOutMap[y] * rowLen) + chainOff;
+            for (int bi = 0; bi < m_colorDepth; bi++) {
+                int b = m_bitOrder[bi];
+                uint32_t* out = &gpioFrame[offset + (size_t)bi * bitStride];
+                const uint8_t* st = (b < 8) ? m_stageLo.data() : m_stageHi.data();
+                size_t stStride = (b < 8) ? (m_panelWidth * 8) : (m_panelWidth * 4);
+                int stMult = (b < 8) ? 8 : 4;
+                int bb = (b < 8) ? b : (b - 8);
+#ifdef __ARM_NEON
+                for (int x = 0; x < m_panelWidth; ++x) {
+                    uint32_t* o2 = &out[(size_t)xMap[x] * 4];
+                    uint32x4_t acc = rmw ? vld1q_u32(o2) : vdupq_n_u32(0);
+                    for (int p = 0; p < nPairs; p++) {
+                        acc = vorrq_u32(acc, vld1q_u32(m_pinLUT[pairs[p].first][st[p * stStride + x * stMult + bb]]));
+                    }
+                    vst1q_u32(o2, acc);
+                }
+#else
+                for (int x = 0; x < m_panelWidth; ++x) {
+                    uint32_t* o2 = &out[(size_t)xMap[x] * 4];
+                    uint32_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+                    if (rmw) {
+                        a0 = o2[0];
+                        a1 = o2[1];
+                        a2 = o2[2];
+                        a3 = o2[3];
+                    }
+                    for (int p = 0; p < nPairs; p++) {
+                        const uint32_t* t = m_pinLUT[pairs[p].first][st[p * stStride + x * stMult + bb]];
+                        a0 |= t[0];
+                        a1 |= t[1];
+                        a2 |= t[2];
+                        a3 |= t[3];
+                    }
+                    o2[0] = a0;
+                    o2[1] = a1;
+                    o2[2] = a2;
+                    o2[3] = a3;
+                }
+#endif
             }
         }
     }
 
-    // long long dataTime = GetTime();
     if ((m_numFrames >= 3) && (m_frames[m_curFrame] != (uint8_t*)gpioFrame)) {
         memcpy(m_frames[m_curFrame], m_gpioFrame, m_fullFrameLen);
     }
-    /*
-    long long endTime = GetTime();
-    if ((endTime - startTime) > 5000) {
-        printf("%d:   Memset: %d     Data: %d    cpy: %d   Total: %d\n", m_curFrame, (int)(memsetTime- startTime), (int)(dataTime - memsetTime), (int)(endTime -dataTime), (int)(endTime -startTime));
-    }
-    */
 }
 int BBBMatrix::SendData(unsigned char* channelData) {
     LogExcess(VB_CHANNELOUT, "BBBMatrix::SendData(%p)\n", channelData);

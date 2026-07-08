@@ -11,8 +11,9 @@
  * included LICENSE.GPL file.
  */
 
-#include <string>
 #include "fpp-json-fwd.h"
+#include <string>
+#include <vector>
 
 #include "Matrix.h"
 #include "PanelMatrix.h"
@@ -128,4 +129,24 @@ private:
     int m_curFrame;
     int m_numFrames;
     int m_fullFrameLen;
+
+    // Precomputed acceleration structures for PrepData (see buildPrepTables):
+    // per output, the 4 GPIO bank words for each combination of the 6 pins
+    uint32_t m_pinLUT[8][64][4];
+    // bit-spread gamma: bit b of gammaCurve[v] lands in byte b (low 8 bits)
+    // or byte b-8 (bits 8-11) so all bit-plane indexes compute per pixel
+    uint64_t m_gammaSpreadLo[256];
+    uint32_t m_gammaSpreadHi[256];
+    // (output, panel) pairs grouped by chain position
+    std::vector<std::vector<std::pair<int, int>>> m_chainPanels;
+    // interleave handler results precomputed per panel row/pixel
+    std::vector<int> m_yOutMap;
+    std::vector<uint16_t> m_xOutMap;
+    // staging for the packed per-bitplane pin indexes
+    std::vector<uint8_t> m_stageLo;
+    std::vector<uint8_t> m_stageHi;
+    // set when the interleave map is not a clean bijection and PrepData must
+    // memset the frame and OR into it (the historical behavior)
+    bool m_prepNeedsMemset = false;
+    void buildPrepTables();
 };
