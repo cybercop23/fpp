@@ -75,6 +75,7 @@ DISABLE_SEND .macro
 
 #include "FalconUtils.asm"
 #include "FalconPRUDefs.hp"
+#include "SMEMRing.hp"
 
 /** Register map */
 
@@ -82,11 +83,7 @@ DISABLE_SEND .macro
 // r2 - r17
 #define pixelData    r2
 
-#define xferR1          r18
-#define xferR2          r19
-#define xferR3          r20
-
-#define tmpReg1         r19   // can co-exist with xferR2/xferR3
+#define tmpReg1         r19
 #define tmpReg2         r20
 
 //r21-r24 contains the output masks, r21/22 are high, r23/24 are low
@@ -130,56 +127,43 @@ UNPRELOAD_DATA .macro dataAddress
 
 #else
 
+// AM62x: the data is streamed into a ring in the PRU shared RAM by an ARM
+// real-time pump thread (see SMEMRing.hp and BBShiftString.cpp).  DDR reads
+// from the PRU (XFR2VBUS or LBBO) have a 1.1-1.8us round trip on the AM62x
+// with occasional much larger spikes, which can stretch the WS281x low time
+// far enough to latch a partial frame.  Shared RAM reads are ~20 cycles and
+// fully predictable.
+//
+// The ARM streams the frame data followed by any FalconV5 packet data in
+// exactly the order the code consumes blocks, so the dataAddress arguments
+// are ignored.  The ARM publishes its write pointer (a PRU address, always
+// 64-byte aligned) at ring end + 0; the read pointer is published at ring
+// end + 4.  Pointer equality means the ring is empty; the ARM never fills
+// the last block so the pointers are only equal when empty.  ringCtrl is
+// also the first address past the ring for the wrap compare.
 
-WAITFORXFRBUS .macro bus
-    .newblock
-WAITXFRLOOP?:
-    XIN     bus, &xferR1, 4
-    // check to see if it's "busy" due to data waiting to be read, if so, clear it
-    QBBC    NODATA?, xferR1, 2     
-        XIN bus, &r2, 32
-        XIN bus, &xferR1, 4
-NODATA?:
-    QBBS    WAITXFRLOOP?, xferR1, 0
-    .endm
-
-
-STARTXFRBUS .macro bus, dataAddress
-    LDI32   xferR1, 7
-    MOV     xferR2, dataAddress
-    LDI32   xferR3, 0
-    XOUT    bus, &xferR1, 12
-    .endm
-
-
-WAITFORDATA_READY .macro bus
-WAITFORDATA1?:
-    XIN     bus, &xferR1, 4
-    QBBC    WAITFORDATA1?, xferR1, 2
-WAITFORDATA2?:
-    XIN     bus, &xferR1, 4
-    QBBS    WAITFORDATA2?, xferR1, 3
-    NOP     // spec says we need an extra NOP after this flag is set
-    .endm    
+#define ringReadPtr     r0
+#define ringCtrl        r18
 
 PRELOAD_DATA .macro dataAddress
-    WAITFORXFRBUS 0x60
-    STARTXFRBUS 0x60, dataAddress
     .endm
 
 LOAD_NEXT_DATABLOCK .macro dataAddress
-    WAITFORDATA_READY 0x60
-    XIN     0x60, &r2, 64
-    ADD     dataAddress, dataAddress, 64
+    .newblock
+WAITDATA?:
+    LBBO    &tmpReg1, ringCtrl, 0, 4
+    QBEQ    WAITDATA?, tmpReg1, ringReadPtr
+    LBBO    &pixelData, ringReadPtr, 0, DATABLOCKSIZE
+    ADD     ringReadPtr, ringReadPtr, DATABLOCKSIZE
+    SBBO    &ringReadPtr, ringCtrl, 4, 4
+    // ringCtrl is also the first address past the ring
+    QBNE    NOWRAP?, ringReadPtr, ringCtrl
+    LDI     tmpReg1, SMEM_RING_CONFIG_OFFSET
+    LBCO    &ringReadPtr, CONST_PRUDRAM, tmpReg1, 4
+NOWRAP?:
     .endm
 
 UNPRELOAD_DATA .macro dataAddress
-    WAITFORDATA_READY 0x60
-    LDI32   xferR1, 6
-    MOV     xferR2, dataAddress
-    LDI32   xferR3, 0
-    XOUT    0x60, &xferR1, 12
-    XIN     0x60, &r2, 64
     .endm
 #endif
 
@@ -336,6 +320,21 @@ DONE_FALCONV5?:
 	LDI32	r0, 0x00100000
 	LDI32	r1, CTPPR_1 + PRU_MEMORY_OFFSET
     SBBO    &r0, r1, 0x00, 4
+
+#ifndef AM33XX
+    // Wait for the ARM to publish the ring location/size into our data RAM
+    // (see SMEMRing.hp).  It cannot be written before the firmware starts:
+    // the firmware load clears the PRU memories and writes while the PRUSS
+    // is powered down are silently dropped.  The base is written first,
+    // then the (nonzero) size.
+    LDI     tmpReg1, SMEM_RING_CONFIG_OFFSET
+RINGCFGWAIT:
+    LBCO    &ringReadPtr, CONST_PRUDRAM, tmpReg1, 8   // base into r0, size into r1
+    QBEQ    RINGCFGWAIT, r1, 0
+    ADD     ringCtrl, ringReadPtr, r1
+    // publish the read pointer so the ARM pump starts consistent
+    SBBO    &ringReadPtr, ringCtrl, 4, 4
+#endif
 
 	// Write a 0x1 into the response field so that they know we have started
 	LDI 	r2, 0x1

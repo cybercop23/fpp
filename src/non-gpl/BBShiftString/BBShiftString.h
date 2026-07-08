@@ -12,8 +12,10 @@
  * personal use, but modified copies MAY NOT be redistributed in any form.
  */
 
+#include <atomic>
 #include <string>
 #include "fpp-json-fwd.h"
+#include <thread>
 #include <vector>
 
 #include "../FalconV5Support/FalconV5Support.h"
@@ -116,6 +118,12 @@ private:
                 free(channelData);
             if (formattedData)
                 free(formattedData);
+            if (heapData) {
+                if (curData)
+                    free(curData);
+                if (lastData)
+                    free(lastData);
+            }
             for (int y = 0; y < NUM_CONFIG_PACKETS; ++y) {
                 if (v5_config_packets[y] && v5_config_packets[y] != &dynamicPacketInfo2 && v5_config_packets[y] != &dynamicPacketInfo1) {
                     delete v5_config_packets[y];
@@ -134,6 +142,28 @@ private:
         uint32_t frameSize = 0;
         int maxStringLen = 0;
         int outputStringLen = 0;
+
+        // AM62x only: the PRU is fed through a ring in the PRU shared RAM by
+        // a pump thread instead of reading DDR (see pru/SMEMRing.hp); the
+        // frame buffers live in normal cached memory.  Unused on AM335x.
+        BBBPruSMEMRing ring;
+        bool heapData = false;
+
+        // frame handoff to the pump thread; SendData fills pendingFrame then
+        // bumps pendingSeq, the pump snapshots it when the PRU is ready
+        struct PumpFrame {
+            const uint8_t* frameData = nullptr;
+            uint32_t frameBytes = 0;
+            const uint8_t* packetData = nullptr;
+            uint32_t packetBytes = 0;
+            uint32_t command = 0;
+        } pendingFrame;
+        std::atomic<uint32_t> pendingSeq{ 0 };
+        // pump-internal streaming state
+        uint32_t pumpedSeq = 0;
+        PumpFrame activeFrame;
+        uint32_t activeOff = 0;
+        bool pumpActive = false;
 
         FalconV5PacketInfo* v5_config_packets[NUM_CONFIG_PACKETS];
         FalconV5PacketInfo dynamicPacketInfo1;
@@ -159,6 +189,13 @@ private:
     void prepData(FrameData& d, unsigned char* channelData);
     void sendData(FrameData& d);
     void bitFlipData(uint8_t* stringChannelData, uint8_t* bitSwapped, size_t len);
+
+    // AM62x shared-memory ring pump (see pru/SMEMRing.hp)
+    std::thread m_pumpThread;
+    std::atomic<bool> m_pumpRunning{ false };
+    uint8_t* m_fv5PacketMem = nullptr;
+    void runPumpThread();
+    bool pumpFrameData(FrameData& d);
 
     void createOutputLengths(FrameData& d, const std::string& pfx);
 

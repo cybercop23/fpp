@@ -15,12 +15,16 @@
 
 #include "fpp-json.h"
 
+#include <pthread.h>
+#include <sched.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <sys/wait.h>
 #include <arm_neon.h>
+#include <cstring>
 #include <tuple>
 
 #include <chrono>
@@ -33,6 +37,7 @@
 
 #include "BBShiftString.h"
 #include "../CapeUtils/CapeUtils.h"
+#include "../../pru/SMEMRing.hp"
 
 #include "../../overlays/PixelOverlay.h"
 
@@ -84,6 +89,10 @@ BBShiftStringOutput::BBShiftStringOutput(unsigned int startChannel, unsigned int
  */
 BBShiftStringOutput::~BBShiftStringOutput() {
     LogDebug(VB_CHANNELOUT, "BBShiftStringOutput::~BBShiftStringOutput()\n");
+    m_pumpRunning = false;
+    if (m_pumpThread.joinable()) {
+        m_pumpThread.join();
+    }
     for (auto a : m_strings) {
         delete a;
     }
@@ -96,6 +105,9 @@ BBShiftStringOutput::~BBShiftStringOutput() {
     }
     if (falconV5Support) {
         delete falconV5Support;
+    }
+    if (m_fv5PacketMem) {
+        free(m_fv5PacketMem);
     }
 }
 
@@ -305,6 +317,7 @@ int BBShiftStringOutput::Init(Json::Value config) {
         return 0;
     }
 
+#ifdef PLATFORM_BBB
     // give each area two chunks (frame flipping) of DDR memory
     uint8_t* start = m_pru0.pru ? m_pru0.pru->ddr : m_pru1.pru->ddr;
     m_pru0.frameSize = NUM_STRINGS_PER_PIN * MAX_PINS_PER_PRU * std::max(2400, m_pru0.maxStringLen);
@@ -323,6 +336,23 @@ int BBShiftStringOutput::Init(Json::Value config) {
 
     m_pru1.channelData = (uint8_t*)calloc(1, m_pru1.frameSize);
     m_pru1.formattedData = (uint8_t*)calloc(1, m_pru1.frameSize);
+#else
+    // AM62x: the frame flipping buffers live in normal cached memory; the
+    // pump thread streams them into the PRU shared memory ring
+    m_pru0.frameSize = NUM_STRINGS_PER_PIN * MAX_PINS_PER_PRU * std::max(2400, m_pru0.maxStringLen);
+    m_pru0.curData = (uint8_t*)calloc(1, m_pru0.frameSize);
+    m_pru0.lastData = (uint8_t*)calloc(1, m_pru0.frameSize);
+    m_pru0.heapData = true;
+    m_pru0.channelData = (uint8_t*)calloc(1, m_pru0.frameSize);
+    m_pru0.formattedData = (uint8_t*)calloc(1, m_pru0.frameSize);
+
+    m_pru1.frameSize = NUM_STRINGS_PER_PIN * MAX_PINS_PER_PRU * std::max(2400, m_pru1.maxStringLen);
+    m_pru1.curData = (uint8_t*)calloc(1, m_pru1.frameSize);
+    m_pru1.lastData = (uint8_t*)calloc(1, m_pru1.frameSize);
+    m_pru1.heapData = true;
+    m_pru1.channelData = (uint8_t*)calloc(1, m_pru1.frameSize);
+    m_pru1.formattedData = (uint8_t*)calloc(1, m_pru1.frameSize);
+#endif
 
     supportsV5Listeners = root.isMember("falconV5ListenerConfig");
     if (supportsV5Listeners) {
@@ -331,7 +361,12 @@ int BBShiftStringOutput::Init(Json::Value config) {
         PinCapabilities::getPinByName(PRU1_ENABLE_PIN).configPin("pru1out", true, "BBShiftString-Enable");
     }
     if (hasV5SR) {
+#ifdef PLATFORM_BBB
         setupFalconV5Support(root, m_pru1.lastData + offset);
+#else
+        m_fv5PacketMem = (uint8_t*)calloc(1, 128 * 1024);
+        setupFalconV5Support(root, m_fv5PacketMem);
+#endif
     }
 
     PixelString::AutoCreateOverlayModels(m_strings, m_autoCreatedModelNames);
@@ -344,27 +379,46 @@ int BBShiftStringOutput::StartPRU() {
         PinCapabilities::getPinByName(a.first).configPin(a.second, true, "BBShiftString");
     }
 
+#ifdef PLATFORM_BBB
+    constexpr bool mapShared = false;
+#else
+    constexpr bool mapShared = true;
+#endif
     if (m_pru1.maxStringLen) {
-        m_pru1.pru = new BBBPru(1, false, false);
+        m_pru1.pru = new BBBPru(1, mapShared, false);
         m_pru1.pruData = (BBShiftStringData*)m_pru1.pru->data_ram;
         if (!m_pru1.pru->run("/opt/fpp/src/non-gpl/BBShiftString/BBShiftString_pru1.out")) {
             LogErr(VB_CHANNELOUT, "BBShiftString: Unable to start PRU1. May require a reboot.\n");
             WarningHolder::AddWarning("BBShiftString: Unable to start PRU1. May require a reboot.");
             return 0;
         }
+#ifndef PLATFORM_BBB
+        // the firmware polls for the ring location; the upper half of the
+        // shared RAM keeps clear of the FalconV5 listener capture area
+        m_pru1.ring.attach(m_pru1.pru, SMEM_RING_SPLIT1_BASE, SMEM_RING_SPLIT_SIZE, true);
+#endif
         createOutputLengths(m_pru1, "pru1");
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     if (m_pru0.maxStringLen) {
-        m_pru0.pru = new BBBPru(0, false, false);
+        m_pru0.pru = new BBBPru(0, mapShared, false);
         m_pru0.pruData = (BBShiftStringData*)m_pru0.pru->data_ram;
         if (!m_pru0.pru->run("/opt/fpp/src/non-gpl/BBShiftString/BBShiftString_pru0.out")) {
             LogErr(VB_CHANNELOUT, "BBShiftString: Unable to start PRU0. May require a reboot.\n");
             WarningHolder::AddWarning("BBShiftString: Unable to start PRU0. May require a reboot.");
             return 0;
         }
+#ifndef PLATFORM_BBB
+        m_pru0.ring.attach(m_pru0.pru, SMEM_RING_SPLIT0_BASE, SMEM_RING_SPLIT_SIZE, true);
+#endif
         createOutputLengths(m_pru0, "pru0");
     }
+#ifndef PLATFORM_BBB
+    if (!m_pumpThread.joinable() && (m_pru0.pru || m_pru1.pru)) {
+        m_pumpRunning = true;
+        m_pumpThread = std::thread(&BBShiftStringOutput::runPumpThread, this);
+    }
+#endif
     return 1;
 }
 void BBShiftStringOutput::StopPRU(bool wait) {
@@ -388,11 +442,7 @@ void BBShiftStringOutput::StopPRU(bool wait) {
             __asm__ __volatile__("" ::
                                      : "memory");
         }
-        m_pru1.pru->stop();
-        delete m_pru1.pru;
-        m_pru1.pru = nullptr;
     }
-
     if (m_pru0.pru) {
         int cnt = 0;
         while (wait && cnt < 25 && m_pru0.pruData->response != 0xFFFF) {
@@ -401,6 +451,20 @@ void BBShiftStringOutput::StopPRU(bool wait) {
             __asm__ __volatile__("" ::
                                      : "memory");
         }
+    }
+    // stop the pump before the PRU memory mappings go away
+    m_pumpRunning = false;
+    if (m_pumpThread.joinable()) {
+        m_pumpThread.join();
+    }
+
+    if (m_pru1.pru) {
+        m_pru1.pru->stop();
+        delete m_pru1.pru;
+        m_pru1.pru = nullptr;
+    }
+
+    if (m_pru0.pru) {
         m_pru0.pru->stop();
         delete m_pru0.pru;
         m_pru0.pru = nullptr;
@@ -671,6 +735,7 @@ void BBShiftStringOutput::PrepData(unsigned char* channelData) {
 
 void BBShiftStringOutput::sendData(FrameData& d) {
     if (d.outputStringLen) {
+#ifdef PLATFORM_BBB
         memcpy(d.curData, d.formattedData, d.frameSize);
         // make sure memory is flushed
         msync(d.curData, d.frameSize, MS_SYNC | MS_INVALIDATE);
@@ -683,6 +748,28 @@ void BBShiftStringOutput::sendData(FrameData& d) {
             d.pruData->address_dma_packet = 0;
         }
         std::swap(d.lastData, d.curData);
+#else
+        // the pump thread streams the frame (and any FalconV5 packet data)
+        // into the shared memory ring in exactly the order the firmware
+        // consumes blocks; the PRU consumes one 64 byte block per byte of
+        // string data
+        uint32_t bytes = d.outputStringLen * MAX_PINS_PER_PRU * NUM_STRINGS_PER_PIN;
+        if (bytes > d.frameSize) {
+            bytes = d.frameSize;
+        }
+        memcpy(d.curData, d.formattedData, bytes);
+        d.pendingFrame.frameData = d.curData;
+        d.pendingFrame.frameBytes = bytes;
+        auto* pi = d.v5_config_packets[d.curV5ConfigPacket];
+        if (pi && pi->data) {
+            d.pendingFrame.packetData = pi->data;
+            d.pendingFrame.packetBytes = 57 * MAX_PINS_PER_PRU * NUM_STRINGS_PER_PIN * pi->len;
+        } else {
+            d.pendingFrame.packetData = nullptr;
+            d.pendingFrame.packetBytes = 0;
+        }
+        std::swap(d.lastData, d.curData);
+#endif
     }
 }
 
@@ -717,7 +804,14 @@ int BBShiftStringOutput::SendData(unsigned char* channelData) {
         if (m_pru0.curV5ConfigPacket == NUM_CONFIG_PACKETS) {
             m_pru0.curV5ConfigPacket = FIRST_LOOPING_CONFIG_PACKET;
         }
+#ifdef PLATFORM_BBB
         m_pru0.pruData->command = c;
+#else
+        // the pump thread writes the command once the PRU has taken the
+        // previous one, matching the latest-frame-wins drop behavior
+        m_pru0.pendingFrame.command = c;
+        m_pru0.pendingSeq.fetch_add(1, std::memory_order_release);
+#endif
     }
     if (m_pru1.pruData) {
         uint32_t c = m_pru1.outputStringLen;
@@ -734,13 +828,87 @@ int BBShiftStringOutput::SendData(unsigned char* channelData) {
         if (m_pru1.curV5ConfigPacket == NUM_CONFIG_PACKETS) {
             m_pru1.curV5ConfigPacket = FIRST_LOOPING_CONFIG_PACKET;
         }
+#ifdef PLATFORM_BBB
         m_pru1.pruData->command = c;
+#else
+        m_pru1.pendingFrame.command = c;
+        m_pru1.pendingSeq.fetch_add(1, std::memory_order_release);
+#endif
     }
     __asm__ __volatile__("" ::
                              : "memory");
 
     return m_channelCount;
 }
+
+#ifndef PLATFORM_BBB
+// Stream the pending frame into the shared memory ring; returns true if any
+// progress was made.  The full frame does not fit in the ring, so the PRU is
+// started as soon as a frame is taken and the data streams ~2.5ms ahead of
+// the output.
+bool BBShiftStringOutput::pumpFrameData(FrameData& d) {
+    if (!d.pumpActive) {
+        uint32_t seq = d.pendingSeq.load(std::memory_order_acquire);
+        if (seq == d.pumpedSeq || d.pruData->command != 0) {
+            return false;
+        }
+        // snapshot the newest pending frame; retry if SendData raced us
+        do {
+            d.pumpedSeq = seq;
+            d.activeFrame = d.pendingFrame;
+            seq = d.pendingSeq.load(std::memory_order_acquire);
+        } while (seq != d.pumpedSeq);
+        d.activeOff = 0;
+        d.pumpActive = true;
+        d.pruData->command = d.activeFrame.command;
+    }
+    uint32_t total = d.activeFrame.frameBytes + d.activeFrame.packetBytes;
+    bool progress = false;
+    while (d.activeOff < total) {
+        const uint8_t* src;
+        uint32_t remaining;
+        if (d.activeOff < d.activeFrame.frameBytes) {
+            src = d.activeFrame.frameData + d.activeOff;
+            remaining = d.activeFrame.frameBytes - d.activeOff;
+        } else {
+            src = d.activeFrame.packetData + (d.activeOff - d.activeFrame.frameBytes);
+            remaining = total - d.activeOff;
+        }
+        uint32_t n = d.ring.write(src, remaining);
+        if (n == 0) {
+            break;
+        }
+        d.activeOff += n;
+        progress = true;
+    }
+    if (d.activeOff == total) {
+        d.pumpActive = false;
+    }
+    return progress;
+}
+
+void BBShiftStringOutput::runPumpThread() {
+    struct sched_param sp;
+    sp.sched_priority = 50;
+    int err = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    if (err) {
+        LogWarn(VB_CHANNELOUT, "BBShiftString: could not set pump thread to SCHED_FIFO: %s\n", strerror(err));
+    }
+    while (m_pumpRunning) {
+        bool p = false;
+        if (m_pru0.pru && m_pru0.ring.attached()) {
+            p |= pumpFrameData(m_pru0);
+        }
+        if (m_pru1.pru && m_pru1.ring.attached()) {
+            p |= pumpFrameData(m_pru1);
+        }
+        if (!p) {
+            struct timespec ts = { 0, 500000 };
+            nanosleep(&ts, nullptr);
+        }
+    }
+}
+#endif
 
 /*
  *
