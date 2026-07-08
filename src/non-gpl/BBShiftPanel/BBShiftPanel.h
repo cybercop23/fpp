@@ -138,6 +138,13 @@ private:
     uint32_t* channelOffsets = nullptr;
     uint16_t* currentChannelData = nullptr;
 
+    // The gamma scatter map sorted by destination offset so the prep loop
+    // writes sequentially (streaming writes with random byte reads are much
+    // faster than random writes at panel counts where the data far exceeds
+    // the cache).  Unmapped channels are excluded entirely.
+    std::vector<uint32_t> m_scatterOffsets;
+    std::vector<uint32_t> m_scatterSrc;
+
     // Four output buffers allows for double buffering and extras for the PRU to read from while the next frame is being built
     // With 4MB of memory reserved for transfer to PRU, 12 P5 panels per output with 12bit color depth (total 3.5MB)
     constexpr static int NUM_OUTPUT_BUFFERS = 4;
@@ -179,6 +186,7 @@ private:
 
     bool singlePRU = false;
     std::string m_autoCreatedModelName;
+    std::string m_refreshWarning;
 
     // guards against the output being torn down (config reload) while the
     // channel output thread is still inside PrepData/SendData

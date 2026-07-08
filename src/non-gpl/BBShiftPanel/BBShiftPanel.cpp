@@ -532,6 +532,10 @@ void BBShiftPanelOutput::StopPRU(bool wait) {
 
 int BBShiftPanelOutput::Close(void) {
     LogDebug(VB_CHANNELOUT, "BBShiftPanelOutput::Close()\n");
+    if (!m_refreshWarning.empty()) {
+        WarningHolder::RemoveWarning(m_refreshWarning);
+        m_refreshWarning.clear();
+    }
     if (!m_autoCreatedModelName.empty()) {
         PixelOverlayManager::INSTANCE.removeAutoOverlayModel(m_autoCreatedModelName);
     }
@@ -609,28 +613,23 @@ void BBShiftPanelOutput::PrepData(unsigned char* channelData) {
     channelData += m_startChannel;
 
     std::unique_lock<std::mutex> lock(bgTaskMutex);
-    int start = 0;
-    int end = 32 * 1024;
-    if (end > m_channelCount) {
-        end = m_channelCount;
-    }
+    size_t total = m_scatterOffsets.size();
+    size_t start = 0;
     std::atomic<int> counter(0);
-    while (start < m_channelCount) {
+    while (start < total) {
+        // each chunk writes a contiguous region of the output since the map
+        // is sorted by destination
+        size_t end = std::min(start + 64 * 1024, total);
         ++counter;
         bgTasks.push([this, channelData, start, end, &counter]() {
-            int x = start;
-            while (x < end) {
-                currentChannelData[channelOffsets[x]] = gammaCurve[channelData[x]];
-                x++;
+            const uint32_t* offs = m_scatterOffsets.data();
+            const uint32_t* srcs = m_scatterSrc.data();
+            for (size_t x = start; x < end; x++) {
+                currentChannelData[offs[x]] = gammaCurve[channelData[srcs[x]]];
             }
             --counter;
         });
         start = end;
-        end += 32 * 1024;
-        // make sure we don't go past the end of the channel data
-        if (end > m_channelCount) {
-            end = m_channelCount;
-        }
     }
     lock.unlock();
     bgTaskCondVar.notify_all();
@@ -1089,6 +1088,10 @@ void BBShiftPanelOutput::buildStrideSchedule() {
     float refresh = 250000000.0f / (float)frameCycles;
     LogInfo(VB_CHANNELOUT, "BBShiftPanel: %d strides/row (%d bit color, MSB split %d ways), est refresh %d Hz, duty %d%%\n",
             n, m_colorDepth, pieces[m_colorDepth - 1], (int)refresh, (int)(onCycles * 100 / rowCycles));
+    if (refresh < 60.0f) {
+        m_refreshWarning = "LED panel refresh rate is only " + std::to_string((int)refresh) + "Hz and may flicker; reduce the color depth or panels per output";
+        WarningHolder::AddWarning(m_refreshWarning);
+    }
 }
 
 void BBShiftPanelOutput::setupBrightnessValues() {
@@ -1228,16 +1231,22 @@ bool BBShiftPanelOutput::setupChannelOffsets() {
         }
     }
     */
-    // Channels not covered by any panel still have the 0xFFFFFFFF fill from
-    // above (partially invalid layouts, unused canvas regions, panels beyond
-    // the licensed output count).  Point them at a scratch slot just past
-    // the end of the data so the prep loop needs no bounds check; writing
-    // through the marker used to scatter to wild addresses and crash.
+    // Build the scatter map sorted by destination offset so the prep loop
+    // writes sequentially; the random accesses become byte reads, which the
+    // cache handles far better than random read-modify-write stores.
+    // Channels not covered by any panel (partially invalid layouts, unused
+    // canvas regions) still have the 0xFFFFFFFF fill from above and are left
+    // out of the map; writing through the marker used to crash.  The stable
+    // sort keeps the original channel order for duplicated offsets so the
+    // last writer still wins.
     uint32_t dataSize = rowLen * m_numOutputSlots * 6 * numRows;
+    std::vector<std::pair<uint32_t, uint32_t>> map;
+    map.reserve(m_channelCount);
     uint32_t unmapped = 0;
     for (int x = 0; x < m_channelCount; x++) {
-        if (channelOffsets[x] == 0xFFFFFFFF) {
-            channelOffsets[x] = dataSize;
+        if (channelOffsets[x] != 0xFFFFFFFF) {
+            map.emplace_back(channelOffsets[x], x);
+        } else {
             ++unmapped;
         }
     }
@@ -1245,8 +1254,19 @@ bool BBShiftPanelOutput::setupChannelOffsets() {
         LogWarn(VB_CHANNELOUT, "BBShiftPanel: %u of %u channels are not mapped to any panel; check the panel layout\n",
                 unmapped, m_channelCount);
     }
-    currentChannelData = new uint16_t[dataSize + 1];
-    memset(currentChannelData, 0, (dataSize + 1) * sizeof(uint16_t));
+    std::stable_sort(map.begin(), map.end(),
+                     [](const std::pair<uint32_t, uint32_t>& a, const std::pair<uint32_t, uint32_t>& b) { return a.first < b.first; });
+    m_scatterOffsets.resize(map.size());
+    m_scatterSrc.resize(map.size());
+    for (size_t x = 0; x < map.size(); x++) {
+        m_scatterOffsets[x] = map[x].first;
+        m_scatterSrc[x] = map[x].second;
+    }
+    delete[] channelOffsets;
+    channelOffsets = nullptr;
+
+    currentChannelData = new uint16_t[dataSize];
+    memset(currentChannelData, 0, dataSize * sizeof(uint16_t));
     return true;
 }
 
