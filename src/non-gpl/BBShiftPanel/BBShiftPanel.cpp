@@ -963,16 +963,13 @@ uint32_t BBShiftPanelOutput::computeMaxBrightnessCycles() {
     // clock: 16 output slots shift twice the bytes of 8 slots, so the same
     // physical row takes twice as long to shift out
     uint32_t effLen = rowLen * m_numOutputSlots / 8;
-    uint32_t maxBright = 0x8800;
-    if (effLen >= 384) {
-        maxBright += 0x2000;
-    }
-    if (effLen >= 512) {
-        maxBright += 0x2000;
-    }
-    if (effLen >= 640) {
-        maxBright += 0x2000;
-    }
+    // Longer rows take longer to shift, so they get a longer maximum on-time
+    // to keep the duty cycle (brightness) up at the cost of refresh rate.
+    // This is a smooth ramp so that adding one panel cannot step the
+    // brightness; it passes through 0x8800 at 256, 0xA800 at 384, 0xC800 at
+    // 512 and 0xE800 at 640 (the values the old stepped defaults used).
+    uint32_t maxBright = 64 * effLen + 18432;
+    maxBright = std::clamp(maxBright, 0x8800u, 0xE800u);
     if (FileExists(FPP_DIR_MEDIA("/config/panel_timing.txt"))) {
         std::string v = GetFileContents(FPP_DIR_MEDIA("/config/panel_timing.txt"));
         if (!v.empty()) {
@@ -1231,8 +1228,25 @@ bool BBShiftPanelOutput::setupChannelOffsets() {
         }
     }
     */
-    currentChannelData = new uint16_t[rowLen * m_numOutputSlots * 6 * numRows];
-    memset(currentChannelData, 0, rowLen * m_numOutputSlots * 6 * numRows * sizeof(uint16_t));
+    // Channels not covered by any panel still have the 0xFFFFFFFF fill from
+    // above (partially invalid layouts, unused canvas regions, panels beyond
+    // the licensed output count).  Point them at a scratch slot just past
+    // the end of the data so the prep loop needs no bounds check; writing
+    // through the marker used to scatter to wild addresses and crash.
+    uint32_t dataSize = rowLen * m_numOutputSlots * 6 * numRows;
+    uint32_t unmapped = 0;
+    for (int x = 0; x < m_channelCount; x++) {
+        if (channelOffsets[x] == 0xFFFFFFFF) {
+            channelOffsets[x] = dataSize;
+            ++unmapped;
+        }
+    }
+    if (unmapped) {
+        LogWarn(VB_CHANNELOUT, "BBShiftPanel: %u of %u channels are not mapped to any panel; check the panel layout\n",
+                unmapped, m_channelCount);
+    }
+    currentChannelData = new uint16_t[dataSize + 1];
+    memset(currentChannelData, 0, (dataSize + 1) * sizeof(uint16_t));
     return true;
 }
 
