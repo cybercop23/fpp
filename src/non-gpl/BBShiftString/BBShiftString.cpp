@@ -365,6 +365,24 @@ int BBShiftStringOutput::Init(Json::Value config) {
 #endif
     }
 
+    // flag the virtual strings whose channel map is a plain run so prepData
+    // can walk the channel data directly instead of through the map
+    m_vsAffine.resize(m_strings.size());
+    for (size_t s = 0; s < m_strings.size(); s++) {
+        m_vsAffine[s].resize(m_strings[s]->m_virtualStrings.size());
+        for (size_t v = 0; v < m_strings[s]->m_virtualStrings.size(); v++) {
+            auto& vs = m_strings[s]->m_virtualStrings[v];
+            bool affine = true;
+            for (int i = 0; i + 3 < vs.chMapCount; i++) {
+                if (vs.chMap[i + 3] != vs.chMap[i] + 3) {
+                    affine = false;
+                    break;
+                }
+            }
+            m_vsAffine[s][v] = affine;
+        }
+    }
+
     PixelString::AutoCreateOverlayModels(m_strings, m_autoCreatedModelNames);
     return retVal;
 }
@@ -669,21 +687,33 @@ void BBShiftStringOutput::prepData(FrameData& d, unsigned char* channelData) {
         tester->prepareTestData(m_testCycle, m_testPercent);
     }
     constexpr int NSTR = MAX_PINS_PER_PRU * NUM_STRINGS_PER_PIN;
-    const uint8_t* srcs[MAX_PINS_PER_PRU][NUM_STRINGS_PER_PIN];
-    uint32_t lens[MAX_PINS_PER_PRU][NUM_STRINGS_PER_PIN];
+    // per string slot: either a fully prepared buffer (test mode) or the
+    // PixelString whose virtual strings are rendered on the fly per tile,
+    // with a cursor tracking where in the virtual string list the next tile
+    // continues
+    struct SlotSrc {
+        const uint8_t* buf = nullptr;
+        PixelString* ps = nullptr;
+        const uint8_t* affine = nullptr;
+        uint32_t len = 0;
+        uint32_t vsIdx = 0;
+        uint32_t vsOff = 0;
+    } slots[MAX_PINS_PER_PRU][NUM_STRINGS_PER_PIN];
     uint32_t newMax = d.maxStringLen;
     for (int y = 0; y < MAX_PINS_PER_PRU; ++y) {
         for (int x = 0; x < NUM_STRINGS_PER_PIN; ++x) {
             int idx = d.stringMap[y][x];
-            srcs[y][x] = nullptr;
-            lens[y][x] = 0;
             if (idx != -1) {
                 PixelString* ps = m_strings[idx];
                 uint32_t newLen = ps->m_outputChannels;
-                srcs[y][x] = tester
-                                 ? tester->createTestData(ps, m_testCycle, m_testPercent, channelData, newLen)
-                                 : ps->prepareOutput(channelData);
-                lens[y][x] = newLen;
+                SlotSrc& sl = slots[y][x];
+                if (tester) {
+                    sl.buf = tester->createTestData(ps, m_testCycle, m_testPercent, channelData, newLen);
+                } else {
+                    sl.ps = ps;
+                    sl.affine = m_vsAffine[idx].data();
+                }
+                sl.len = newLen;
                 newMax = std::max(newMax, newLen);
             }
         }
@@ -693,35 +723,64 @@ void BBShiftStringOutput::prepData(FrameData& d, unsigned char* channelData) {
     // Interleave and bit flip the string data in tiles that stay in the L1
     // cache.  Interleaving the whole frame at once writes a byte every 64
     // bytes which forces every cache line of the frame to be re-fetched for
-    // every string once the frame no longer fits in cache.
+    // every string once the frame no longer fits in cache.  The brightness/
+    // gamma application is fused into the tile fill so the string bytes are
+    // never staged in a full-size intermediate buffer, and virtual strings
+    // whose channel map is a simple run (map[i+3] == map[i]+3, the normal
+    // non-grouped case) skip the per-channel map indirection.
     constexpr uint32_t TILE = 64;
+    uint8_t col[NUM_STRINGS_PER_PIN][TILE];
     uint8_t tile[TILE * NSTR];
-    static const uint8_t zeros[TILE] = { 0 };
     for (uint32_t p0 = 0; p0 < newMax; p0 += TILE) {
         const uint32_t n = std::min(TILE, newMax - p0);
+        const uint32_t nFull = n & ~7;
         for (int y = 0; y < MAX_PINS_PER_PRU; ++y) {
-            // per string: where this tile's bytes come from and how many are
-            // available; strings that are unmapped or already fully consumed
-            // supply zeros
-            const uint8_t* base[NUM_STRINGS_PER_PIN];
-            uint32_t avail[NUM_STRINGS_PER_PIN];
-            uint32_t minAvail = n;
             for (int x = 0; x < NUM_STRINGS_PER_PIN; ++x) {
-                uint32_t a = lens[y][x] > p0 ? std::min(n, lens[y][x] - p0) : 0;
-                if (a == 0) {
-                    base[x] = zeros;
-                    avail[x] = n;
-                } else {
-                    base[x] = srcs[y][x] + p0;
-                    avail[x] = a;
-                    minAvail = std::min(minAvail, a);
+                SlotSrc& sl = slots[y][x];
+                uint32_t avail = sl.len > p0 ? std::min(n, sl.len - p0) : 0;
+                uint32_t p = 0;
+                if (sl.buf) {
+                    memcpy(col[x], sl.buf + p0, avail);
+                    p = avail;
+                } else if (sl.ps) {
+                    auto& vstrings = sl.ps->m_virtualStrings;
+                    while (p < avail && sl.vsIdx < vstrings.size()) {
+                        auto& vs = vstrings[sl.vsIdx];
+                        uint32_t m = std::min(avail - p, (uint32_t)vs.chMapCount - sl.vsOff);
+                        const uint8_t* br = vs.brightnessMap;
+                        const int* mp = vs.chMap;
+                        if (sl.affine[sl.vsIdx]) {
+                            uint32_t c = sl.vsOff % 3;
+                            int32_t base = (int32_t)(sl.vsOff - c);
+                            for (uint32_t k = 0; k < m; ++k) {
+                                col[x][p++] = br[channelData[mp[c] + base]];
+                                if (++c == 3) {
+                                    c = 0;
+                                    base += 3;
+                                }
+                            }
+                        } else {
+                            const int* mo = mp + sl.vsOff;
+                            for (uint32_t k = 0; k < m; ++k) {
+                                col[x][p++] = br[channelData[mo[k]]];
+                            }
+                        }
+                        sl.vsOff += m;
+                        if (sl.vsOff >= (uint32_t)vs.chMapCount) {
+                            sl.vsOff = 0;
+                            sl.vsIdx++;
+                        }
+                    }
+                }
+                if (p < n) {
+                    memset(&col[x][p], 0, n - p);
                 }
             }
             uint32_t g = 0;
-            for (; g + 8 <= minAvail; g += 8) {
+            for (; g < nFull; g += 8) {
                 uint8x8_t r[8];
                 for (int x = 0; x < NUM_STRINGS_PER_PIN; ++x) {
-                    r[x] = vld1_u8(base[x] + g);
+                    r[x] = vld1_u8(&col[x][g]);
                 }
                 transpose8x8(r);
                 for (int i = 0; i < 8; i++) {
@@ -730,7 +789,7 @@ void BBShiftStringOutput::prepData(FrameData& d, unsigned char* channelData) {
             }
             for (uint32_t p = g; p < n; ++p) {
                 for (int x = 0; x < NUM_STRINGS_PER_PIN; ++x) {
-                    tile[p * NSTR + y * NUM_STRINGS_PER_PIN + x] = (p < avail[x]) ? base[x][p] : 0;
+                    tile[p * NSTR + y * NUM_STRINGS_PER_PIN + x] = col[x][p];
                 }
             }
         }
@@ -792,10 +851,15 @@ void BBShiftStringOutput::PrepData(unsigned char* channelData) {
 void BBShiftStringOutput::sendData(FrameData& d) {
     if (d.outputStringLen) {
 #ifdef PLATFORM_BBB
-        memcpy(d.curData, d.formattedData, d.frameSize);
+        // only the bytes the PRU will consume need to be copied/flushed
+        uint32_t bytes = d.outputStringLen * MAX_PINS_PER_PRU * NUM_STRINGS_PER_PIN;
+        if (bytes > d.frameSize) {
+            bytes = d.frameSize;
+        }
+        memcpy(d.curData, d.formattedData, bytes);
         // make sure memory is flushed
-        msync(d.curData, d.frameSize, MS_SYNC | MS_INVALIDATE);
-        __builtin___clear_cache(d.curData, d.curData + d.frameSize);
+        msync(d.curData, bytes, MS_SYNC | MS_INVALIDATE);
+        __builtin___clear_cache(d.curData, d.curData + bytes);
 
         d.pruData->address_dma = (d.pru->ddr_addr + (d.curData - d.pru->ddr));
         if (d.v5_config_packets[d.curV5ConfigPacket]) {

@@ -170,6 +170,9 @@ private:
     } m_pru0, m_pru1;
 
     std::vector<PixelString*> m_strings;
+    // per string, per virtual string: nonzero when chMap[i+3] == chMap[i]+3
+    // for the whole map, letting prepData skip the map indirection
+    std::vector<std::vector<uint8_t>> m_vsAffine;
     std::map<std::string, std::string> m_usedPins;
 
     uint32_t m_curFrame = 0;
