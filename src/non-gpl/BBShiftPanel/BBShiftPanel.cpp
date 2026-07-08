@@ -1004,15 +1004,19 @@ void BBShiftPanelOutput::buildStrideSchedule() {
     // Decide how many pulses each bit is displayed as.  A bit whose on-time
     // is >= k * shift time can be shown as k shorter pulses spread across the
     // frame at zero cost in frame time (the shifting still fits under each
-    // pulse), which multiplies the perceived refresh rate.
+    // pulse), which multiplies the perceived refresh rate.  The count rounds
+    // to nearest: pieces slightly shorter than the shift time cost a little
+    // dead time (bounded by half a shift per bit) but move that bit's light
+    // to a much higher frequency - on longer chains the second MSB would
+    // otherwise sit unsplit at the frame rate carrying a quarter of the light.
     int budget = maxSlots - m_colorDepth;
     std::vector<int> pieces(m_colorDepth, 1);
     for (int b = m_colorDepth - 1; b >= 0 && budget > 0; b--) {
         uint32_t on = (m_brightness * maxBright / 10) >> (m_colorDepth - 1 - b);
-        int k = std::min((int)(on / shiftCycles), 4);
+        int k = std::min((int)((on + shiftCycles / 2) / shiftCycles), 4);
         k = std::min(k, budget + 1);
         if (k <= 1) {
-            // lower bits have shorter on-times, no more splits are free
+            // lower bits have shorter on-times, no more splitting is useful
             break;
         }
         pieces[b] = k;
