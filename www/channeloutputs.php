@@ -256,6 +256,10 @@
                 if (typeof disableTestModeIfActive === 'function') {
                     disableTestModeIfActive();
                 }
+                // that also stops any panel test pattern, so reflect it in
+                // the Testing dropdown (set silently, no change event, so no
+                // redundant Test Stop is sent)
+                $("#PanelTestPatternType").val("0");
             }).fail(function () {
                 DialogError("Save Channel Output Config", "Save Failed");
             });
