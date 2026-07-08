@@ -1,8 +1,45 @@
 #!/bin/bash
-# Wrapper around the real mold linker that drops a harmless, un-suppressible
-# mimalloc warning printed by mold's bundled allocator on some kernels:
-#   "mimalloc: warning: unable to allocate aligned OS memory directly, fall back to over-allocation"
-# The fallback succeeds and the link is correct; this only removes the noise.
+# Wrapper around the real mold linker that does two things:
+#
+# 1. Drops a harmless, un-suppressible mimalloc warning printed by mold's
+#    bundled allocator on some kernels:
+#      "mimalloc: warning: unable to allocate aligned OS memory directly,
+#       fall back to over-allocation"
+#    The fallback succeeds and the link is correct; this only removes the noise.
+#
+# 2. Retries the link when mold is killed by a signal. When the armhf/Pi (and
+#    the 32-bit BBB) images are built inside a qemu-arm chroot, mold -- which is
+#    heavily multithreaded -- is occasionally SIGSEGV'd by qemu-user's imperfect
+#    emulation of concurrent atomics/threads. That is a nondeterministic crash,
+#    not a real link error, so a plain retry almost always succeeds.
+#
+#    We retry ONLY on death-by-signal: a killed process reports exit status
+#    >= 128 (128 + signo, e.g. 139 for SIGSEGV). A legitimate link failure
+#    (undefined symbol, etc.) exits with a small code like 1 and is NOT
+#    retried, so real errors still fail fast. On native builds mold never
+#    crashes, so this loop runs exactly once and is a no-op there.
+#
 # All other linker output (including real errors) passes through unchanged.
-exec -a ld.mold /usr/bin/mold "$@" \
-  2> >(grep -v 'mimalloc: warning: unable to allocate aligned OS memory' >&2)
+
+filter='mimalloc: warning: unable to allocate aligned OS memory'
+max_attempts=3
+attempt=1
+
+while true; do
+    # Run in a subshell so argv[0] is ld.mold (mold is a multicall binary and
+    # keys some diagnostics off its invocation name) while still letting this
+    # wrapper regain control to inspect the exit status / retry.
+    ( exec -a ld.mold /usr/bin/mold "$@" ) \
+        2> >(grep -v "$filter" >&2)
+    status=$?
+
+    # Success or a normal (non-signal) link error -> we're done. Only a crash
+    # (status >= 128 == killed by signal) is worth retrying, and only until we
+    # exhaust our attempts.
+    if [ "$status" -lt 128 ] || [ "$attempt" -ge "$max_attempts" ]; then
+        exit "$status"
+    fi
+
+    echo "ld.mold: linker terminated by signal (exit $status); retrying ($attempt/$((max_attempts - 1)))..." >&2
+    attempt=$((attempt + 1))
+done

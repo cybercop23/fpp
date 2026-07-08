@@ -309,7 +309,14 @@ jobs:
     # /releases/latest/download/ stays pointed at the last real versioned
     # release -- nightly doesn't pollute the stable URL.
     needs: [prep, build]
-    if: needs.prep.outputs.is_nightly == 'true'
+    # Run even if SOME build legs failed, as long as prep succeeded and this is
+    # a nightly. A single platform flaking (e.g. a transient qemu/mold linker
+    # crash) should not block publishing the platforms that DID build -- the
+    # failed platform simply keeps its asset from the previous nightly (the
+    # publish step below is non-destructive). Versioned/tag RELEASES stay
+    # all-or-nothing: that is the separate `release` job, which keeps the
+    # default success() gate and only runs when every platform succeeds.
+    if: ${{ !cancelled() && needs.prep.result == 'success' && needs.prep.outputs.is_nightly == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -361,6 +368,27 @@ jobs:
           set -euo pipefail
           BUILD_DATE="$(date -u +%Y-%m-%d)"
           SHORT="${GH_SHA:0:7}"
+
+          # Resilient nightly: this job runs even when some platforms failed to
+          # build. Publish whatever landed this run; a platform missing from
+          # this run keeps its asset from the previous nightly (the upload
+          # below is --clobber, never a delete). Report fresh vs carried-over
+          # so a partial nightly is never silent.
+          shopt -s nullglob
+          staged=(release-files/*)
+          if [ ${#staged[@]} -eq 0 ]; then
+            echo "No artifacts were produced by any platform this run;" \
+                 "leaving the existing nightly release untouched." >&2
+            exit 0
+          fi
+          echo "Platform coverage for this nightly:"
+          for suffix in Pi Pi64 BB64 BBB; do
+            if [ -e "release-files/FPP-vnightly-$suffix.img.zip" ]; then
+              echo "  [fresh]        $suffix"
+            else
+              echo "  [carried over] $suffix (build failed this run; keeping previous nightly's asset)"
+            fi
+          done
 
           NOTES="Automated nightly build (unreleased development snapshot).
 
