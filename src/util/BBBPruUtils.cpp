@@ -104,6 +104,21 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         if (FileExists(filename) && cnt < 10000) {
+            if (pru_num <= 1) {
+                // explicitly select the firmware image; the sysfs setting is
+                // sticky so anything else that loaded firmware on this core
+                // (tests, other tools) would otherwise be re-booted instead
+                std::string fwFile = filename.substr(0, filename.size() - 5) + "firmware";
+                FILE* fw = fopen(fwFile.c_str(), "w");
+                if (fw) {
+#if defined(PLATFORM_BBB)
+                    fprintf(fw, "am335x-pru%d-fw", pru_num);
+#else
+                    fprintf(fw, "am62x-pru%d-fw", pru_num);
+#endif
+                    fclose(fw);
+                }
+            }
             FILE* rp = fopen(filename.c_str(), "w");
             fprintf(rp, "start");
             fclose(rp);
@@ -433,4 +448,56 @@ void BBBPru::stop() {
     if (!FAKE_PRU) {
         prus[pru_num].disable();
     }
+}
+
+#include "../pru/SMEMRing.hp"
+
+void BBBPruSMEMRing::attach(BBBPru* pru, uint32_t pruBaseAddr, uint32_t ringSize, bool usePointerMode) {
+    basePru = pruBaseAddr;
+    size = ringSize;
+    pointerMode = usePointerMode;
+    writeOff = 0;
+    produced = 0;
+    uint8_t* arm = pru->shared_ram + (pruBaseAddr - SMEM_RING_SMEM_PRU_ADDR);
+    ring = (volatile uint64_t*)arm;
+    ctrl = (volatile uint32_t*)(arm + ringSize);
+    ctrl[0] = pointerMode ? basePru : 0;
+    ctrl[1] = pointerMode ? basePru : 0;
+    // the firmware polls for the config; base first, then the nonzero size
+    volatile uint32_t* rc = (volatile uint32_t*)(pru->data_ram + SMEM_RING_CONFIG_OFFSET);
+    rc[0] = basePru;
+    rc[1] = ringSize;
+}
+
+uint32_t BBBPruSMEMRing::write(const uint8_t* src, uint32_t len) {
+    uint32_t readOff = pointerMode ? (ctrl[1] - basePru) : (ctrl[1] % size);
+    uint32_t used = (writeOff - readOff + size) % size;
+    uint32_t space = size - 64 - used;
+    if (len > space) {
+        len = space;
+    }
+    uint32_t total = 0;
+    while (total < len) {
+        uint32_t n = len - total;
+        if (n > (size - writeOff)) {
+            n = size - writeOff;
+        }
+        volatile uint64_t* d = ring + writeOff / 8;
+        const uint64_t* s = (const uint64_t*)(src + total);
+        for (uint32_t i = 0; i < n / 8; i++) {
+            d[i] = s[i];
+        }
+        writeOff += n;
+        if (writeOff == size) {
+            writeOff = 0;
+        }
+        produced += n;
+        total += n;
+    }
+    if (total) {
+        // the data must be observable before the position update
+        __sync_synchronize();
+        ctrl[0] = pointerMode ? (basePru + writeOff) : produced;
+    }
+    return total;
 }

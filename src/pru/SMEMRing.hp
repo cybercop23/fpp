@@ -1,0 +1,55 @@
+#ifndef __SMEM_RING_HP__
+#define __SMEM_RING_HP__
+/*
+ * Layout of the shared-memory ring used to stream output data from an ARM
+ * real-time pump thread to a PRU program (see BBShiftPanel for the first
+ * user).  DDR reads from the PRU (XFR2VBUS or LBBO) have a 1.1-1.8us round
+ * trip on the AM62x and cannot sustain high output data rates; reads from
+ * the 32KB PRU shared RAM take 18 cycles and are fully predictable, so the
+ * ARM streams the data into a ring there instead.
+ *
+ * This header is valid both for C++ and for PRU assembly that is run
+ * through cpp, so it only contains #defines.
+ *
+ * The ring is a block of shared RAM followed by two free-running uint32
+ * byte counters:
+ *     ring base + ring size + 0:  bytes produced (written by the ARM)
+ *     ring base + ring size + 4:  bytes consumed (written by the PRU)
+ * The ring size must be a multiple of 48 (the PRU consumes 48 bytes per
+ * load) and of 8 (the ARM copies with aligned 64 bit stores).
+ *
+ * The PRU firmware reads its ring base/size from its own data RAM at
+ * SMEM_RING_CONFIG_OFFSET (written by the ARM before the firmware starts,
+ * zero size = use the full-SMEM default).  A single user gets the whole
+ * shared RAM; when both PRUs stream (e.g. panels on one PRU and
+ * BBShiftString pixels on the other) each gets half via the SPLIT defines.
+ *
+ * Note: keep the PRU cores in VBUSP-sync mode (ICSSM CFG CORE_SYNC(0x3C)=1,
+ * 250MHz).  Running the cores async on the 333MHz core clock moves the
+ * shared RAM behind the clock-domain crossing and each ring read gains
+ * ~150ns, which costs more than the faster core saves (measured 87Hz vs
+ * 104Hz on a 64 panel load).
+ */
+
+/* PRU-side address of the shared RAM */
+#define SMEM_RING_SMEM_PRU_ADDR 0x00010000
+
+/* Offsets within the owning PRU's data RAM.  These live at the very top of
+ * the 8KB data RAM to stay clear of the driver structures (BBShiftString's
+ * command table reaches ~0x1C24). */
+#define SMEM_RING_STATS_OFFSET 0x1FE0  /* [0]=ring wait iterations, [1]=frames output */
+#define SMEM_RING_CONFIG_OFFSET 0x1FF0 /* [0]=ring base (PRU address), [1]=ring size */
+
+/* Single user: the whole 32KB shared RAM minus the control words */
+#define SMEM_RING_DEFAULT_BASE 0x00010000
+#define SMEM_RING_DEFAULT_SIZE 30720
+
+/* Two users: 16KB each; 16320 = 340 * 48 = 255 * 64, leaving room for the
+ * counters.  Note the FalconV5 PRU listener captures into shared RAM at
+ * 0x10000..0x12EE0 (12000 bytes); it runs on PRU0 and therefore can only
+ * coexist with a ring at SPLIT1 (strings on PRU1), which it clears. */
+#define SMEM_RING_SPLIT0_BASE 0x00010000
+#define SMEM_RING_SPLIT1_BASE 0x00014000
+#define SMEM_RING_SPLIT_SIZE 16320
+
+#endif

@@ -56,3 +56,44 @@ public:
     uint32_t m4ram_addr; // M4RAM address (in PRU space)
     size_t m4ram_size;   // size in bytes of the M4RAM
 };
+
+/**
+ * ARM-side producer for a ring buffer in the PRU shared RAM, used to stream
+ * output data to a PRU program with short, predictable read latency instead
+ * of having the PRU read DDR (1.1us+ per read on the AM62x, with much larger
+ * spikes).  The layout and the data-RAM config handshake are described in
+ * pru/SMEMRing.hp; the firmware polls its data RAM for the ring location, so
+ * attach() must be called after BBBPru::run().
+ *
+ * Two flow-control conventions are supported, chosen by the firmware:
+ *  - counters: the control words hold free-running produced/consumed byte
+ *    counts (used when the consumer wants to cache its available window)
+ *  - pointers: the control words hold the write/read addresses; equality
+ *    means empty, which requires all writes to be multiples of the consumer
+ *    block size (64 bytes)
+ * The ring is never filled completely so full and empty stay unambiguous.
+ */
+class BBBPruSMEMRing {
+public:
+    // writes the ring config into the PRU data RAM (the firmware polls for
+    // it) and resets the control words; pru must have been created with
+    // mapShared=true
+    void attach(BBBPru* pru, uint32_t pruBaseAddr, uint32_t ringSize, bool usePointerMode);
+    bool attached() const { return ring != nullptr; }
+
+    // copies up to len bytes (multiple of 8, from an 8-byte aligned src)
+    // into the ring using aligned 64-bit stores (the mapping is device
+    // memory) and publishes the new write position; returns the number of
+    // bytes written, limited by the available space
+    uint32_t write(const uint8_t* src, uint32_t len);
+
+    uint32_t size = 0;
+
+private:
+    volatile uint64_t* ring = nullptr;
+    volatile uint32_t* ctrl = nullptr;
+    uint32_t basePru = 0;
+    uint32_t writeOff = 0;
+    uint32_t produced = 0;
+    bool pointerMode = false;
+};
