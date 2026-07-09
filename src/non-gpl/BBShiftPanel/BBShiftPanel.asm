@@ -35,6 +35,11 @@
 #define OLATCH_PIN  16
 #define OCLR_PIN    18
 
+// data RAM offset of the panel-init parameter block; clear of the
+// brightness table (ends ~0xC08) and the SMEM ring config/stats (0x1FE0+).
+// Must match BBShiftPanel.cpp.
+#define PANEL_INIT_OFFSET 0x1E00
+
 #define SEL0_PIN    11
 #define SEL1_PIN    12
 #define SEL2_PIN    13
@@ -396,8 +401,14 @@ _LOOP:
 
 	// Command of 0xFFFF is the signal to exit
     LDI     tmpReg1, 0xFFFF
-	QBNE	DOOUTPUT, numPixels, tmpReg1
+	QBNE	CHECKINIT, numPixels, tmpReg1
     JMP     EXIT
+CHECKINIT:
+    // Command of 0xFFF0 sends the panel configuration registers (FM6126A
+    // style panels need them before they will display anything)
+    LDI     tmpReg1, 0xFFF0
+	QBNE	DOOUTPUT, numPixels, tmpReg1
+    JMP     PANEL_INIT
 
 
 DOOUTPUT
@@ -490,6 +501,91 @@ DOSETADDRESS:
 
 	// Go back to waiting for the next frame buffer
 	JMP	_LOOP
+
+// Clock the panel configuration registers out to FM6126A style panels.
+// The parameter block is written by the ARM at PANEL_INIT_OFFSET in data
+// RAM (see sendPanelInitPackets in BBShiftPanel.cpp):
+//   uint16 numRegs, uint16 columns, then per register:
+//   uint16 leCount, uint16 pattern (bit i of the pattern is the data value
+//   for column i mod 16, driven identically on every output's data lines)
+// A register write is signaled to the panel by holding LATCH through the
+// final (leCount-1) column clocks.  The display is off (OE high) the whole
+// time and the ring/pump state is untouched - only constant data is
+// shifted, so this can run between frames at any time.
+PANEL_INIT:
+    LDI     tmpReg1, PANEL_INIT_OFFSET
+    LBCO    &r23, CONST_PRUDRAM, tmpReg1, 4      // r23.w0 = numRegs, r23.w2 = columns
+    ADD     tmpReg1, tmpReg1, 4
+    SET     r30, r30, OE_PIN
+    CLR     r30, r30, LATCH_PIN
+    CLR     r30, r30, CLOCK_PIN
+INITREGLOOP:
+    QBEQ    INITDONE, r23.w0, 0
+    LBCO    &r25, CONST_PRUDRAM, tmpReg1, 4      // r25.w0 = leCount, r25.w2 = pattern
+    ADD     tmpReg1, tmpReg1, 4
+    MOV     curPixel, r23.w2                     // column countdown
+    MOV     r27.w0, r25.w2                       // rotating pattern
+INITCOLLOOP:
+    // latch asserted through the last (leCount-1) columns
+    QBLE    INITNOLATCH, curPixel, r25.w0
+    SET     r30, r30, LATCH_PIN
+INITNOLATCH:
+    // all outputs' data lines get the pattern's low bit for this column
+    LDI     DATA_BYTE, 0x00
+    QBBC    INITSHIFT, r27, 0
+    LDI     DATA_BYTE, 0xFF
+INITSHIFT:
+    // rotate the 16 bit pattern right one
+    MOV     tmpReg2.w0, r27.w0
+    LSR     r27.w0, r27.w0, 1
+    QBBC    INITNOROT, tmpReg2, 0
+    SET     r27, r27, 15
+INITNOROT:
+    TOGGLE_OSHIFT
+    TOGGLE_OSHIFT
+    TOGGLE_OSHIFT
+    TOGGLE_OSHIFT
+    TOGGLE_OSHIFT
+    TOGGLE_OSHIFT
+#ifdef OUTPUTS16
+    TOGGLE_OSHIFT
+    TOGGLE_OSHIFT
+    TOGGLE_OSHIFT
+    TOGGLE_OSHIFT
+    TOGGLE_OSHIFT
+    TOGGLE_OSHIFT
+#endif
+    TOGGLE_OLATCH
+    // generous data settling time through the output buffers, then clock
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    SET     r30, r30, CLOCK_PIN
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    CLR     r30, r30, CLOCK_PIN
+    SUB     curPixel, curPixel, 1
+    QBNE    INITCOLLOOP, curPixel, 0
+    CLR     r30, r30, LATCH_PIN
+    SUB     r23.w0, r23.w0, 1
+    QBA     INITREGLOOP
+INITDONE:
+    LDI     DATA_BYTE, 0
+    // clear the command so the ARM knows the registers were sent
+    LDI     r23, 0
+    SBCO    &r23, CONST_PRUDRAM, 4, 4
+    JMP     _LOOP
 
 EXIT:
 #ifndef SINGLEPRU

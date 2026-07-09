@@ -97,6 +97,7 @@ private:
     bool setupChannelOffsets();
 
     void buildStrideSchedule();
+    void sendPanelInitPackets();
     uint32_t computeMaxBrightnessCycles();
     void setupBrightnessValues();
     void setupPWMRegisters();
@@ -114,6 +115,9 @@ private:
     std::string m_panelInterleave = "";
 
     int m_addressingMode = 0;
+    // 0 = standard, 1 = FM6126A, 2 = FM6127 - panels that need their config
+    // registers clocked out before they display (see sendPanelInitPackets)
+    int m_panelType = 0;
     int m_longestChain = 0;
     int m_invertedData = 0;
     int m_brightness = 10;

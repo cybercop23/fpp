@@ -104,6 +104,69 @@ void BBShiftPanelOutput::StartingOutput() {
     // StoppingOutput is also called when the channel output thread simply
     // goes idle, so the stopping flag has to clear when output resumes
     m_stopping = false;
+    if (!isPWMPanel() && m_panelType && pruData) {
+        // FM6126A style panels need their configuration registers clocked
+        // out before they will display anything; the registers can be lost
+        // if the panels lose power, so resend them whenever output starts
+        sendPanelInitPackets();
+    }
+}
+
+// must match PANEL_INIT_OFFSET in BBShiftPanel.asm
+#define PANEL_INIT_OFFSET 0x1E00
+
+void BBShiftPanelOutput::sendPanelInitPackets() {
+    // panel configuration register writes, from the rpi-rgb-led-matrix
+    // project (lib/framebuffer.cc InitFM6126/InitFM6127): a register write
+    // is the pattern repeated across the whole chain width on every data
+    // line with LATCH held through the last (leCount-1) column clocks.
+    // Pattern bit i is the data value for column i mod 16.
+    auto encode = [](const char* p) {
+        uint16_t v = 0;
+        for (int i = 0; i < 16; i++) {
+            if (p[i] == '1') {
+                v |= 1 << i;
+            }
+        }
+        return v;
+    };
+    struct InitReg {
+        uint16_t leCount;
+        uint16_t pattern;
+    };
+    std::vector<InitReg> regs;
+    if (m_panelType == 1) {
+        // FM6126A: config register 1 (full brightness), register 2 (panel on)
+        regs.push_back({ 12, encode("0111111111111111") });
+        regs.push_back({ 13, encode("0000000001000000") });
+    } else if (m_panelType == 2) {
+        // FM6127: registers 1-3
+        regs.push_back({ 12, encode("1111111111001110") });
+        regs.push_back({ 13, encode("1110000001100010") });
+        regs.push_back({ 11, encode("0101111100000000") });
+    } else {
+        return;
+    }
+    // the PRU data RAM cannot take a plain memcpy (uncacheable segment,
+    // SIGBUS on aarch64) - memcpyToPRU handles it, in 64 byte chunks
+    uint32_t buf[16] = { 0 };
+    buf[0] = (uint32_t)regs.size() | (((uint32_t)rowLen) << 16);
+    for (size_t i = 0; i < regs.size(); i++) {
+        buf[i + 1] = (uint32_t)regs[i].leCount | (((uint32_t)regs[i].pattern) << 16);
+    }
+    pru->memcpyToPRU(pru->data_ram + PANEL_INIT_OFFSET, (uint8_t*)buf, sizeof(buf));
+    __sync_synchronize();
+    pruData->command = 0xFFF0;
+    int cnt = 0;
+    while (pruData->command == 0xFFF0 && cnt < 250) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        cnt++;
+    }
+    if (pruData->command == 0xFFF0) {
+        LogWarn(VB_CHANNELOUT, "BBShiftPanel: panel init registers were not sent (PRU did not respond)\n");
+    } else {
+        LogDebug(VB_CHANNELOUT, "BBShiftPanel: sent %zu panel init registers for panel type %d\n", regs.size(), m_panelType);
+    }
 }
 
 void BBShiftPanelOutput::StoppingOutput() {
@@ -213,6 +276,7 @@ int BBShiftPanelOutput::Init(Json::Value config) {
     }
 
     m_addressingMode = config["panelRowAddressType"].asInt();
+    m_panelType = config["panelType"].asInt();
 
     if (isPWMPanel()) {
         for (auto& pinName : PRU0_PWM_PINS) {

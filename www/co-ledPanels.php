@@ -3414,7 +3414,7 @@
                     </div>
 
                     <div class="row">
-                        <? if ($settings['Platform'] == "Raspberry Pi") { ?>
+                        <? if ($settings['Platform'] == "Raspberry Pi" || $panelCapesDriver == "BBShiftPanel") { ?>
                             <div class="printSettingLabelCol col-md-2 col-lg-2"><span class='LEDPanelsTypeLabel'><b>LED
                                         Panel
                                         Type:</b></span></div>
