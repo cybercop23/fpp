@@ -70,6 +70,17 @@ private:
     static bool CreateDumbBuffer(int fd, uint32_t width, uint32_t height, uint32_t format, DumbBuffer& buf);
     static void DestroyDumbBuffer(int fd, DumbBuffer& buf);
     uint32_t FindPlaneForCrtc(int fd, uint32_t crtcId, uint32_t format);
+
+    // Drain the completion event of an outstanding (m_flipPending) page flip.
+    // Blocks in poll() until the flip retires at vblank (or timeoutMs elapses),
+    // so it costs no CPU while waiting.
+    void WaitForPendingFlip(int timeoutMs);
+    static void PageFlipHandler(int fd, unsigned int frame, unsigned int sec, unsigned int usec, void* data);
+
+    // True while a drmModePageFlip has been queued but its vblank completion
+    // event has not yet been drained.  Guarded by mediaOutputLock (only touched
+    // from SyncDisplay / WaitForPendingFlip, both of which hold that lock).
+    bool m_flipPending = false;
     CardInfo* m_cardInfo = nullptr;
 };
 

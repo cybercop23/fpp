@@ -19,6 +19,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <unistd.h>
 
 #include "../common_mini.h"
@@ -339,6 +340,12 @@ int KMSFrameBuffer::InitializeFrameBuffer(void) {
             m_cardFd = card->fd;
             m_cardInfo = card;
 
+            // The panel refresh caps the sustainable output frame rate: page
+            // flips are vblank-paced, so a sequence faster than this will be
+            // limited to the refresh rate.
+            LogInfo(VB_CHANNELOUT, "KMSFrameBuffer: %s mode %dx%d @ %dHz\n",
+                    cname.c_str(), mode.hdisplay, mode.vdisplay, mode.vrefresh);
+
             card->reservedConnectors.push_back(m_connectorId);
             card->reservedCrtcs.push_back(m_crtcId);
 
@@ -446,29 +453,67 @@ void KMSFrameBuffer::DestroyFrameBuffer(void) {
 }
 
 void KMSFrameBuffer::SyncLoop() {
-    int dummy = 0;
     if (m_pages == 1) {
         return;
     }
 
     while (m_runLoop) {
-        // Wait for vsync
-        dummy = 0;
         // Allow the producer to catch up if needed
         if (!m_dirtyPages[m_cPage] && m_dirtyPages[(m_cPage + 1) % m_pages])
             NextPage();
 
         if (m_dirtyPages[m_cPage]) {
+            // SyncDisplay() blocks on the vblank completion event, so it paces
+            // this loop to the panel refresh without spinning.
             SyncDisplay(true);
 
             m_dirtyPages[m_cPage] = 0;
             NextPage();
+        } else {
+            // Nothing to flip yet.  Sleep briefly instead of busy-spinning so an
+            // idle output doesn't peg a CPU core (the original reason AUTO_SYNC
+            // was abandoned).
+            std::this_thread::sleep_for(std::chrono::microseconds(250));
         }
     }
 }
 
+void KMSFrameBuffer::PageFlipHandler(int fd, unsigned int frame, unsigned int sec, unsigned int usec, void* data) {
+    // data is the "this" we passed to drmModePageFlip for that specific flip, so
+    // even if we drain an event that belongs to another KMSFrameBuffer sharing the
+    // same card fd, the correct instance's pending flag is cleared.
+    KMSFrameBuffer* self = static_cast<KMSFrameBuffer*>(data);
+    if (self) {
+        self->m_flipPending = false;
+    }
+}
+
+void KMSFrameBuffer::WaitForPendingFlip(int timeoutMs) {
+    if (!m_flipPending) {
+        return;
+    }
+    struct pollfd pfd = {};
+    pfd.fd = m_cardFd;
+    pfd.events = POLLIN;
+
+    drmEventContext evctx = {};
+    evctx.version = 2;
+    evctx.page_flip_handler = &KMSFrameBuffer::PageFlipHandler;
+
+    // Normally the vblank event is already queued (or arrives within one refresh
+    // interval) so poll() returns almost immediately.  The timeout is only a
+    // safety net so a dropped/lost event can never wedge the output thread.
+    int r = poll(&pfd, 1, timeoutMs);
+    if (r > 0 && (pfd.revents & POLLIN)) {
+        drmHandleEvent(m_cardFd, &evctx);
+    }
+    // If we timed out (or errored) give up on this flip so the next frame can
+    // proceed rather than blocking forever.
+    m_flipPending = false;
+}
+
 void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
-    if (!pageChanged | m_pages == 1)
+    if (!pageChanged || m_pages == 1)
         return;
 
     std::unique_lock<std::mutex> lock(mediaOutputLock);
@@ -478,9 +523,25 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
     if (mediaOutputStatus.output != m_connectorName) {
         int im = ioctl(m_cardFd, DRM_IOCTL_SET_MASTER, 0);
         if (im == 0) {
-            int ret = drmModePageFlip(m_cardFd, m_crtcId, m_fb[m_cPage].fb_id,
-                                      0, nullptr);
+            // If the previous flip hasn't retired yet, wait for its vblank
+            // completion event instead of letting this flip return EBUSY and
+            // fall into the expensive SetPlane/SetCrtc modeset path.  poll()
+            // sleeps until the flip completes, so this paces us to the panel's
+            // refresh with no busy-waiting.
+            if (m_flipPending) {
+                int vr = m_mode.vrefresh > 0 ? m_mode.vrefresh : 60;
+                int timeoutMs = (1000 / vr) + 20; // one refresh interval + slack
+                WaitForPendingFlip(timeoutMs);
+            }
+
+            int ret = -1;
+            if (m_displayEnabled) {
+                ret = drmModePageFlip(m_cardFd, m_crtcId, m_fb[m_cPage].fb_id,
+                                      DRM_MODE_PAGE_FLIP_EVENT, this);
+            }
             if (ret) {
+                // First flip after enable, or the flip was rejected: bring the
+                // display up with a full modeset/plane commit, then queue a flip.
                 if (!m_displayEnabled) {
                     drmModeSetCrtc(m_cardFd, m_crtcId, m_fb[m_cPage].fb_id, 0, 0,
                                    &m_connectorId, 1, &m_mode);
@@ -491,9 +552,10 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
                                     0, 0, m_mode.hdisplay, m_mode.vdisplay,
                                     0, 0, (uint32_t)m_width << 16, (uint32_t)m_height << 16);
                 }
-                drmModePageFlip(m_cardFd, m_crtcId, m_fb[m_cPage].fb_id,
-                                0, nullptr);
+                ret = drmModePageFlip(m_cardFd, m_crtcId, m_fb[m_cPage].fb_id,
+                                      DRM_MODE_PAGE_FLIP_EVENT, this);
             }
+            m_flipPending = (ret == 0);
             ioctl(m_cardFd, DRM_IOCTL_DROP_MASTER, 0);
         }
     }
@@ -512,6 +574,7 @@ void KMSFrameBuffer::DisableDisplay() {
                                 0, 0, 0, 0, 0, 0, 0, 0);
                 drmModeSetCrtc(m_cardFd, m_crtcId, 0, 0, 0, nullptr, 0, nullptr);
                 m_displayEnabled = false;
+                m_flipPending = false;
             }
             ioctl(m_cardFd, DRM_IOCTL_DROP_MASTER, 0);
         }
