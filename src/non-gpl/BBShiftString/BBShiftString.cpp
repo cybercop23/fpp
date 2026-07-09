@@ -292,6 +292,7 @@ int BBShiftStringOutput::Init(Json::Value config) {
 
     int maxStringLen = 0;
     bool hasV5SR = false;
+    bool hasFalconSR = false;
     for (int i = 0; i < config["outputs"].size(); i++) {
         Json::Value s = config["outputs"][i];
         PixelString* newString = new PixelString(true);
@@ -305,6 +306,7 @@ int BBShiftStringOutput::Init(Json::Value config) {
         }
 
         hasV5SR |= newString->smartReceiverType == PixelString::ReceiverType::FalconV5;
+        hasFalconSR |= newString->smartReceiverType == PixelString::ReceiverType::FalconV4 || newString->smartReceiverType == PixelString::ReceiverType::FalconV5;
         m_strings.push_back(newString);
     }
 
@@ -321,9 +323,28 @@ int BBShiftStringOutput::Init(Json::Value config) {
 
     config["base"] = root;
 
+    // The full bidirectional Falcon V5 protocol needs the cape's PRU0
+    // listener support (and sole ownership of the PRUSS - the listener is a
+    // PRU0 program whose capture area overlaps the panel ring half of the
+    // shared RAM).  Without that, V5 receivers still work as send-only V4:
+    // the config packet goes out, queries and responses do not.
+    supportsV5Listeners = root.isMember("falconV5ListenerConfig") && !m_sharedPRUSS;
+    if (hasV5SR && !supportsV5Listeners) {
+        LogWarn(VB_CHANNELOUT, "Falcon V5 (bidirectional) smart receivers are not supported on this cape%s; falling back to send-only V4 handling\n",
+                m_sharedPRUSS ? " (shared PRUSS)" : "");
+        for (auto& a : m_strings) {
+            if (a->smartReceiverType == PixelString::ReceiverType::FalconV5) {
+                a->smartReceiverType = PixelString::ReceiverType::FalconV4;
+            }
+        }
+        hasV5SR = false;
+    }
+    m_hasBidirSR = hasV5SR;
+
     int curRecPort = -1;
     for (int x = 0; x < m_strings.size(); x++) {
-        if (curRecPort == -1 && m_strings[x]->smartReceiverType == PixelString::ReceiverType::FalconV5) {
+        if (curRecPort == -1 && (m_strings[x]->smartReceiverType == PixelString::ReceiverType::FalconV5 ||
+                                 m_strings[x]->smartReceiverType == PixelString::ReceiverType::FalconV4)) {
             curRecPort = 0;
         }
         if (m_strings[x]->m_outputChannels > 0 || curRecPort >= 0) {
@@ -412,7 +433,7 @@ int BBShiftStringOutput::Init(Json::Value config) {
     int offset0 = ((m_pru0.frameSize / 4096) + 2) * 4096;
     m_pru1.frameSize = NUM_STRINGS_PER_PIN * MAX_PINS_PER_PRU * std::max(2400, m_pru1.maxStringLen);
     int offset1 = ((m_pru1.frameSize / 4096) + 2) * 4096;
-    size_t v5Size = hasV5SR ? 128 * 1024 : 0;
+    size_t v5Size = hasFalconSR ? 128 * 1024 : 0;
     uint32_t ddrPhys = 0;
     uint8_t* start = BBBPru::ddrAlloc("BBShiftString", 2 * offset0 + 2 * offset1 + v5Size, ddrPhys);
     if (!start) {
@@ -445,22 +466,12 @@ int BBShiftStringOutput::Init(Json::Value config) {
     m_pru1.formattedData = (uint8_t*)calloc(1, m_pru1.frameSize);
 #endif
 
-    supportsV5Listeners = root.isMember("falconV5ListenerConfig");
-    if (m_sharedPRUSS && (supportsV5Listeners || hasV5SR)) {
-        // the listener is a PRU0 program and its capture area overlaps the
-        // panel ring half of the shared RAM
-        if (hasV5SR) {
-            WarningHolder::AddWarning("FalconV5 receivers are not supported on a shared panels+strings cape");
-        }
-        supportsV5Listeners = false;
-        hasV5SR = false;
-    }
-    if (supportsV5Listeners) {
+    if (supportsV5Listeners && hasV5SR) {
         // if the cape supports v5 listeners, the enable pin needs to be
         // configured or data won't be sent on port1 of each receiver
         PinCapabilities::getPinByName(PRU1_ENABLE_PIN).configPin("pru1out", true, "BBShiftString-Enable");
     }
-    if (hasV5SR) {
+    if (hasFalconSR) {
 #ifdef PLATFORM_BBB
         setupFalconV5Support(root, m_pru1.lastData + offset1);
 #else
@@ -613,7 +624,7 @@ int BBShiftStringOutput::Close(void) {
     for (auto& a : m_usedPins) {
         PinCapabilities::getPinByName(a.first).releasePin();
     }
-    if (supportsV5Listeners) {
+    if (supportsV5Listeners && m_hasBidirSR) {
         PinCapabilities::getPinByName(PRU1_ENABLE_PIN).releasePin();
     }
     return ChannelOutput::Close();
@@ -1240,7 +1251,7 @@ void BBShiftStringOutput::encodeFalconV5Packet(std::vector<std::array<uint8_t, 6
 
 void BBShiftStringOutput::setupFalconV5Support(const Json::Value& root, uint8_t* memLoc) {
     falconV5Support = new FalconV5Support();
-    if (supportsV5Listeners) {
+    if (supportsV5Listeners && m_hasBidirSR) {
         falconV5Support->addListeners(root["falconV5ListenerConfig"]);
     }
 
@@ -1249,7 +1260,10 @@ void BBShiftStringOutput::setupFalconV5Support(const Json::Value& root, uint8_t*
     while (x < m_strings.size()) {
         int p = x;
         PixelString* p1 = m_strings[x++];
-        if (p1->m_isSmartReceiver && p1->smartReceiverType == PixelString::ReceiverType::FalconV5) {
+        if (p1->m_isSmartReceiver && (p1->smartReceiverType == PixelString::ReceiverType::FalconV5 || p1->smartReceiverType == PixelString::ReceiverType::FalconV4)) {
+            // V4 chains are send-only: the config packet goes out, but no
+            // queries are scheduled and no responses are listened for
+            bool sendOnly = p1->smartReceiverType == PixelString::ReceiverType::FalconV4;
             int grp = 0;
             int mux = 0;
             if (root["outputs"][p].isMember("falconV5Listener")) {
@@ -1262,7 +1276,7 @@ void BBShiftStringOutput::setupFalconV5Support(const Json::Value& root, uint8_t*
             PixelString* p3 = x < m_strings.size() ? m_strings[x++] : nullptr;
             PixelString* p4 = x < m_strings.size() ? m_strings[x++] : nullptr;
 
-            falconV5Support->addReceiverChain(p1, p2, p3, p4, grp, mux);
+            falconV5Support->addReceiverChain(p1, p2, p3, p4, grp, mux, sendOnly);
             // need to keep the ports on.  With v5, all ports need to be kept on
             // and must have edges that are aligned.  Need to turn OFF the 2-4 ports during
             // the config packet
@@ -1294,24 +1308,27 @@ void BBShiftStringOutput::setupFalconV5Support(const Json::Value& root, uint8_t*
             for (auto& p : packets2) {
                 memset(&p[0], 0, 64);
             }
-            int len = 0;
-            int idx = 0;
+            int len = (x == 1) ? 2 : 1;
+            int idx = x;
             bool listen = false;
+            bool any = false;
             for (auto& rc : falconV5Support->getReceiverChains()) {
                 int port = rc->getPixelStrings()[0]->m_portNumber;
+                if (x > 0 && rc->isSendOnly()) {
+                    // V4 receivers only get the config packet
+                    continue;
+                }
+                any = true;
                 if (x == 0) {
                     rc->generateConfigPacket(&packets[port][0]);
-                    idx = 0;
-                    len = 1;
                 } else if (x == 1) {
                     rc->generateNumberPackets(&packets[port][0], &packets2[port][0]);
-                    idx = 1;
-                    len = 2;
                 } else if (x == 2) {
                     rc->generateSetFusesPacket(&packets[port][0], 1);
-                    idx = 2;
-                    len = 1;
                 }
+            }
+            if (!any) {
+                continue;
             }
             if (m_pru0.v5_config_packets[idx] == nullptr) {
                 m_pru0.v5_config_packets[idx] = new FalconV5PacketInfo(len, memLoc, listen);
@@ -1346,14 +1363,22 @@ void BBShiftStringOutput::setupFalconV5Support(const Json::Value& root, uint8_t*
             }
         }
     }
-    // reserve space for the dynamic packets
+    // Reserve space for the dynamic packets.  The len must be set as well:
+    // the AM62x pump streams 57*64*len packet bytes into the ring, and a
+    // dynamic packet whose command flags said "packet present" but whose
+    // len was 0 starves the PRU in its ring wait (the AM335x path reads by
+    // DDR address and never noticed).
     m_pru0.dynamicPacketInfo1.data = memLoc;
+    m_pru0.dynamicPacketInfo1.len = 1;
     memLoc += 64 * MAX_PINS_PER_PRU * NUM_STRINGS_PER_PIN;
     m_pru0.dynamicPacketInfo2.data = memLoc;
+    m_pru0.dynamicPacketInfo2.len = 1;
     memLoc += 64 * MAX_PINS_PER_PRU * NUM_STRINGS_PER_PIN;
     m_pru1.dynamicPacketInfo1.data = memLoc;
+    m_pru1.dynamicPacketInfo1.len = 1;
     memLoc += 64 * MAX_PINS_PER_PRU * NUM_STRINGS_PER_PIN;
     m_pru1.dynamicPacketInfo2.data = memLoc;
+    m_pru1.dynamicPacketInfo2.len = 1;
     memLoc += 64 * MAX_PINS_PER_PRU * NUM_STRINGS_PER_PIN;
 
     m_pru0.dynamicPacketInfo = &m_pru0.dynamicPacketInfo1;

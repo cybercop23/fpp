@@ -68,7 +68,13 @@ public:
         pru = new BBBPru(0, true, false);
         pruData = (FalconV5PRUData*)pru->data_ram;
         data = pru->shared_ram;
-        pru->run(filename);
+        // never clear the shared RAM here: on the AM62x the string PRU's
+        // data ring lives there and is already attached and live by the
+        // time the listener starts - zeroing its counters desyncs the ring
+        // and wedges the string PRU in its ring wait.  The listener's own
+        // state lives in PRU0's data RAM (still cleared above) and the
+        // capture bytes are rewritten before each capture completes.
+        pru->run(filename, false);
     }
     ~PRUControl() {
         pruData->command = 0xFFFF;
@@ -234,8 +240,8 @@ void FalconV5Support::setCurrentMux(int i) {
         i >>= 1;
     }
 }
-FalconV5Support::ReceiverChain::ReceiverChain(PixelString* p1, PixelString* p2, PixelString* p3, PixelString* p4, int grp, int m) :
-    group(grp), mux(m), numReceivers(1) {
+FalconV5Support::ReceiverChain::ReceiverChain(PixelString* p1, PixelString* p2, PixelString* p3, PixelString* p4, int grp, int m, bool so) :
+    group(grp), mux(m), numReceivers(1), sendOnly(so) {
     strings[0] = p1;
     strings[1] = p2;
     strings[2] = p3;
@@ -250,10 +256,15 @@ FalconV5Support::ReceiverChain::ReceiverChain(PixelString* p1, PixelString* p2, 
         numReceivers = std::max(numReceivers, srCount);
     }
 }
-FalconV5Support::ReceiverChain* FalconV5Support::addReceiverChain(PixelString* p1, PixelString* p2, PixelString* p3, PixelString* p4, int group, int m) {
-    FalconV5Support::ReceiverChain* rc = new FalconV5Support::ReceiverChain(p1, p2, p3, p4, group, m);
+FalconV5Support::ReceiverChain* FalconV5Support::addReceiverChain(PixelString* p1, PixelString* p2, PixelString* p3, PixelString* p4, int group, int m, bool sendOnly) {
+    FalconV5Support::ReceiverChain* rc = new FalconV5Support::ReceiverChain(p1, p2, p3, p4, group, m, sendOnly);
     receiverChains.push_back(rc);
 
+    if (sendOnly) {
+        // V4 chains only get the config packet: keep them out of the query
+        // scheduling entirely so no query/listen frames are generated
+        return rc;
+    }
     if (m >= queryData.size()) {
         queryData.resize(m + 1);
         while (m >= maxCount.size()) {
@@ -273,7 +284,7 @@ FalconV5Support::ReceiverChain* FalconV5Support::addReceiverChain(PixelString* p
 }
 
 static bool generateConfigJSONForPixelString(const PixelString* p, Json::Value& config) {
-    if (p && p->smartReceiverType == PixelString::ReceiverType::FalconV5) {
+    if (p && (p->smartReceiverType == PixelString::ReceiverType::FalconV5 || p->smartReceiverType == PixelString::ReceiverType::FalconV4)) {
         Json::Value v;
         v["startChannels"].append(0);
 

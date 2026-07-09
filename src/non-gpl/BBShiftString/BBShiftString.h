@@ -198,6 +198,9 @@ private:
     FalconV5Support* falconV5Support = nullptr;
     std::list<std::string> m_autoCreatedModelNames;
     bool supportsV5Listeners = false;
+    // any configured Falcon V5 (bidirectional) receivers after the
+    // capability checks; V4 (send-only) chains do not set this
+    bool m_hasBidirSR = false;
 
     void prepData(FrameData& d, unsigned char* channelData);
     void sendData(FrameData& d);

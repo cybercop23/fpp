@@ -29,7 +29,7 @@ public:
 
     class ReceiverChain {
     public:
-        ReceiverChain(PixelString* p1, PixelString* p2, PixelString* p3, PixelString* p4, int grp = 0, int m = 0);
+        ReceiverChain(PixelString* p1, PixelString* p2, PixelString* p3, PixelString* p4, int grp = 0, int m = 0, bool sendOnly = false);
         bool generateConfigPacket(uint8_t* packet) const;
         bool generateNumberPackets(uint8_t* packet, uint8_t* packet2) const;
         bool generateQueryPacket(uint8_t* packet, int receiver) const;
@@ -40,6 +40,10 @@ public:
 
         const std::array<const PixelString*, 4>& getPixelStrings() const { return strings; };
         uint32_t getReceiverCount() const { return numReceivers; }
+
+        // Falcon V4 handling: only the config packet is sent, no queries
+        // are scheduled and no responses are expected
+        bool isSendOnly() const { return sendOnly; }
 
         bool hasMoreQueries() const { return curReceiverQuery < numReceivers; }
         void resetQueryCount() { curReceiverQuery = 0; }
@@ -52,11 +56,12 @@ public:
         uint32_t group;
         uint32_t mux;
         uint32_t numReceivers;
+        bool sendOnly;
 
         uint32_t curReceiverQuery = 0;
     };
 
-    ReceiverChain* addReceiverChain(PixelString* p1, PixelString* p2, PixelString* p3, PixelString* p4, int group, int mux);
+    ReceiverChain* addReceiverChain(PixelString* p1, PixelString* p2, PixelString* p3, PixelString* p4, int group, int mux, bool sendOnly = false);
     const std::list<ReceiverChain*>& getReceiverChains() const { return receiverChains; };
 
     void addListeners(const Json::Value& config);

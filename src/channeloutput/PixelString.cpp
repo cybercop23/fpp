@@ -169,8 +169,12 @@ int PixelString::Init(Json::Value config, Json::Value* pinConfig) {
                 // v1 smart receivers
                 receiverCount = rt;
                 smartReceiverType = ReceiverType::v1;
+            } else if (rt > 15) {
+                // Falcon V4 smart receivers (send-only config packet)
+                receiverCount = rt - 15;
+                smartReceiverType = ReceiverType::FalconV4;
             } else if (rt > 9) {
-                // Falcon V5 smart receivers
+                // Falcon V5 smart receivers (bidirectional)
                 receiverCount = rt - 9;
                 smartReceiverType = ReceiverType::FalconV5;
             } else {
@@ -213,8 +217,8 @@ int PixelString::Init(Json::Value config, Json::Value* pinConfig) {
         } else if (smartReceiverType == ReceiverType::v2) {
             // v2 smart  receiver, .15ms gap
             AddVirtualString(VirtualString(3, p));
-        } else if (smartReceiverType == ReceiverType::FalconV5) {
-            // Falcon v5, just marker to determine config packets later
+        } else if (smartReceiverType == ReceiverType::FalconV5 || smartReceiverType == ReceiverType::FalconV4) {
+            // Falcon v4/v5, just marker to determine config packets later
             AddVirtualString(VirtualString(4, p));
         }
         startMaxChan = m_outputChannels;

@@ -93,7 +93,11 @@ public:
         Standard = 0,
         v1 = 1,
         v2 = 2,
-        FalconV5 = 3
+        // Falcon differential receivers: FalconV5 is the full bidirectional
+        // protocol (config + queries + listen, needs cape listener support);
+        // FalconV4 only sends the config packet
+        FalconV5 = 3,
+        FalconV4 = 4
     };
     ReceiverType smartReceiverType = PixelString::ReceiverType::Standard;
     bool m_isSmartReceiver = false;

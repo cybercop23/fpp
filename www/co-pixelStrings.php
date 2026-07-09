@@ -707,6 +707,9 @@ function readCapes($cd, $capes)
                             mxId += mxCnt + 1;
                         } else if (mxId == 3) {
                             mxId = mxCnt + 9;
+                        } else if (mxId == 4) {
+                            // Falcon v4 (send-only)
+                            mxId = mxCnt + 15;
                         }
                         port.differentialType = mxId;
                         if (mxId < 1) mxId = 1;
@@ -792,9 +795,10 @@ function readCapes($cd, $capes)
     // the slowest port (the one clocking the most channels) sets the ceiling.
     // The channel accounting mirrors src/channeloutput/PixelString.cpp: null
     // pixels count, grouping does NOT reduce wire time, and smart receivers add
-    // a per-chain overhead.  The Falcon v4/v5 "bidirectional" cost is not in
-    // PixelString.cpp; per the receiver table it drops the whole controller's
-    // budget by 90 pixels/port whenever any port uses a v4/v5 remote.
+    // a per-chain overhead.  The Falcon remote cost is not in
+    // PixelString.cpp; per the receiver table the whole controller's budget
+    // drops ~90 pixels/port with v5 (bidirectional) remotes and ~30 with
+    // send-only v4 remotes.
     function pixelStringChannelsForStrings(strings) {
         var chans = 0;
         if (!strings) {
@@ -820,12 +824,17 @@ function readCapes($cd, $capes)
         var rt = parseInt(port.differentialType) || 0;
         var receiverCount = 1;
         var type = 'none';
+        var isV4 = false;
         if (rt) {
             if (rt <= 3) {
                 receiverCount = rt; // v1 smart receivers
                 type = 'v1';
+            } else if (rt > 15) {
+                receiverCount = rt - 15; // Falcon v4 (send-only) smart receivers
+                type = 'v5';             // same channel accounting as v5
+                isV4 = true;
             } else if (rt > 9) {
-                receiverCount = rt - 9; // Falcon v4/v5 smart receivers
+                receiverCount = rt - 9; // Falcon v5 smart receivers
                 type = 'v5';
             } else {
                 receiverCount = rt - 3; // v2 smart receivers
@@ -866,7 +875,7 @@ function readCapes($cd, $capes)
         if (!anyChannels) {
             chans = 0;
         }
-        return { channels: chans, isV5: type == 'v5' };
+        return { channels: chans, isV5: type == 'v5' && !isV4, isV4: isV4 };
     }
 
     var pixelStringMaxFPSTimer = null;
@@ -884,12 +893,16 @@ function readCapes($cd, $capes)
         var maxPixels = 0;
         var worstPort = -1;
         var anyV5 = false;
+        var anyV4 = false;
         for (var o = 0; o < data.channelOutputs.length; o++) {
             var outs = data.channelOutputs[o].outputs || [];
             for (var i = 0; i < outs.length; i++) {
                 var r = pixelStringPortChannels(outs[i]);
                 if (r.isV5) {
                     anyV5 = true;
+                }
+                if (r.isV4) {
+                    anyV4 = true;
                 }
                 // normalise to RGB-pixel-equivalents so the 800px/40fps rule and
                 // the 90-pixel v4/v5 drop apply directly regardless of color order
@@ -904,11 +917,15 @@ function readCapes($cd, $capes)
             el.html('');
             return;
         }
-        var budget = maxPixels + (anyV5 ? 90 : 0);
+        // v5 remotes cost ~90 pixels of budget (config packet + query/listen
+        // windows); send-only v4 remotes only cost the config packet, ~30
+        var budget = maxPixels + (anyV5 ? 90 : (anyV4 ? 30 : 0));
         var fps = Math.floor(32000 / budget);
         var msg = 'Supports &asymp;' + (fps > 999 ? '>999' : fps) + ' fps max (longest port ' + (worstPort + 1);
         if (anyV5) {
-            msg += ', -90px for v4/v5 remotes';
+            msg += ', -90px for v5 remotes';
+        } else if (anyV4) {
+            msg += ', -30px for v4 remotes';
         }
         msg += ')';
         el.html(msg);
@@ -1128,11 +1145,21 @@ function readCapes($cd, $capes)
         }
         return false;
     }
-    function SupportsFalconV5SmartReceivers(subType) {
+    function SupportsFalconV4SmartReceivers(subType) {
+        // send-only config packets work on any BBShiftString cape
         var subType = GetPixelStringCapeFileName();
         var val = KNOWN_CAPES[subType];
         if (val && val.hasOwnProperty("driver")) {
             return val["driver"] == "BBShiftString";
+        }
+        return false;
+    }
+    function SupportsFalconV5SmartReceivers(subType) {
+        // the full bidirectional protocol needs the cape's PRU listeners
+        var subType = GetPixelStringCapeFileName();
+        var val = KNOWN_CAPES[subType];
+        if (val && val.hasOwnProperty("driver") && val["driver"] == "BBShiftString") {
+            return val.hasOwnProperty("falconV5ListenerConfig");
         }
         return false;
     }
@@ -1312,8 +1339,11 @@ function readCapes($cd, $capes)
                 if (SupportsSmartReceivers(subType)) {
                     str += "<option value='1'>Smart v1</option>";
                     str += "<option value='2'>Smart v2</option>";
+                    if (SupportsFalconV4SmartReceivers(subType)) {
+                        str += "<option value='4'>Falcon v4</option>";
+                    }
                     if (SupportsFalconV5SmartReceivers(subType)) {
-                        str += "<option value='3'>Falcon v4/v5</option>";
+                        str += "<option value='3'>Falcon v5</option>";
                     }
                 }
                 str += "</select>";
@@ -1555,6 +1585,7 @@ function readCapes($cd, $capes)
 
 
                                 var supportSmart = SupportsSmartReceivers(subType);
+                                var supportFalconv4 = supportSmart ? SupportsFalconV4SmartReceivers(subType) : false;
                                 var supportFalconv5 = supportSmart ? SupportsFalconV5SmartReceivers(subType) : false;
                                 var diffType = 0;
                                 if (supportSmart && port.hasOwnProperty("differentialType"))
@@ -1564,11 +1595,19 @@ function readCapes($cd, $capes)
                                 if (diffType > 1 && diffType < 4) {
                                     diffCount = diffType;
                                     diffType = 1;
+                                } else if (diffType > 15) {
+                                    diffCount = diffType - 15;
+                                    diffType = 4;
+                                    if (!supportFalconv4) {
+                                        diffType = 2;
+                                    }
                                 } else if (diffType > 9) {
                                     diffCount = diffType - 9;
                                     diffType = 3;
                                     if (!supportFalconv5) {
-                                        diffType = 2;
+                                        // no listeners on this cape: these have always
+                                        // effectively been send-only, show them as v4
+                                        diffType = supportFalconv4 ? 4 : 2;
                                     }
                                 } else if (diffType > 3) {
                                     diffCount = diffType - 3
@@ -1579,8 +1618,11 @@ function readCapes($cd, $capes)
                                 if (supportSmart) {
                                     str += "<option value='1'" + (diffType == 1 ? " selected" : "") + ">Smart v1</option>";
                                     str += "<option value='2'" + (diffType == 2 ? " selected" : "") + ">Smart v2</option>";
+                                    if (supportFalconv4) {
+                                        str += "<option value='4'" + (diffType == 4 ? " selected" : "") + ">Falcon v4</option>";
+                                    }
                                     if (supportFalconv5) {
-                                        str += "<option value='3'" + (diffType == 3 ? " selected" : "") + ">Falcon v4/v5</option>";
+                                        str += "<option value='3'" + (diffType == 3 ? " selected" : "") + ">Falcon v5</option>";
                                     }
                                 }
                                 str += "</select>";
