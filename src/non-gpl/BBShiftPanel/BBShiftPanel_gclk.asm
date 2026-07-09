@@ -46,10 +46,15 @@
 // per-chip configuration, read from PRU DRAM bytes 0-3 each pass (written by
 // setupPWMRegisters in BBShiftPanel.cpp):
 //   .b0 = blanking loops between GCLK packets (the brightness knob)
-//   .b1 = row select mode: 0 = DP32020A style row shift register,
-//         1 = direct binary row number on SEL0-4 (FM6353 style panels)
+//   .b1 = bit 0: 0 = DP32020A style row shift register,
+//                1 = direct binary row number on SEL0-4 (FM6353 style panels)
+//         bit 1: FM6373 family - single short OE pulse per row instead of a
+//                GCLK packet (the PWM engine runs off the constant DCLK from
+//                the other PRU); implies direct row select
 //   .b2 = GCLK pulses in the first packet after a restart (0 -> 78, FM6363)
+//         FM6373 mode: the "opener" pulse width in microseconds
 //   .b3 = GCLK pulses per packet after the first (0 -> 74, FM6363)
+//         FM6373 mode: the row period in microseconds
 #define rowConfig	r22
 #define curRowNum	r23
 
@@ -150,6 +155,7 @@ _LOOP:
 HAVEPULSECFG:
 
 	QBEQ	FOUR_PULSES, enable.b0, 1
+	QBBS	FM6373_SCAN, rowConfig.b1, 1
 
 	LDI		r29, 0
 	LDI		curRowNum, 0
@@ -194,6 +200,45 @@ DONELOOPS:
 		XIN 	12, &enable, 4
 		QBEQ	_RESETLOOP, enable.b0, 0
     JMP _LOOP
+
+// FM6373 family scan: the chip generates its PWM internally from the
+// constant DCLK; this side only advances the display row - set the row
+// number on SEL0-4, pulse OE once (a few DCLK periods wide so the chip is
+// guaranteed to sample it), then hold for the row period.  After a restart
+// a longer "opener" pulse is sent first (DMD_STM32 sends 12 clocks before
+// the frame data).  The scan free-runs between frames so the panel keeps
+// multiplexing at low FPP frame rates.
+FM6373_SCAN:
+	QBNE	FM_NOOPENER, CLICKSTODO, 0
+	LDI		CLICKSTODO, 1
+	SET		r30, r30, GCLK_PIN
+	MOV		curBright, rowConfig.b2
+FM_OPENHIGH:
+	SLEEPNS	1000, r10, 3
+	SUB		curBright, curBright, 1
+	QBNE	FM_OPENHIGH, curBright, 0
+	CLR		r30, r30, GCLK_PIN
+FM_NOOPENER:
+	LDI		curRowNum, 0
+FM_ROWLOOP:
+	LSL		r30, curRowNum, SEL0_PIN
+	SLEEPNS	135, r10, 4
+	SET		r30, r30, GCLK_PIN
+	SLEEPNS	600, r10, 5
+	CLR		r30, r30, GCLK_PIN
+	MOV		curBright, rowConfig.b3
+FM_ROWWAIT:
+	SLEEPNS	1000, r10, 6
+	SUB		curBright, curBright, 1
+	QBNE	FM_ROWWAIT, curBright, 0
+	ADD		curRowNum, curRowNum, 1
+	QBNE	FM_NOWRAP, curRowNum, enable.b0
+	LDI		curRowNum, 0
+FM_NOWRAP:
+	XIN 	12, &enable, 4
+	QBEQ	_RESETLOOP, enable.b0, 0
+	QBEQ	EXIT, enable.b0, 0xFF
+	JMP		FM_ROWLOOP
 
 EXIT:
 	// Send notification to Host for program completion

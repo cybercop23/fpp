@@ -102,6 +102,7 @@ private:
     void setupBrightnessValues();
     void setupPWMRegisters();
     void setupGCLKConfig();
+    void writeFM6373SeqWord(int idx);
 
     BBBPru* pru = nullptr;
     BBBPru* pwmPru = nullptr;
@@ -122,6 +123,8 @@ private:
     // PWM panels: drive the row lines with a direct binary row number
     // instead of the DP32020A style row shift register
     bool m_pwmDirectRow = false;
+    // FM6373: next config sequence word for the per-frame rotating refresh
+    int m_pwmSeqIdx = 0;
     int m_longestChain = 0;
     int m_invertedData = 0;
     int m_brightness = 10;

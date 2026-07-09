@@ -317,6 +317,12 @@ DONELE?:
     SET     r30, r30, OCLR_PIN
     .endm
 
+// data RAM offset of the PWM chip config (u32: b0 = chip family, 0 =
+// FM6363C/FM6353 fixed-register style, 1 = FM6373 style), written by the
+// ARM after the firmware starts.  Must match BBShiftPanel.cpp.  (The shift
+// firmware uses the same offset for its row addressing config.)
+#define PWM_CHIP_CONFIG_OFFSET 0x1DF8
+
 
 
 
@@ -471,6 +477,50 @@ DO_REG5_LAST .macro offset
     JAL     r29, OUTPUT_2_PIXELS_SUBR
     .endm
 
+// FM6373 style register write, register-based block offset (the five FM6373
+// words all latch the same way so they are sent from one loop): full chain
+// blocks then the last block with LE high for the last 5 of the 16 clocks
+DO_FULL_REGISTER_R .macro baseReg
+    .newblock
+    // pixels 0-3 (data already loaded in r2-r13)
+    JAL     r29, OUTPUT_4_PIXELS_SUBR
+    // pixels 4-7
+    ADD     tmpReg1, baseReg, 48
+	LBCO	&r2, CONST_PRUDRAM, tmpReg1, 48
+    JAL     r29, OUTPUT_4_PIXELS_SUBR
+    // pixels 8-11
+    ADD     tmpReg1, baseReg, 96
+	LBCO	&r2, CONST_PRUDRAM, tmpReg1, 48
+    JAL     r29, OUTPUT_4_PIXELS_SUBR
+    // pixels 12-15
+    ADD     tmpReg1, baseReg, 144
+	LBCO	&r2, CONST_PRUDRAM, tmpReg1, 48
+    JAL     r29, OUTPUT_4_PIXELS_SUBR
+    .endm
+
+DO_REG_LAST_5_R .macro baseReg
+    .newblock
+    // pixels 0-3
+    JAL     r29, OUTPUT_4_PIXELS_SUBR
+    // pixels 4-7
+    ADD     tmpReg1, baseReg, 48
+	LBCO	&r2, CONST_PRUDRAM, tmpReg1, 48
+    JAL     r29, OUTPUT_4_PIXELS_SUBR
+    // pixels 8-9
+    ADD     tmpReg1, baseReg, 96
+	LBCO	&r2, CONST_PRUDRAM, tmpReg1, 48
+    LDI     r1.b0, &r2
+    JAL     r29, OUTPUT_2_PIXELS_SUBR
+    // pixel 10, then LE goes high for pixels 11-15
+    OUTPUT_PIXEL
+    SET     r30, r30, LE_PIN
+    OUTPUT_PIXEL
+    // pixels 12-15
+    ADD     tmpReg1, baseReg, 144
+	LBCO	&r2, CONST_PRUDRAM, tmpReg1, 48
+    JAL     r29, OUTPUT_4_PIXELS_SUBR
+    .endm
+
 #else
 // 8-output versions: 16 pixels total in 2 groups of 8
 
@@ -558,6 +608,41 @@ DONEHALFREG?
 DONEPRELATCH?:
     SET  r30, r30, LE_PIN
     LOOP DONEPOSTLATCH?, 2
+        OUTPUT_PIXEL
+DONEPOSTLATCH?
+    .endm
+
+// FM6373 style register write, register-based block offset (the five FM6373
+// words all latch the same way so they are sent from one loop): full chain
+// blocks then the last block with LE high for the last 5 of the 16 clocks
+DO_FULL_REGISTER_R .macro baseReg
+    .newblock
+    LDI     r1.b0, &r2
+    LOOP DONEHALFREG?, 8
+        OUTPUT_PIXEL
+DONEHALFREG?
+    ADD     tmpReg1, baseReg, 48
+	LBCO	&r2, CONST_PRUDRAM, tmpReg1, 48
+    LDI     r1.b0, &r2
+    LOOP DONEPIXELFULLREG?, 8
+        OUTPUT_PIXEL
+DONEPIXELFULLREG?:
+    .endm
+
+DO_REG_LAST_5_R .macro baseReg
+    .newblock
+    LDI     r1.b0, &r2
+    LOOP DONEHALFREG?, 8
+        OUTPUT_PIXEL
+DONEHALFREG?
+    ADD     tmpReg1, baseReg, 48
+	LBCO	&r2, CONST_PRUDRAM, tmpReg1, 48
+    LDI     r1.b0, &r2
+    LOOP DONEPRELATCH?, 3
+        OUTPUT_PIXEL
+DONEPRELATCH?:
+    SET  r30, r30, LE_PIN
+    LOOP DONEPOSTLATCH?, 5
         OUTPUT_PIXEL
 DONEPOSTLATCH?
     .endm
@@ -839,6 +924,11 @@ DONEDATAOUT_LOOP:
 
 OUTPUT_REGISTERS:
     .newblock
+    LDI     tmpReg1, PWM_CHIP_CONFIG_OFFSET
+    LBCO    &tmpReg2.b0, CONST_PRUDRAM, tmpReg1, 1
+    QBNE    NOTFM6373?, tmpReg2.b0, 1
+    JMP     OUTPUT_REGISTERS_FM6373
+NOTFM6373?:
     // Signal the GCLK to do 4 ticks
     LOW_FOR_CLOCKS 2
     LDI   r19, 1
@@ -960,6 +1050,50 @@ REG5_LAST:
     DO_REG5_LAST        REG5_OFF
     CLEAR_DATA_PINS
     LOW_FOR_CLOCKS 6
+
+    JMP SKIPREGISTERS
+
+
+// FM6373 family register upload (from DMD_STM32 load_config_regs and the
+// kingdo9 rpi-rgb-led-matrix captures): vsync + 11 and 14 clock LAT bursts,
+// then five 16-bit words - the 0x00AA/0x01AA write-enable pair, one word of
+// the chip's config register sequence (the ARM rotates it through the whole
+// sequence across frames), and the 0x0055/0x0155 commit pair - each latched
+// with LE high for the last 5 clocks.  The vsync lives here, so the ARM does
+// not set PWM_COMMAND_SYNC for this chip family.
+OUTPUT_REGISTERS_FM6373:
+    .newblock
+	LE_FOR_CLOCKS_NO_CLR 3
+    LOW_FOR_CLOCKS 8
+	LE_FOR_CLOCKS_NO_CLR 11
+    LOW_FOR_CLOCKS 8
+	LE_FOR_CLOCKS_NO_CLR 14
+    LOW_FOR_CLOCKS 8
+
+    // all five words latch identically (LE for the last 5 clocks), so one
+    // loop walks the five register slots; r24 = slot offset, r25.b0 = count
+    LDI     r24, REG1_OFF
+    LDI     r25.b0, 5
+FMREGS_LOOP:
+    MOV     curReg, numBlocks
+FMREG_CHAIN:
+    MOV     tmpReg1, r24
+	LBCO	&r2, CONST_PRUDRAM, tmpReg1, 48
+    QBEQ    FMREG_CHAINLAST, curReg,  1
+    DO_FULL_REGISTER_R  r24
+    SUB     curReg, curReg, 1
+    JMP     FMREG_CHAIN
+FMREG_CHAINLAST:
+    DO_REG_LAST_5_R     r24
+    CLEAR_DATA_PINS
+    LOW_FOR_CLOCKS 8
+#ifdef OUTPUTS16
+    ADD     r24, r24, 192
+#else
+    ADD     r24, r24, 96
+#endif
+    SUB     r25.b0, r25.b0, 1
+    QBNE    FMREGS_LOOP, r25.b0, 0
 
     JMP SKIPREGISTERS
 

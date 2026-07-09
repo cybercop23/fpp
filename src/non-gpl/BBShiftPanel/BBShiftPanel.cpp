@@ -70,6 +70,7 @@ constexpr int ADDRESSING_MODE_ABC_SHIFT = 3; // row shift register, A=clock, C=d
 constexpr int ADDRESSING_MODE_ABC_DE = 4;    // SM5266P: A/B/C drive a shifter, D/E select the bank
 constexpr int ADDRESSING_MODE_FM6353C = 50;
 constexpr int ADDRESSING_MODE_FM6363C = 51;
+constexpr int ADDRESSING_MODE_FM6373 = 52;
 
 constexpr int PANEL_TYPE_FM6126A = 1;
 constexpr int PANEL_TYPE_FM6127 = 2;
@@ -77,6 +78,45 @@ constexpr int PANEL_TYPE_FM6127 = 2;
 // chips like the FM6126A), but internally they are PWM addressing modes
 constexpr int PANEL_TYPE_FM6363C = 3;
 constexpr int PANEL_TYPE_FM6353 = 4; // also covers the compatible ICN2153
+constexpr int PANEL_TYPE_FM6373 = 5; // the common DP32019B receiver boards
+
+// must match PWM_CHIP_CONFIG_OFFSET in BBShiftPanel_pwm.asm
+#define PWM_CHIP_CONFIG_OFFSET 0x1DF8
+
+// FM6373 config register sequence, one {address, value} word per register,
+// different per color line.  Captured from a working DP32019B 128x64 panel
+// by the kingdo9/rpi-rgb-led-matrix_pwm_experiment project
+// (lib/spwm-panel-registers.cc, register config 0); DMD_STM32 carries a
+// shorter single-color variant of the same address space.  The 0x02
+// register holds the scan row count and is patched at runtime.
+static const uint16_t FM6373_SEQ_R[] = {
+    0x0000, 0x0100, 0x021f, 0x033f, 0x0402, 0x0508, 0x0602, 0x0720,
+    0x0820, 0x0900, 0x0a00, 0x0b00, 0x0c01, 0x0d01, 0x0e04, 0x0f01,
+    0x10c2, 0x1121, 0x1201, 0x1300, 0x1400, 0x1500, 0x1600, 0x17f0,
+    0x181f, 0x1900, 0x1a1f, 0x1b10, 0x1c2a, 0x1d0a, 0x1e42, 0x1f04,
+    0x2008, 0x2101, 0x221c, 0x7000, 0x7100, 0x7200, 0x7300, 0x7400,
+    0xf000, 0xf100, 0xf200, 0xf300, 0xf400, 0xf500, 0x2300
+};
+static const uint16_t FM6373_SEQ_G[] = {
+    0x0000, 0x0100, 0x021f, 0x033f, 0x0402, 0x0508, 0x0602, 0x0720,
+    0x0820, 0x0900, 0x0a00, 0x0b00, 0x0c08, 0x0d01, 0x0e04, 0x0f01,
+    0x10c2, 0x1121, 0x1201, 0x1300, 0x1400, 0x1500, 0x1600, 0x17f0,
+    0x181f, 0x1950, 0x1a1f, 0x1b10, 0x1c2a, 0x1d0a, 0x1e46, 0x1f20,
+    0x2008, 0x2101, 0x221c, 0x7000, 0x7100, 0x7200, 0x7300, 0x7400,
+    0xf000, 0xf100, 0xf200, 0xf300, 0xf400, 0xf500, 0x2300
+};
+static const uint16_t FM6373_SEQ_B[] = {
+    0x0000, 0x0100, 0x021f, 0x033f, 0x0402, 0x0508, 0x0602, 0x0720,
+    0x0820, 0x0900, 0x0a00, 0x0b00, 0x0c08, 0x0d01, 0x0e04, 0x0f01,
+    0x10c2, 0x1121, 0x1201, 0x1300, 0x1400, 0x1500, 0x1600, 0x17f0,
+    0x182f, 0x1900, 0x1a1f, 0x1b10, 0x1c2a, 0x1d0a, 0x1e48, 0x1f20,
+    0x2010, 0x2101, 0x221c, 0x7000, 0x7100, 0x7200, 0x7300, 0x7400,
+    0xf000, 0xf100, 0xf200, 0xf300, 0xf400, 0xf500, 0x2300
+};
+constexpr int FM6373_SEQ_LEN = 47;
+static_assert(sizeof(FM6373_SEQ_R) == FM6373_SEQ_LEN * sizeof(uint16_t));
+static_assert(sizeof(FM6373_SEQ_G) == FM6373_SEQ_LEN * sizeof(uint16_t));
+static_assert(sizeof(FM6373_SEQ_B) == FM6373_SEQ_LEN * sizeof(uint16_t));
 
 constexpr int PWM_COMMAND_SYNC = 0x0001;
 constexpr int PWM_COMMAND_REGISTERS = 0x0002;
@@ -299,6 +339,9 @@ int BBShiftPanelOutput::Init(Json::Value config) {
     } else if (m_panelType == PANEL_TYPE_FM6353) {
         m_addressingMode = ADDRESSING_MODE_FM6353C;
         m_panelType = 0;
+    } else if (m_panelType == PANEL_TYPE_FM6373) {
+        m_addressingMode = ADDRESSING_MODE_FM6373;
+        m_panelType = 0;
     }
 
     if (isPWMPanel()) {
@@ -492,11 +535,17 @@ int BBShiftPanelOutput::StartPRU() {
         WarningHolder::AddWarning("BBShiftPanel: Unable to start PRU(s). May require a reboot.");
         return 0;
     }
-    // The shift firmware reads the row addressing config right after the
-    // ring config handshake, so it must land first (and after run(), since
-    // the firmware load clears the PRU memories).  The PWM firmware does
-    // its own FM6363C addressing and ignores this.
-    uint32_t addrCfg = isPWMPanel() ? 0 : ((uint32_t)(m_addressingMode & 0xFF) | (((uint32_t)numRows) << 8));
+    // The same data RAM word configures either firmware: the shift firmware
+    // reads its row addressing config right after the ring config handshake,
+    // the PWM firmware reads the chip family flag at each register upload.
+    // It must land after run() (the firmware load clears the PRU memories)
+    // and, for the shift firmware, before the ring attach below.
+    uint32_t addrCfg;
+    if (isPWMPanel()) {
+        addrCfg = (m_addressingMode == ADDRESSING_MODE_FM6373) ? 1 : 0;
+    } else {
+        addrCfg = (uint32_t)(m_addressingMode & 0xFF) | (((uint32_t)numRows) << 8);
+    }
     *(volatile uint32_t*)(pru->data_ram + ADDR_CONFIG_OFFSET) = addrCfg;
     __sync_synchronize();
     // Both panel types are fed through a ring in the PRU shared memory (see
@@ -893,7 +942,16 @@ int BBShiftPanelOutput::SendData(unsigned char* channelData) {
         // Send the command to setup the registers
         pruData->numBlocks = rowLen / 16;
         pruData->numRows = numRows;
-        pruData->cmd = PWM_COMMAND_REGISTERS | PWM_COMMAND_SYNC | PWM_COMMAND_STARTGCLK;
+        if (m_addressingMode == ADDRESSING_MODE_FM6373) {
+            // rotate the config sequence one word per frame as a continuous
+            // refresh; the vsync is part of the FM6373 register upload so
+            // PWM_COMMAND_SYNC is not set for this family
+            writeFM6373SeqWord(m_pwmSeqIdx);
+            m_pwmSeqIdx = (m_pwmSeqIdx + 1) % FM6373_SEQ_LEN;
+            pruData->cmd = PWM_COMMAND_REGISTERS | PWM_COMMAND_STARTGCLK;
+        } else {
+            pruData->cmd = PWM_COMMAND_REGISTERS | PWM_COMMAND_SYNC | PWM_COMMAND_STARTGCLK;
+        }
     }
 
     __asm__ __volatile__("" ::
@@ -999,6 +1057,42 @@ void BBShiftPanelOutput::setupPWMRegisters() {
     int bytesPerClock = m_numOutputSlots == 16 ? 12 : 6;
     uint8_t odata[192 * 5];
 
+    if (m_addressingMode == ADDRESSING_MODE_FM6373) {
+        // FM6373 family: the five per-frame words are the 0x00AA/0x01AA
+        // write-enable pair, one word of the config register sequence, and
+        // the 0x0055/0x0155 commit pair (see OUTPUT_REGISTERS_FM6373 in the
+        // asm).  Load the fixed slots once, then clock the entire sequence
+        // through the rotating slot so the panel is fully configured before
+        // the first frame; SendData keeps rotating it afterwards as a
+        // continuous refresh (DMD_STM32 and kingdo9 both do the same).
+        int idx = outputRegData(0, odata, 0x00AA, 0x00AA, 0x00AA, m_numOutputSlots);
+        idx = outputRegData(idx, odata, 0x01AA, 0x01AA, 0x01AA, m_numOutputSlots);
+        idx = outputRegData(idx, odata, FM6373_SEQ_R[0], FM6373_SEQ_G[0], FM6373_SEQ_B[0], m_numOutputSlots);
+        idx = outputRegData(idx, odata, 0x0055, 0x0055, 0x0055, m_numOutputSlots);
+        idx = outputRegData(idx, odata, 0x0155, 0x0155, 0x0155, m_numOutputSlots);
+        pru->memcpyToPRU((uint8_t*)&pruData->registers[0], &odata[0], idx);
+
+        setupGCLKConfig();
+        pruData->numBlocks = rowLen / 16;
+        pruData->numRows = numRows;
+        m_pwmSeqIdx = 0;
+        for (int i = 0; i < FM6373_SEQ_LEN; i++) {
+            while (pruData->command) {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                __asm__ __volatile__("" ::
+                                         : "memory");
+            }
+            writeFM6373SeqWord(i);
+            pruData->cmd = PWM_COMMAND_REGISTERS;
+            __asm__ __volatile__("" ::
+                                     : "memory");
+            // the command word clears when the PRU *starts* the upload, so
+            // give it time to finish before rewriting the rotating slot
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return;
+    }
+
     // register 1 contains the number of scan lines (rows)
     uint16_t rn = ((numRows - 1) << 8) & 0x3F00;
     int curidx;
@@ -1068,12 +1162,50 @@ void BBShiftPanelOutput::setupPWMRegisters() {
                              : "memory");
 }
 
+void BBShiftPanelOutput::writeFM6373SeqWord(int idx) {
+    // rewrite the rotating register slot (slot 3 of 5) with sequence word
+    // idx.  Only safe while no register upload is in flight: called from
+    // SendData after the previous DATA command was consumed (the PRU is
+    // uploading frame data, which never reads the register slots, and the
+    // previous REGISTERS upload completed before that DATA was dispatched)
+    // and from the serialized init loop in setupPWMRegisters.
+    uint16_t rw = FM6373_SEQ_R[idx];
+    uint16_t gw = FM6373_SEQ_G[idx];
+    uint16_t bw = FM6373_SEQ_B[idx];
+    if ((rw >> 8) == 0x02) {
+        // register 0x02 holds the scan row count (DMD_STM32 patches the
+        // same entry)
+        rw = gw = bw = 0x0200 | ((numRows - 1) & 0xFF);
+    }
+    int slotSize = 16 * (m_numOutputSlots == 16 ? 12 : 6);
+    uint8_t buf[192 * 2];
+    int len = outputRegData(0, buf, rw, gw, bw, m_numOutputSlots);
+    if (slotSize & 63) {
+        // memcpyToPRU copies in 64 byte chunks; include the (constant)
+        // commit word slot after it so the write length is a multiple of 64
+        len = outputRegData(len, buf, 0x0055, 0x0055, 0x0055, m_numOutputSlots);
+    }
+    pru->memcpyToPRU((uint8_t*)&pruData->registers[0] + 2 * slotSize, buf, len);
+}
+
 void BBShiftPanelOutput::setupGCLKConfig() {
     // Configuration for the GCLK program on the other PRU (see the rowConfig
     // register in BBShiftPanel_gclk.asm): [0] = blanking loops between GCLK
     // packets (the brightness knob), [1] = row select mode, [2]/[3] = GCLK
     // pulses in the first packet after a restart / every packet after
     pwmPru->data_ram[0] = m_brightness > 8 ? 3 : 11 - m_brightness;
+    if (m_addressingMode == ADDRESSING_MODE_FM6373) {
+        // FM6373 family: single OE pulse per row, direct row select (the
+        // only transport implemented for this family; the DP32019B boards
+        // use it).  Brightness comes from the chip's config registers, not
+        // the blanking time.  [2] = opener pulse width us, [3] = row period
+        // us (~128 DCLKs at the data clock rate, so the scan rate is about
+        // the same while uploading and while free-running between frames)
+        pwmPru->data_ram[1] = 3;
+        pwmPru->data_ram[2] = 2;
+        pwmPru->data_ram[3] = 20;
+        return;
+    }
     pwmPru->data_ram[1] = m_pwmDirectRow ? 1 : 0;
     if (m_addressingMode == ADDRESSING_MODE_FM6353C) {
         // DMD_STM32 GCLK_NUM: FM6353 row switching takes 138 GCLK pulses
