@@ -176,10 +176,14 @@ extract_multisync_ips() {
 # Non-IP domains (e.g. plugin domains a user added) are left untouched.
 prune_remote_ip_entries() {
     [ -f "$JSON_FILE" ] || return
+    # The IPv6 alternatives allow an optional "%zone" scope id (e.g. fe80::1%wlan0)
+    # so link-local literals written by old builds get pruned too; without this the
+    # bare "%w"/"%e" survives into the Apache Header directive, where mod_headers
+    # reads it as an invalid format specifier and refuses to start (see issue #2729).
     jq '
       ."connect-src" = ((."connect-src" // [])
         | map(select(
-            test("^http://(\\[[0-9a-fA-F:]+\\]|[0-9]{1,3}(\\.[0-9]{1,3}){3}|[0-9a-fA-F]*:[0-9a-fA-F:]+)(:[0-9]+)?/?$") | not
+            test("^http://(\\[[0-9a-fA-F:]+(%[0-9a-zA-Z]+)?\\]|[0-9]{1,3}(\\.[0-9]{1,3}){3}|[0-9a-fA-F]*:[0-9a-fA-F:]+(%[0-9a-zA-Z]+)?)(:[0-9]+)?/?$") | not
           )))
     ' "$JSON_FILE" > "${JSON_FILE}.tmp" 2>/dev/null && mv "${JSON_FILE}.tmp" "$JSON_FILE" || rm -f "${JSON_FILE}.tmp"
 }
@@ -240,6 +244,16 @@ generate_csp() {
     #if [ -n "$local_domain" ]; then
     #    combined_values["connect-src"]="${combined_values["connect-src"]} $local_domain"
     #fi
+
+    # Drop any token that would break the Apache directive. mod_headers reads '%'
+    # as the start of a format specifier and '"' terminates the directive value, so
+    # a single malformed entry (e.g. an IPv6 link-local literal like
+    # http://fe80::1%wlan0) prevents Apache from starting at all. Sanitizing here
+    # keeps the CSP subsystem fail-safe regardless of how a bad value got into the
+    # JSON (see issue #2729).
+    for key in "${!combined_values[@]}"; do
+        combined_values[$key]=$(echo "${combined_values[$key]}" | tr ' ' '\n' | grep -Ev '[%"]' | tr '\n' ' ')
+    done
 
     # Remove duplicate values for each key
     for key in "${!combined_values[@]}"; do
