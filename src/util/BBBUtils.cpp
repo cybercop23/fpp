@@ -440,7 +440,13 @@ int BBBPinCapabilities::configPin(const std::string& m,
 
     if (FileExists("/usr/bin/pinctrl") && pinName[0] == 'P' && pinName[2] == '_') {
         char buf[256];
-        std::string pm = m;
+        // Use the normalized "mode", not the original "m": on am335x the pinctrl
+        // tool only knows "pruout"/"pruin" (each pin binds to a single PRU) and
+        // pru0out/pru1out were already collapsed to pruout above. On AM62x the
+        // tool takes pru0out/pru1out and "mode" is left un-normalized, so this is
+        // correct on both platforms. Passing the raw pru0out/pru1out here made
+        // pinctrl reject the mode ("Unknown mode") and left the pin as gpio.
+        std::string pm = mode;
         if (m == "default") {
             pm = "gpio";
         }
