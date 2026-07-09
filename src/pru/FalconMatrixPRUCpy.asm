@@ -64,9 +64,9 @@
 
 #include "/tmp/PanelPinConfiguration.hp"
 
-#ifdef OUTPUTBYROW
-; write one owned bank; no change detection - in by-row mode the blank row
-; clears the pins behind our back so the pin state must always be rewritten
+#if defined(OUTPUTBYROW) && defined(OUTPUTBLANKROW)
+; write one owned bank; no change detection - the by-row blank row clears
+; the pins behind our back so the pin state must always be rewritten
 CPY_OUTPUT_GPIO .macro data, mask, gpio, last
     LDI32 cpy_gpio_base, gpio
     AND   cpy_out_set, data, mask
