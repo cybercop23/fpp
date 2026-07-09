@@ -687,7 +687,10 @@
         }
         <? if (strpos($settings['SubPlatform'], 'PocketBeagle2') !== false) { ?>
             var value = parseInt($(`#panelMatrix${panelMatrixID} .LEDPanelsRowAddressType`).val());
-            if (value >= 50) {
+            var panelType = parseInt($(`#panelMatrix${panelMatrixID} .LEDPanelsType`).val() || 0);
+            // PWM panels (FM6363C, addressing >= 50 in old configs) run a fixed
+            // 16-bit depth and manage their own scan order
+            if (value >= 50 || panelType == 3) {
                 $(`#panelMatrix${panelMatrixID} .LEDPanelsColorDepth`).hide();
                 $(`#panelMatrix${panelMatrixID} .LEDPanelsColorDepthLabel`).hide();
 
@@ -1077,6 +1080,14 @@
             let mp = channelOutputsLookup?.LEDPanelMatrices?.["panelMatrix" + panelMatrixID];
             if (!mp || typeof mp !== "object") return;
 
+            // FM6363C used to be stored as panelRowAddressType 51; it is now
+            // panelType 3 (fppd still accepts the old form, the next Save
+            // simply writes the new one)
+            if (parseInt(mp.panelRowAddressType) == 51) {
+                mp.panelRowAddressType = 0;
+                mp.panelType = 3;
+            }
+
             if (mp.enabled === 1 && Object.values(mp).includes("LEDPanelMatrix")) {
                 $(`#panelMatrix${panelMatrixID} .LEDPanelsEnabled`).prop("checked", true);
                 $(`#panelMatrix${panelMatrixID} .tab-LEDPanels-LI`).show();
@@ -1457,7 +1468,8 @@
                     var value = 0;
                     <? if (strpos($settings['SubPlatform'], 'PocketBeagle2') !== false) { ?>
                         value = parseInt($(`#panelMatrix${panelMatrixID} .LEDPanelsRowAddressType`).val());
-                        if (value >= 50) {
+                        var panelTypeVal = parseInt($(`#panelMatrix${panelMatrixID} .LEDPanelsType`).val() || 0);
+                        if (value >= 50 || panelTypeVal == 3) {
                             $(`#panelMatrix${panelMatrixID} .LEDPanelsColorDepth`).hide();
                             $(`#panelMatrix${panelMatrixID} .LEDPanelsColorDepthLabel`).hide();
 
@@ -3397,11 +3409,19 @@
                                 <div class="printSettingFieldCol col-md-4 col-lg-4">
                                     <select class="form-select LEDPanelsRowAddressType" onchange="RowAddressTypeChanged();">
                                         <option value='0' selected>Standard</option>
+                                        <?
+                                        if ($panelCapesDriver == "BBShiftPanel") {
+                                            echo "<option value='1'>AB-Addressed Panels</option>";
+                                        }
+                                        ?>
                                         <option value='2'>Direct Row Select</option>
                                         <?
                                         if ($panelCapesDriver == "BBShiftPanel") {
-                                            //echo "<option value='50'>FM6353C</option>";
-                                            echo "<option value='51'>FM6363C</option>";
+                                            echo "<option value='3'>ABC-Addressed Panels</option>";
+                                            echo "<option value='4'>ABC Shift + DE Direct</option>";
+                                            // FM6363C moved to the LED Panel Type dropdown; saved
+                                            // configs with panelRowAddressType 51 are migrated on
+                                            // load (and fppd itself still accepts 51)
                                         }
                                         ?>
                                     </select>
@@ -3419,10 +3439,15 @@
                                         Panel
                                         Type:</b></span></div>
                             <div class="printSettingFieldCol col-md-4 col-lg-4">
-                                <select class='form-select LEDPanelsType'>
+                                <select class='form-select LEDPanelsType' onchange="RowAddressTypeChanged();">
                                     <option value='0' selected>Standard</option>
                                     <option value='1'>FM6126A</option>
                                     <option value='2'>FM6127</option>
+                                    <?
+                                    if ($panelCapesDriver == "BBShiftPanel") {
+                                        echo "<option value='3'>FM6363C</option>";
+                                    }
+                                    ?>
                                 </select>
                             </div>
                         <? } else { ?>

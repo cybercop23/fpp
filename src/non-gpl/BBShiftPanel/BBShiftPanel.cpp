@@ -64,8 +64,17 @@ FPPPlugins::Plugin* createPlugin() {
 }
 
 constexpr int ADDRESSING_MODE_STANDARD = 0;
+constexpr int ADDRESSING_MODE_AB_SHIFT = 1;  // row shift register, A=clock, B=data (active low)
 constexpr int ADDRESSING_MODE_DIRECT = 2;
+constexpr int ADDRESSING_MODE_ABC_SHIFT = 3; // row shift register, A=clock, C=data (active high)
+constexpr int ADDRESSING_MODE_ABC_DE = 4;    // SM5266P: A/B/C drive a shifter, D/E select the bank
 constexpr int ADDRESSING_MODE_FM6363C = 51;
+
+constexpr int PANEL_TYPE_FM6126A = 1;
+constexpr int PANEL_TYPE_FM6127 = 2;
+// FM6363C is presented in the UI as a panel type (it is a driver chip like
+// the FM6126A), but internally it is the PWM addressing mode
+constexpr int PANEL_TYPE_FM6363C = 3;
 
 constexpr int PWM_COMMAND_SYNC = 0x0001;
 constexpr int PWM_COMMAND_REGISTERS = 0x0002;
@@ -112,8 +121,9 @@ void BBShiftPanelOutput::StartingOutput() {
     }
 }
 
-// must match PANEL_INIT_OFFSET in BBShiftPanel.asm
+// must match PANEL_INIT_OFFSET / ADDR_CONFIG_OFFSET in BBShiftPanel.asm
 #define PANEL_INIT_OFFSET 0x1E00
+#define ADDR_CONFIG_OFFSET 0x1DF8
 
 void BBShiftPanelOutput::sendPanelInitPackets() {
     // panel configuration register writes, from the rpi-rgb-led-matrix
@@ -135,11 +145,11 @@ void BBShiftPanelOutput::sendPanelInitPackets() {
         uint16_t pattern;
     };
     std::vector<InitReg> regs;
-    if (m_panelType == 1) {
+    if (m_panelType == PANEL_TYPE_FM6126A) {
         // FM6126A: config register 1 (full brightness), register 2 (panel on)
         regs.push_back({ 12, encode("0111111111111111") });
         regs.push_back({ 13, encode("0000000001000000") });
-    } else if (m_panelType == 2) {
+    } else if (m_panelType == PANEL_TYPE_FM6127) {
         // FM6127: registers 1-3
         regs.push_back({ 12, encode("1111111111001110") });
         regs.push_back({ 13, encode("1110000001100010") });
@@ -277,6 +287,13 @@ int BBShiftPanelOutput::Init(Json::Value config) {
 
     m_addressingMode = config["panelRowAddressType"].asInt();
     m_panelType = config["panelType"].asInt();
+    if (m_panelType == PANEL_TYPE_FM6363C) {
+        // the UI moved FM6363C from the addressing dropdown to the panel
+        // type dropdown; internally it stays the PWM addressing mode (old
+        // configs with panelRowAddressType == 51 keep working unchanged)
+        m_addressingMode = ADDRESSING_MODE_FM6363C;
+        m_panelType = 0;
+    }
 
     if (isPWMPanel()) {
         for (auto& pinName : PRU0_PWM_PINS) {
@@ -469,6 +486,13 @@ int BBShiftPanelOutput::StartPRU() {
         WarningHolder::AddWarning("BBShiftPanel: Unable to start PRU(s). May require a reboot.");
         return 0;
     }
+    // The shift firmware reads the row addressing config right after the
+    // ring config handshake, so it must land first (and after run(), since
+    // the firmware load clears the PRU memories).  The PWM firmware does
+    // its own FM6363C addressing and ignores this.
+    uint32_t addrCfg = isPWMPanel() ? 0 : ((uint32_t)(m_addressingMode & 0xFF) | (((uint32_t)numRows) << 8));
+    *(volatile uint32_t*)(pru->data_ram + ADDR_CONFIG_OFFSET) = addrCfg;
+    __sync_synchronize();
     // Both panel types are fed through a ring in the PRU shared memory (see
     // SMEMRing.hp); attach() must happen after run() since the firmware load
     // clears the PRU memories (and writes while the PRUSS is powered down

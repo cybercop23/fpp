@@ -39,6 +39,10 @@
 // brightness table (ends ~0xC08) and the SMEM ring config/stats (0x1FE0+).
 // Must match BBShiftPanel.cpp.
 #define PANEL_INIT_OFFSET 0x1E00
+// data RAM offset of the addressing config (u32: b0 = row address type,
+// b1 = scan rows), written by the ARM after the firmware starts, before the
+// ring config handshake.  Must match BBShiftPanel.cpp.
+#define ADDR_CONFIG_OFFSET 0x1DF8
 
 #define SEL0_PIN    11
 #define SEL1_PIN    12
@@ -77,6 +81,12 @@
 // SMEM_RING_STATS_OFFSET each frame
 #define stallCount  r21
 #define frameCount  r22
+
+// row addressing config (see ADDR_CONFIG_OFFSET): 0/2 = the address value
+// from the stride table goes straight onto the SEL pins; 1/3/4 = the row is
+// clocked into an external row-select shift register (see ROW_ADDR_SHIFT)
+#define addrMode    r29.b0
+#define addrRows    r29.b1
 
 #define DATA_BYTE   r30.b0
 
@@ -250,6 +260,29 @@ SETADDRESS .macro
     MOV r30.b1, tmpReg1.b1    
     .endm
 
+// route to the direct SEL-pin write (modes 0/2, where the stride table
+// already holds the final pin pattern) or to the row-select shift register
+// routine (modes 1/3/4)
+SET_ROW_ADDRESS .macro
+    .newblock
+    QBEQ STD?, addrMode, 0
+    QBEQ STD?, addrMode, 2
+    JAL  r23.w0, ROW_ADDR_SHIFT
+    QBA  DONE?
+STD?:
+    SETADDRESS
+DONE?:
+    .endm
+
+// ~120ns settle for the (slow, HC164 class) row shift registers
+ADDR_DELAY .macro
+    .newblock
+    LDI tmpReg2.b3, 8
+DLY?:
+    SUB tmpReg2.b3, tmpReg2.b3, 1
+    QBNE DLY?, tmpReg2.b3, 0
+    .endm
+
 DEBUGTOGGLE .macro pin
     CLR r30, r30, pin
     NOP
@@ -384,6 +417,11 @@ RINGCFGWAIT:
     LDI     consumedCnt, 0
     LDI     availBytes, 0
     SBBO    &consumedCnt, ringCtrl, 4, 4
+
+    // the addressing config is written before the ring config, so it is
+    // valid once the ring handshake completes
+    LDI     tmpReg1, ADDR_CONFIG_OFFSET
+    LBCO    &r29, CONST_PRUDRAM, tmpReg1, 4
   
 	// Wait for the start condition from the main program to indicate
 	// that we have a rendered frame ready to clock out.  This also
@@ -440,7 +478,7 @@ WAIT_FOR_TIMER1:
     QBBC OUTPUTPIXELS, tmpReg1.b0, 7
         AND curAddress, tmpReg1.b0, 0x1F
         WAIT_FOR_DISLAY_OFF
-        SETADDRESS
+        SET_ROW_ADDRESS
         CLEARBITS
         TOGGLE_LATCH
         LDI curBright, 20
@@ -483,7 +521,7 @@ ENDLOOPPIXEL2:
 	LBCO &curBright, CONST_PRUDRAM, tmpReg1, 8
     AND curAddress, curAddress, 0x1F
 DOSETADDRESS:
-    SETADDRESS
+    SET_ROW_ADDRESS
     LDI curAddress, 0
     TOGGLE_LATCH
     DISPLAY_ON
@@ -501,6 +539,79 @@ DOSETADDRESS:
 
 	// Go back to waiting for the next frame buffer
 	JMP	_LOOP
+
+// Clock the row number into an external row-select shift register, for the
+// panel types that do not have binary address inputs.  Ported from the
+// rpi-rgb-led-matrix RowAddressSetter classes:
+//   mode 1: A = clock, B = data, active row bit LOW, shift scan-rows bits
+//   mode 3: A = clock, C = data, active row bit HIGH, shift scan-rows bits
+//   mode 4 (SM5266P): C = enable, B = data, A = clock; shift 8 bits with
+//           the (row mod 8) bit HIGH, then D/E directly select the bank
+// The display is off and the panel latch low when this runs (row tail).
+// curAddress holds the row number; clobbers tmpReg1.b1, tmpReg2.b2/b3.
+ROW_ADDR_SHIFT:
+    QBEQ ROWADDR_MODE4, addrMode, 4
+    // modes 1/3: the active position is (rows - 1 - row)
+    SUB  tmpReg1.b1, addrRows, 1
+    SUB  tmpReg1.b1, tmpReg1.b1, curAddress
+    LDI  tmpReg2.b2, 0
+ROWADDR_SHIFTLOOP:
+    CLR  r30, r30, SEL0_PIN
+    QBEQ ROWADDR_ACTIVE, tmpReg2.b2, tmpReg1.b1
+    // inactive bit: mode 1 = HIGH, mode 3 = LOW
+    SET  r30, r30, SEL1_PIN
+    CLR  r30, r30, SEL2_PIN
+    QBA  ROWADDR_CLK
+ROWADDR_ACTIVE:
+    // active bit: mode 1 = LOW, mode 3 = HIGH
+    CLR  r30, r30, SEL1_PIN
+    SET  r30, r30, SEL2_PIN
+ROWADDR_CLK:
+    ADDR_DELAY
+    SET  r30, r30, SEL0_PIN
+    ADDR_DELAY
+    ADD  tmpReg2.b2, tmpReg2.b2, 1
+    QBNE ROWADDR_SHIFTLOOP, tmpReg2.b2, addrRows
+    // final clock pulse: mode 1 ends low->high, mode 3 high->low
+    CLR  r30, r30, SEL0_PIN
+    ADDR_DELAY
+    SET  r30, r30, SEL0_PIN
+    QBNE ROWADDR_DONE, addrMode, 3
+    ADDR_DELAY
+    CLR  r30, r30, SEL0_PIN
+ROWADDR_DONE:
+    JMP  r23.w0
+
+ROWADDR_MODE4:
+    SET  r30, r30, SEL2_PIN                  // enable serial input
+    AND  tmpReg1.b1, curAddress, 0x7
+    LDI  tmpReg2.b2, 8
+ROWADDR_M4LOOP:
+    SUB  tmpReg2.b2, tmpReg2.b2, 1
+    QBNE ROWADDR_M4LOW, tmpReg2.b2, tmpReg1.b1
+    SET  r30, r30, SEL1_PIN
+    QBA  ROWADDR_M4CLK
+ROWADDR_M4LOW:
+    CLR  r30, r30, SEL1_PIN
+ROWADDR_M4CLK:
+    ADDR_DELAY
+    SET  r30, r30, SEL0_PIN
+    ADDR_DELAY
+    ADDR_DELAY
+    CLR  r30, r30, SEL0_PIN
+    ADDR_DELAY
+    QBNE ROWADDR_M4LOOP, tmpReg2.b2, 0
+    CLR  r30, r30, SEL2_PIN                  // disable serial input
+    // D/E select which shifter bank drives
+    CLR  r30, r30, SEL3_PIN
+    QBBC ROWADDR_M4NOD, curAddress, 3
+    SET  r30, r30, SEL3_PIN
+ROWADDR_M4NOD:
+    CLR  r30, r30, SEL4_PIN
+    QBBC ROWADDR_M4NOE, curAddress, 4
+    SET  r30, r30, SEL4_PIN
+ROWADDR_M4NOE:
+    JMP  r23.w0
 
 // Clock the panel configuration registers out to FM6126A style panels.
 // The parameter block is written by the ARM at PANEL_INIT_OFFSET in data
