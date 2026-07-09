@@ -43,6 +43,15 @@
 #define enable   	r19
 #define	isRunning	r20
 #define CLICKSTODO	r21
+// per-chip configuration, read from PRU DRAM bytes 0-3 each pass (written by
+// setupPWMRegisters in BBShiftPanel.cpp):
+//   .b0 = blanking loops between GCLK packets (the brightness knob)
+//   .b1 = row select mode: 0 = DP32020A style row shift register,
+//         1 = direct binary row number on SEL0-4 (FM6353 style panels)
+//   .b2 = GCLK pulses in the first packet after a restart (0 -> 78, FM6363)
+//   .b3 = GCLK pulses per packet after the first (0 -> 74, FM6363)
+#define rowConfig	r22
+#define curRowNum	r23
 
 
 #define   CLK_HI	 (1 << GCLK_PIN)
@@ -119,7 +128,9 @@ DONEBRIGHT?:
 _RESETLOOP
 	LDI		isRunning, 0
 	XOUT	12, &isRunning, 4
-	LDI		CLICKSTODO, 78
+	// 0 marks the next GCLK packet as the first after a restart, which gets
+	// its own (longer) pulse count from rowConfig.b2
+	LDI		CLICKSTODO, 0
 _LOOP:
 	XIN 	12, &enable, 4
 	// Wait for a non-zero value
@@ -130,13 +141,23 @@ _LOOP:
 
 	LDI		isRunning, 1
 	XOUT	12, &isRunning, 4
-	LBCO	&brightness, CONST_PRUDRAM, 0, 1
+	LBCO	&rowConfig, CONST_PRUDRAM, 0, 4
+	MOV		brightness, rowConfig.b0
+	// unconfigured pulse counts fall back to the FM6363 values
+	QBNE	HAVEPULSECFG, rowConfig.b2, 0
+	LDI		rowConfig.b2, 78
+	LDI		rowConfig.b3, 74
+HAVEPULSECFG:
 
 	QBEQ	FOUR_PULSES, enable.b0, 1
 
 	LDI		r29, 0
+	LDI		curRowNum, 0
 	LOOP  DONELOOPS, enable.b0
 		DOBRIGHTLOOP
+		QBNE	DIRECTROWSEL, rowConfig.b1, 0
+		// DP32020A style row shift register: inject the token on the first
+		// row of each pass, then clock it along one position per row
 		LDI		r30, SEL1_ONLY
 		DOBRIGHTLOOP
 		QBNE 	NOSEL2, r29, 0
@@ -148,14 +169,27 @@ NOSEL2:
 		LDI		r30, SEL0_1
 		DOBRIGHTLOOP
 		LDI		r30, 0
-		DOBRIGHTLOOP		
+		DOBRIGHTLOOP
+		JMP		ROWSELDONE
+DIRECTROWSEL:
+		// direct binary row number on SEL0-4; keep the same four blanking
+		// loops as the shift path so brightness behaves identically
+		LSL		r30, curRowNum, SEL0_PIN
+		DOBRIGHTLOOP
+		DOBRIGHTLOOP
+		DOBRIGHTLOOP
+ROWSELDONE:
 		MOV     r2, CLICKSTODO
-		LDI		CLICKSTODO, 74
+		QBNE	NOTFIRSTPKT, r2, 0
+		MOV		r2, rowConfig.b2
+NOTFIRSTPKT:
+		MOV		CLICKSTODO, rowConfig.b3
 DOPULSES:			
 		ONE_PULSE
 		SUB		r2, r2, 1
 		QBNE	DOPULSES, r2, 0
 		LDI		r29, 1
+		ADD		curRowNum, curRowNum, 1
 DONELOOPS:
 		XIN 	12, &enable, 4
 		QBEQ	_RESETLOOP, enable.b0, 0

@@ -68,13 +68,15 @@ constexpr int ADDRESSING_MODE_AB_SHIFT = 1;  // row shift register, A=clock, B=d
 constexpr int ADDRESSING_MODE_DIRECT = 2;
 constexpr int ADDRESSING_MODE_ABC_SHIFT = 3; // row shift register, A=clock, C=data (active high)
 constexpr int ADDRESSING_MODE_ABC_DE = 4;    // SM5266P: A/B/C drive a shifter, D/E select the bank
+constexpr int ADDRESSING_MODE_FM6353C = 50;
 constexpr int ADDRESSING_MODE_FM6363C = 51;
 
 constexpr int PANEL_TYPE_FM6126A = 1;
 constexpr int PANEL_TYPE_FM6127 = 2;
-// FM6363C is presented in the UI as a panel type (it is a driver chip like
-// the FM6126A), but internally it is the PWM addressing mode
+// The PWM chips are presented in the UI as panel types (they are driver
+// chips like the FM6126A), but internally they are PWM addressing modes
 constexpr int PANEL_TYPE_FM6363C = 3;
+constexpr int PANEL_TYPE_FM6353 = 4; // also covers the compatible ICN2153
 
 constexpr int PWM_COMMAND_SYNC = 0x0001;
 constexpr int PWM_COMMAND_REGISTERS = 0x0002;
@@ -228,10 +230,7 @@ BBShiftPanelOutput::~BBShiftPanelOutput() {
 }
 
 bool BBShiftPanelOutput::isPWMPanel() {
-    if (m_addressingMode == ADDRESSING_MODE_FM6363C) {
-        return true;
-    }
-    return false;
+    return m_addressingMode >= ADDRESSING_MODE_FM6353C;
 }
 
 int BBShiftPanelOutput::Init(Json::Value config) {
@@ -287,11 +286,18 @@ int BBShiftPanelOutput::Init(Json::Value config) {
 
     m_addressingMode = config["panelRowAddressType"].asInt();
     m_panelType = config["panelType"].asInt();
+    // For PWM panel types the addressing dropdown selects how the GCLK
+    // program drives the row lines: Direct Row Select = binary row number
+    // on SEL0-4, anything else = the DP32020A style row shift register
+    m_pwmDirectRow = (m_addressingMode == ADDRESSING_MODE_DIRECT);
     if (m_panelType == PANEL_TYPE_FM6363C) {
         // the UI moved FM6363C from the addressing dropdown to the panel
         // type dropdown; internally it stays the PWM addressing mode (old
         // configs with panelRowAddressType == 51 keep working unchanged)
         m_addressingMode = ADDRESSING_MODE_FM6363C;
+        m_panelType = 0;
+    } else if (m_panelType == PANEL_TYPE_FM6353) {
+        m_addressingMode = ADDRESSING_MODE_FM6353C;
         m_panelType = 0;
     }
 
@@ -995,38 +1001,55 @@ void BBShiftPanelOutput::setupPWMRegisters() {
 
     // register 1 contains the number of scan lines (rows)
     uint16_t rn = ((numRows - 1) << 8) & 0x3F00;
-    int curidx = outputRegData(0, odata, conf_6363[0] | rn, conf_6363[1] | rn, conf_6363[2] | rn, m_numOutputSlots);
-
-    // register 2 contains adjustments for current
-
-    uint16_t b = 205; // stick with default brightness for now
-    if (m_brightness >= 5) {
-        b = (m_brightness - 5) * 10;
-        if (m_brightness > 8) {
-            b *= (245 - 64) * 2;
-        } else {
-            b *= (205 - 64) * 2;
-        }
-        b /= 100;
-        b += 64;
-        b <<= 1;
-        b &= 0x1FE;
-        b |= 0x200;
+    int curidx;
+    if (m_addressingMode == ADDRESSING_MODE_FM6353C) {
+        // FM6353 / ICN2153, values from DMD_STM32 (board707/DMD_STM32,
+        // DMD_SPWM_Driver.h conf_6353 = {0x0008, 0x1f70, 0x6707, 0x40f7,
+        // 0x0040} written in latch order 2,4,6,8,10).  The latch length
+        // selects the register, so the 4,6,8,10,2 order the PRU sends
+        // (REG1..REG5) writes the same registers.  No per-color current
+        // data is known for this chip; brightness only comes from the
+        // GCLK blanking time set below.
+        uint16_t r1 = 0x0070 | rn;
+        curidx = outputRegData(0, odata, r1, r1, r1, m_numOutputSlots);
+        curidx = outputRegData(curidx, odata, 0x6707, 0x6707, 0x6707, m_numOutputSlots);
+        curidx = outputRegData(curidx, odata, 0x40f7, 0x40f7, 0x40f7, m_numOutputSlots);
+        curidx = outputRegData(curidx, odata, 0x0040, 0x0040, 0x0040, m_numOutputSlots);
+        curidx = outputRegData(curidx, odata, 0x0008, 0x0008, 0x0008, m_numOutputSlots);
     } else {
-        b = (m_brightness - 1) * 10;
-        b *= 100;
-        b /= 40;
-        b *= (255 - 64);
-        b /= 100;
-        b += 64;
-        b <<= 1;
-        b &= 0x1FE;
-    }
+        curidx = outputRegData(0, odata, conf_6363[0] | rn, conf_6363[1] | rn, conf_6363[2] | rn, m_numOutputSlots);
 
-    curidx = outputRegData(curidx, odata, conf_6363[3] | b, conf_6363[4] | b, conf_6363[5] | b, m_numOutputSlots);
-    curidx = outputRegData(curidx, odata, conf_6363[6], conf_6363[7], conf_6363[8], m_numOutputSlots);
-    curidx = outputRegData(curidx, odata, conf_6363[9], conf_6363[10], conf_6363[11], m_numOutputSlots);
-    curidx = outputRegData(curidx, odata, conf_6363[12], conf_6363[13], conf_6363[14], m_numOutputSlots);
+        // register 2 contains adjustments for current
+
+        uint16_t b = 205; // stick with default brightness for now
+        if (m_brightness >= 5) {
+            b = (m_brightness - 5) * 10;
+            if (m_brightness > 8) {
+                b *= (245 - 64) * 2;
+            } else {
+                b *= (205 - 64) * 2;
+            }
+            b /= 100;
+            b += 64;
+            b <<= 1;
+            b &= 0x1FE;
+            b |= 0x200;
+        } else {
+            b = (m_brightness - 1) * 10;
+            b *= 100;
+            b /= 40;
+            b *= (255 - 64);
+            b /= 100;
+            b += 64;
+            b <<= 1;
+            b &= 0x1FE;
+        }
+
+        curidx = outputRegData(curidx, odata, conf_6363[3] | b, conf_6363[4] | b, conf_6363[5] | b, m_numOutputSlots);
+        curidx = outputRegData(curidx, odata, conf_6363[6], conf_6363[7], conf_6363[8], m_numOutputSlots);
+        curidx = outputRegData(curidx, odata, conf_6363[9], conf_6363[10], conf_6363[11], m_numOutputSlots);
+        curidx = outputRegData(curidx, odata, conf_6363[12], conf_6363[13], conf_6363[14], m_numOutputSlots);
+    }
 
     pru->memcpyToPRU(&pruData->registers[0], &odata[0], curidx);
 
@@ -1037,12 +1060,33 @@ void BBShiftPanelOutput::setupPWMRegisters() {
     }
 
     // Send the command to setup the registers
-    pwmPru->data_ram[0] = m_brightness > 8 ? 3 : 11 - m_brightness;
+    setupGCLKConfig();
     pruData->numBlocks = rowLen / 16;
     pruData->numRows = numRows;
     pruData->cmd = PWM_COMMAND_REGISTERS;
     __asm__ __volatile__("" ::
                              : "memory");
+}
+
+void BBShiftPanelOutput::setupGCLKConfig() {
+    // Configuration for the GCLK program on the other PRU (see the rowConfig
+    // register in BBShiftPanel_gclk.asm): [0] = blanking loops between GCLK
+    // packets (the brightness knob), [1] = row select mode, [2]/[3] = GCLK
+    // pulses in the first packet after a restart / every packet after
+    pwmPru->data_ram[0] = m_brightness > 8 ? 3 : 11 - m_brightness;
+    pwmPru->data_ram[1] = m_pwmDirectRow ? 1 : 0;
+    if (m_addressingMode == ADDRESSING_MODE_FM6353C) {
+        // DMD_STM32 GCLK_NUM: FM6353 row switching takes 138 GCLK pulses
+        // (uniform; no first-packet extension is documented for this chip)
+        pwmPru->data_ram[2] = 138;
+        pwmPru->data_ram[3] = 138;
+    } else {
+        // FM6363: 74 pulses per row, first packet after a restart is 78
+        // (logic analyzer capture; independently confirmed by the
+        // kingdo9/rpi-rgb-led-matrix_pwm_experiment measurements)
+        pwmPru->data_ram[2] = 78;
+        pwmPru->data_ram[3] = 74;
+    }
 }
 
 uint32_t BBShiftPanelOutput::computeMaxBrightnessCycles() {

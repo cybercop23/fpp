@@ -101,6 +101,7 @@ private:
     uint32_t computeMaxBrightnessCycles();
     void setupBrightnessValues();
     void setupPWMRegisters();
+    void setupGCLKConfig();
 
     BBBPru* pru = nullptr;
     BBBPru* pwmPru = nullptr;
@@ -118,6 +119,9 @@ private:
     // 0 = standard, 1 = FM6126A, 2 = FM6127 - panels that need their config
     // registers clocked out before they display (see sendPanelInitPackets)
     int m_panelType = 0;
+    // PWM panels: drive the row lines with a direct binary row number
+    // instead of the DP32020A style row shift register
+    bool m_pwmDirectRow = false;
     int m_longestChain = 0;
     int m_invertedData = 0;
     int m_brightness = 10;

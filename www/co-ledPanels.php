@@ -688,9 +688,9 @@
         <? if (strpos($settings['SubPlatform'], 'PocketBeagle2') !== false) { ?>
             var value = parseInt($(`#panelMatrix${panelMatrixID} .LEDPanelsRowAddressType`).val());
             var panelType = parseInt($(`#panelMatrix${panelMatrixID} .LEDPanelsType`).val() || 0);
-            // PWM panels (FM6363C, addressing >= 50 in old configs) run a fixed
-            // 16-bit depth and manage their own scan order
-            if (value >= 50 || panelType == 3) {
+            // PWM panels (FM6363C/FM6353, addressing >= 50 in old configs) run
+            // a fixed 16-bit depth and manage their own scan order
+            if (value >= 50 || panelType >= 3) {
                 $(`#panelMatrix${panelMatrixID} .LEDPanelsColorDepth`).hide();
                 $(`#panelMatrix${panelMatrixID} .LEDPanelsColorDepthLabel`).hide();
 
@@ -1469,7 +1469,7 @@
                     <? if (strpos($settings['SubPlatform'], 'PocketBeagle2') !== false) { ?>
                         value = parseInt($(`#panelMatrix${panelMatrixID} .LEDPanelsRowAddressType`).val());
                         var panelTypeVal = parseInt($(`#panelMatrix${panelMatrixID} .LEDPanelsType`).val() || 0);
-                        if (value >= 50 || panelTypeVal == 3) {
+                        if (value >= 50 || panelTypeVal >= 3) {
                             $(`#panelMatrix${panelMatrixID} .LEDPanelsColorDepth`).hide();
                             $(`#panelMatrix${panelMatrixID} .LEDPanelsColorDepthLabel`).hide();
 
@@ -3446,6 +3446,7 @@
                                     <?
                                     if ($panelCapesDriver == "BBShiftPanel") {
                                         echo "<option value='3'>FM6363C</option>";
+                                        echo "<option value='4'>FM6353 / ICN2153</option>";
                                     }
                                     ?>
                                 </select>
