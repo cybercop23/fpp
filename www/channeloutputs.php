@@ -260,6 +260,11 @@
                 // the Testing dropdown (set silently, no change event, so no
                 // redundant Test Stop is sent)
                 $("#PanelTestPatternType").val("0");
+                // the LED panels page shows an upgrade banner for pre-v3
+                // configs; the save just wrote cfgVersion 3, so re-evaluate
+                if (typeof CheckForOldConfigVersion === 'function') {
+                    CheckForOldConfigVersion();
+                }
             }).fail(function () {
                 DialogError("Save Channel Output Config", "Save Failed");
             });

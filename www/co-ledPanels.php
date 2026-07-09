@@ -2809,6 +2809,10 @@
 
             // Also trigger the standard save warning
             DisplaySaveWarningIfRequired();
+        } else {
+            // config is current (e.g. Save just upgraded it to v3); drop the
+            // upgrade banner if it was showing
+            $('.configUpgradeWarning').remove();
         }
     }
 
