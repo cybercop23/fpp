@@ -780,19 +780,31 @@ int BBBMatrix::Init(Json::Value config) {
     int alignedLen = m_fullFrameLen + 8192;
     alignedLen -= (alignedLen & 0xFFF);
 
-    m_frames[0] = (uint8_t*)m_pru->ddr + m_dataOffset;
-    uint8_t* maxPtr = m_frames[0];
-    maxPtr += (m_pru->ddr_size - m_dataOffset);
-    m_numFrames = 0;
-    for (int x = 1; x < 8; x++) {
-        m_frames[x] = m_frames[x - 1] + alignedLen;
-        if (m_frames[x] < maxPtr) {
-            m_numFrames++;
+    // the frame flipping slots come from the shared DDR region allocator so
+    // string/serial outputs on the same region (e.g. the K8-B-Scroller runs
+    // BBB48String + BBBSerial + panels) cannot overlap us; the cape's
+    // dataOffset is kept as a floor for the historic layout.  4 slots is
+    // plenty (3 is the tear-free flip threshold) and leaving the rest of
+    // the region free lets the other outputs grow on a partial reload.
+    m_numFrames = 4;
+    uint8_t* framesBase = nullptr;
+    uint32_t framesPhys = 0;
+    while (m_numFrames > 0) {
+        framesBase = BBBPru::ddrAlloc("BBBMatrix", (size_t)alignedLen * m_numFrames, framesPhys, m_dataOffset);
+        if (framesBase) {
+            break;
         }
+        m_numFrames--;
     }
-    if ((m_frames[7] + alignedLen) < maxPtr) {
-        m_numFrames++;
+    if (!framesBase) {
+        LogErr(VB_CHANNELOUT, "BBBMatrix: no room in the PRU DDR region for even one frame\n");
+        WarningHolder::AddWarning(20, "BBBMatrix: no room in the PRU DDR region - reduce panel count/color depth or other outputs' buffers");
+        return 0;
     }
+    for (int x = 0; x < 8; x++) {
+        m_frames[x] = framesBase + (size_t)std::min(x, m_numFrames - 1) * alignedLen;
+    }
+    m_pruData->address_dma = framesPhys;
     m_curFrame = 0;
     if (PixelOverlayManager::INSTANCE.isAutoCreatePixelOverlayModels()) {
         std::string dd = "LED Panels";
@@ -833,6 +845,7 @@ int BBBMatrix::Init(Json::Value config) {
 
 int BBBMatrix::Close(void) {
     LogDebug(VB_CHANNELOUT, "BBBMatrix::Close()\n");
+    BBBPru::ddrRelease("BBBMatrix");
     if (!m_autoCreatedModelName.empty()) {
         PixelOverlayManager::INSTANCE.removeAutoOverlayModel(m_autoCreatedModelName);
     }
@@ -1116,8 +1129,7 @@ int BBBMatrix::SendData(unsigned char* channelData) {
     LogExcess(VB_CHANNELOUT, "BBBMatrix::SendData(%p)\n", channelData);
 
     // long long startTime = GetTime();
-    uint32_t addr = (m_pru->ddr_addr + m_dataOffset);
-    addr += (m_frames[m_curFrame] - m_frames[0]);
+    uint32_t addr = m_pru->ddr_addr + (uint32_t)(m_frames[m_curFrame] - m_pru->ddr);
     uint8_t* ptr = m_frames[m_curFrame];
     if (m_numFrames < 3) {
         // if we have less than 3 blocks, we cannot copy

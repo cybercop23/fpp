@@ -55,5 +55,7 @@ private:
     uint32_t m_curFrame;
 
     BBBPru* m_pru;
+    uint8_t* m_ddrArea = nullptr;
+    uint32_t m_ddrPhys = 0;
     BBBSerialData* m_serialData;
 };

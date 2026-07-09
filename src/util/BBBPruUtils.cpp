@@ -14,14 +14,18 @@
 
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <algorithm>
+#include <cstring>
 #include <elf.h>
 #include <fcntl.h>
 #include <filesystem>
 #include <inttypes.h>
+#include <map>
+#include <mutex>
 #include <stdint.h>
 #include <thread>
 #include <unistd.h>
-#include <cstring>
+#include <vector>
 
 #include "../common.h"
 #include "../log.h"
@@ -443,6 +447,49 @@ void BBBPru::memcpyToPRU(uint8_t* dst, uint8_t* src, size_t sz) {
 }
 #pragma GCC pop_options
 #endif
+
+static std::mutex ddrAllocLock;
+// owner -> (offset, size) within the reserved region
+static std::map<std::string, std::pair<size_t, size_t>> ddrAllocs;
+
+uint8_t* BBBPru::ddrAlloc(const std::string& owner, size_t size, uint32_t& physAddr, size_t minOffset) {
+    std::unique_lock<std::mutex> lock(ddrAllocLock);
+    if (ddr_mem_loc == nullptr) {
+        LogErr(VB_CHANNELOUT, "BBBPru::ddrAlloc(%s): DDR region not mapped yet\n", owner.c_str());
+        return nullptr;
+    }
+    size = (size + 4095) & ~(size_t)4095;
+    size_t pos = (minOffset + 4095) & ~(size_t)4095;
+    ddrAllocs.erase(owner);
+    std::vector<std::pair<size_t, size_t>> used;
+    for (auto& a : ddrAllocs) {
+        used.push_back(a.second);
+    }
+    std::sort(used.begin(), used.end());
+    for (auto& u : used) {
+        if (pos + size <= u.first) {
+            break;
+        }
+        if (u.first + u.second > pos) {
+            pos = u.first + u.second;
+        }
+    }
+    if (pos + size > ddr_filelen) {
+        LogErr(VB_CHANNELOUT, "BBBPru::ddrAlloc(%s): %zuKB does not fit in the PRU DDR region (%zuKB of %zuKB already in use)\n",
+               owner.c_str(), size / 1024, pos / 1024, ddr_filelen / 1024);
+        return nullptr;
+    }
+    ddrAllocs[owner] = { pos, size };
+    physAddr = ddr_phy_mem_loc + pos;
+    LogInfo(VB_CHANNELOUT, "BBBPru: DDR region: '%s' at 0x%zX-0x%zX (%zuKB)\n",
+            owner.c_str(), pos, pos + size, size / 1024);
+    return ddr_mem_loc + pos;
+}
+
+void BBBPru::ddrRelease(const std::string& owner) {
+    std::unique_lock<std::mutex> lock(ddrAllocLock);
+    ddrAllocs.erase(owner);
+}
 
 void BBBPru::stop() {
     if (!FAKE_PRU) {

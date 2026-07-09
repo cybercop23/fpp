@@ -89,6 +89,7 @@ BBShiftStringOutput::BBShiftStringOutput(unsigned int startChannel, unsigned int
  */
 BBShiftStringOutput::~BBShiftStringOutput() {
     LogDebug(VB_CHANNELOUT, "BBShiftStringOutput::~BBShiftStringOutput()\n");
+    BBBPru::ddrRelease("BBShiftString");
     m_pumpRunning = false;
     if (m_pumpThread.joinable()) {
         m_pumpThread.join();
@@ -318,20 +319,29 @@ int BBShiftStringOutput::Init(Json::Value config) {
     }
 
 #ifdef PLATFORM_BBB
-    // give each area two chunks (frame flipping) of DDR memory
-    uint8_t* start = m_pru0.pru ? m_pru0.pru->ddr : m_pru1.pru->ddr;
+    // give each area two chunks (frame flipping) of DDR memory, from the
+    // shared region allocator so other outputs on the region cannot
+    // overlap us; the FalconV5 packet area rides at the end
     m_pru0.frameSize = NUM_STRINGS_PER_PIN * MAX_PINS_PER_PRU * std::max(2400, m_pru0.maxStringLen);
-    m_pru0.curData = start;
     // leave a full memory page between to avoid conflicts
-    int offset = ((m_pru0.frameSize / 4096) + 2) * 4096;
-    m_pru0.lastData = m_pru0.curData + offset;
+    int offset0 = ((m_pru0.frameSize / 4096) + 2) * 4096;
+    m_pru1.frameSize = NUM_STRINGS_PER_PIN * MAX_PINS_PER_PRU * std::max(2400, m_pru1.maxStringLen);
+    int offset1 = ((m_pru1.frameSize / 4096) + 2) * 4096;
+    size_t v5Size = hasV5SR ? 128 * 1024 : 0;
+    uint32_t ddrPhys = 0;
+    uint8_t* start = BBBPru::ddrAlloc("BBShiftString", 2 * offset0 + 2 * offset1 + v5Size, ddrPhys);
+    if (!start) {
+        LogErr(VB_CHANNELOUT, "BBShiftString: no room in the PRU DDR region\n");
+        WarningHolder::AddWarning(20, "BBShiftString: no room in the PRU DDR region - reduce string lengths or other outputs' buffers");
+        return 0;
+    }
+    m_pru0.curData = start;
+    m_pru0.lastData = m_pru0.curData + offset0;
 
     m_pru0.formattedData = (uint8_t*)calloc(1, m_pru0.frameSize);
 
-    m_pru1.frameSize = NUM_STRINGS_PER_PIN * MAX_PINS_PER_PRU * std::max(2400, m_pru1.maxStringLen);
-    m_pru1.curData = m_pru0.lastData + offset;
-    offset = ((m_pru1.frameSize / 4096) + 2) * 4096;
-    m_pru1.lastData = m_pru1.curData + offset;
+    m_pru1.curData = m_pru0.lastData + offset0;
+    m_pru1.lastData = m_pru1.curData + offset1;
 
     m_pru1.formattedData = (uint8_t*)calloc(1, m_pru1.frameSize);
 #else
@@ -358,7 +368,7 @@ int BBShiftStringOutput::Init(Json::Value config) {
     }
     if (hasV5SR) {
 #ifdef PLATFORM_BBB
-        setupFalconV5Support(root, m_pru1.lastData + offset);
+        setupFalconV5Support(root, m_pru1.lastData + offset1);
 #else
         m_fv5PacketMem = (uint8_t*)calloc(1, 128 * 1024);
         setupFalconV5Support(root, m_fv5PacketMem);

@@ -45,6 +45,16 @@ public:
     size_t other_data_ram_size; // size in bytes of the PRU's data RAM
 
     uint8_t* ddr;      // PRU DMA address (in ARM space)
+
+    // Shared allocator for the PRU reserved DDR region.  Multiple outputs
+    // can coexist on it (K8-B-Scroller: BBB48String strings + BBBMatrix
+    // panels + BBBSerial) and historically used hardcoded offsets that
+    // could silently overlap.  Allocations are page aligned, first fit
+    // (partial config reloads free and re-request in arbitrary order), and
+    // named so a re-request by the same owner replaces its allocation.
+    // Returns nullptr (and logs) when the region cannot fit the request.
+    static uint8_t* ddrAlloc(const std::string& owner, size_t size, uint32_t& physAddr, size_t minOffset = 0);
+    static void ddrRelease(const std::string& owner);
     uint32_t ddr_addr; // PRU DMA address (in PRU space)
     size_t ddr_size;   // Size in bytes of the shared space
 

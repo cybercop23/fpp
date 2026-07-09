@@ -483,19 +483,29 @@ int BBB48StringOutput::Init(Json::Value config) {
         return 0;
     }
 
-    // give each area two chunks (frame flipping) of DDR memory
+    // give each area two chunks (frame flipping) of DDR memory, from the
+    // shared region allocator so other outputs on the region (BBBMatrix
+    // panels, BBBSerial - e.g. the K8-B-Scroller runs all three) cannot
+    // overlap us
     m_gpioData.frameSize =
         m_gpioData.gpioStringMap.size() * std::max(2400, m_gpioData.maxStringLen);
-    m_gpioData.curData = m_pru->ddr;
     // leave a full memory page between to avoid conflicts
     int offset = ((m_gpioData.frameSize / 4096) + 2) * 4096;
-    m_gpioData.lastData = m_gpioData.curData + offset;
-
     m_gpio0Data.frameSize = m_gpio0Data.gpioStringMap.size() *
                             std::max(2400, m_gpio0Data.maxStringLen);
+    int offset0 = ((m_gpio0Data.frameSize / 4096) + 2) * 4096;
+    uint32_t ddrPhys = 0;
+    uint8_t* ddrBase = BBBPru::ddrAlloc("BBB48String", 2 * offset + 2 * offset0, ddrPhys);
+    if (!ddrBase) {
+        LogErr(VB_CHANNELOUT, "BBB48String: no room in the PRU DDR region\n");
+        WarningHolder::AddWarning(20, "BBB48String: no room in the PRU DDR region - reduce string lengths or other outputs' buffers");
+        return 0;
+    }
+    m_gpioData.curData = ddrBase;
+    m_gpioData.lastData = m_gpioData.curData + offset;
+
     m_gpio0Data.curData = m_gpioData.lastData + offset;
-    offset = ((m_gpio0Data.frameSize / 4096) + 2) * 4096;
-    m_gpio0Data.lastData = m_gpio0Data.curData + offset;
+    m_gpio0Data.lastData = m_gpio0Data.curData + offset0;
 
     // flag the virtual strings whose channel map is a plain run so prepData
     // can walk the channel data directly instead of through the map
@@ -588,6 +598,7 @@ void BBB48StringOutput::StopPRU(bool wait) {
  */
 int BBB48StringOutput::Close(void) {
     LogDebug(VB_CHANNELOUT, "BBB48StringOutput::Close()\n");
+    BBBPru::ddrRelease("BBB48String");
     for (auto& n : m_autoCreatedModelNames) {
         PixelOverlayManager::INSTANCE.removeAutoOverlayModel(n);
     }

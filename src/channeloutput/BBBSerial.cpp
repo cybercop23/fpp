@@ -235,8 +235,13 @@ int BBBSerialOutput::Init(Json::Value config) {
 
     m_pru = new BBBPru(BBB_PRU);
     m_serialData = (BBBSerialData*)m_pru->data_ram;
-    size_t offset = m_pru->ddr_size - DDR_RESERVED;
-    m_serialData->address_dma = m_pru->ddr_addr + offset;
+    m_ddrArea = BBBPru::ddrAlloc("BBBSerial", DDR_RESERVED, m_ddrPhys);
+    if (!m_ddrArea) {
+        LogErr(VB_CHANNELOUT, "BBBSerial: no room in the PRU DDR region\n");
+        WarningHolder::AddWarning(20, "BBBSerial: no room in the PRU DDR region");
+        return 0;
+    }
+    m_serialData->address_dma = m_ddrPhys;
     m_serialData->command = 0;
     m_serialData->response = 0;
     if (!m_pru->run(pru_program)) {
@@ -301,6 +306,8 @@ int BBBSerialOutput::Close(void) {
         m_pru = NULL;
     }
 
+    BBBPru::ddrRelease("BBBSerial");
+    m_ddrArea = nullptr;
     LogDebug(VB_CHANNELOUT, "BBBSerialOutput::Close() done\n");
     return ThreadedChannelOutput::Close();
 }
@@ -365,11 +372,9 @@ int BBBSerialOutput::RawSendData(unsigned char* channelData) {
         uint8_t* const realout = (uint8_t*)m_pru->data_ram + 512;
         memcpy(realout, m_curData, sz);
 #else
-        size_t offset = m_pru->ddr_size - DDR_RESERVED;
-        uint8_t* const realout = (uint8_t*)m_pru->ddr + offset;
-        memcpy(realout, m_curData, sz);
+        memcpy(m_ddrArea, m_curData, sz);
 
-        m_serialData->address_dma = m_pru->ddr_addr + offset;
+        m_serialData->address_dma = m_ddrPhys;
 #endif
 
         uint8_t* tmp = m_lastData;
