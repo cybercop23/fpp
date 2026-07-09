@@ -49,6 +49,10 @@
 #define cpy_out_clr   r10
 #define cpy_out_clrset cpy_out_set
 #endif
+#define cpy_last0     r11    // per-bank change detection state
+#define cpy_last1     r12
+#define cpy_last2     r13
+#define cpy_last3     r16
 #define clocked_seq   r15    // output PRU's acknowledge counter
 #define publish_seq   r17    // publish record: sequence + 4 bank words
 #define pixel_data    r18
@@ -60,28 +64,52 @@
 
 #include "/tmp/PanelPinConfiguration.hp"
 
-; write one owned bank; no change detection - the state of the pins must
-; always match the data because the blank row clears them behind our back
-CPY_OUTPUT_GPIO .macro data, mask, gpio
+#ifdef OUTPUTBYROW
+; write one owned bank; no change detection - in by-row mode the blank row
+; clears the pins behind our back so the pin state must always be rewritten
+CPY_OUTPUT_GPIO .macro data, mask, gpio, last
     LDI32 cpy_gpio_base, gpio
     AND   cpy_out_set, data, mask
     XOR   cpy_out_clr, cpy_out_set, mask
     SBBO  &cpy_out_clrset, cpy_gpio_base, GPIO_SETCLRDATAOUT, 8
     .endm
+#else
+; write one owned bank with the same change detection / fast paths as the
+; output PRU's OUTPUT_GPIO; valid because nothing else ever changes these
+; pins in by-depth mode and the pin state persists across frames
+CPY_OUTPUT_GPIO .macro data, mask, gpio, last
+    .newblock
+    QBEQ DONECPYOUT?, data, last
+    MOV  last, data
+    LDI32 cpy_gpio_base, gpio
+    QBEQ SETALL?, data, mask
+    QBEQ CLEARALL?, data, 0
+        AND   cpy_out_set, data, mask
+        XOR   cpy_out_clr, cpy_out_set, mask
+        SBBO  &cpy_out_clrset, cpy_gpio_base, GPIO_SETCLRDATAOUT, 8
+        QBA DONECPYOUT?
+SETALL?:
+        SBBO  &data, cpy_gpio_base, GPIO_SETDATAOUT, 4
+        QBA DONECPYOUT?
+CLEARALL?:
+        SBBO  &mask, cpy_gpio_base, GPIO_CLRDATAOUT, 4
+DONECPYOUT?:
+    .endm
+#endif
 
 ; write all the banks this PRU owns for one pixel
 CPY_DO_BANKS .macro d0, d1, d2, d3
 #ifdef CPY_OWNS_GPIO0
-    CPY_OUTPUT_GPIO d0, gpio0_led_mask, GPIO0
+    CPY_OUTPUT_GPIO d0, gpio0_led_mask, GPIO0, cpy_last0
 #endif
 #ifdef CPY_OWNS_GPIO1
-    CPY_OUTPUT_GPIO d1, gpio1_led_mask, GPIO1
+    CPY_OUTPUT_GPIO d1, gpio1_led_mask, GPIO1, cpy_last1
 #endif
 #ifdef CPY_OWNS_GPIO2
-    CPY_OUTPUT_GPIO d2, gpio2_led_mask, GPIO2
+    CPY_OUTPUT_GPIO d2, gpio2_led_mask, GPIO2, cpy_last2
 #endif
 #ifdef CPY_OWNS_GPIO3
-    CPY_OUTPUT_GPIO d3, gpio3_led_mask, GPIO3
+    CPY_OUTPUT_GPIO d3, gpio3_led_mask, GPIO3, cpy_last3
 #endif
     .endm
 
@@ -109,6 +137,10 @@ CPY_DO_BANKS .macro d0, d1, d2, d3
     LDI     gpio1_led_mask, 0
     LDI     gpio2_led_mask, 0
     LDI     gpio3_led_mask, 0
+    LDI     cpy_last0, 0
+    LDI     cpy_last1, 0
+    LDI     cpy_last2, 0
+    LDI     cpy_last3, 0
 #include "FalconMatrixConfigPins.asm"
 
     ; the scratchpad survives restarts - clear the control record so a
@@ -143,8 +175,8 @@ WAITA:
     ; anything else means the frame restarted while we were blind in the
     ; LBBO above (the park pulse is short and the frame address may be
     ; unchanged on a re-display) - resync from the frame base
-    SUB     r16, publish_seq, 1
-    QBNE    RESYNC, clocked_seq, r16
+    SUB     r0, publish_seq, 1
+    QBNE    RESYNC, clocked_seq, r0
     QBA     WAITA
 DOPIXA:
     CPY_DO_BANKS r18, r19, r20, r21
@@ -156,8 +188,8 @@ WAITB:
     XIN     10, &ctrl_word, 8
     QBNE    CTRL_CHANGE, ctrl_word, frame_addr
     QBEQ    DOPIXB, clocked_seq, publish_seq
-    SUB     r16, publish_seq, 1
-    QBNE    RESYNC, clocked_seq, r16
+    SUB     r0, publish_seq, 1
+    QBNE    RESYNC, clocked_seq, r0
     QBA     WAITB
 DOPIXB:
     CPY_DO_BANKS r22, r23, r24, r25
