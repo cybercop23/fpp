@@ -27,7 +27,11 @@ public:
     BBBPru(int pru, bool mapShared = false, bool mapOther = false);
     ~BBBPru();
 
-    bool run(const std::string& program);
+    // clearSharedMems: clear the shared RAM and (if mapped) the other
+    // PRU's data RAM after the firmware load.  Pass false when another
+    // driver owns the other PRU (a shared panels + strings cape) so a
+    // restart of this output cannot wipe its ring or command state.
+    bool run(const std::string& program, bool clearSharedMems = true);
     void stop();
 
     void clearPRUMem(uint8_t* ptr, size_t sz);

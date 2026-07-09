@@ -125,6 +125,13 @@ private:
     bool m_pwmDirectRow = false;
     // FM6373: next config sequence word for the per-frame rotating refresh
     int m_pwmSeqIdx = 0;
+    // the pins this cape muxed to the PRU (only these are released on
+    // Close - a combo cape may leave pins for another driver to own)
+    std::vector<std::string> m_configuredPins;
+    std::string m_oePin = "P1-36";
+    // sharing the PRUSS with a string driver on the other PRU: single PRU,
+    // SPLIT1 ring, and never clear the shared RAM or the other PRU's memory
+    bool m_sharedPRUSS = false;
     int m_longestChain = 0;
     int m_invertedData = 0;
     int m_brightness = 10;

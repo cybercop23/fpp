@@ -141,8 +141,9 @@ static const std::vector<std::string> PRU0_PWM_PINS = {
 
 constexpr int MAX_OUTPUTS = 16;
 
-// how much the pump thread copies into the shared memory ring at a time;
-// a multiple of 48 and 8 that divides SMEM_RING_DEFAULT_SIZE evenly
+// how much the pump thread copies into the shared memory ring at a time; a
+// multiple of 48 and 8 (the ring write splits blocks across the wrap point,
+// so it does not need to divide the ring size evenly)
 constexpr uint32_t PUMP_BLOCK_SIZE = 3072;
 
 BBShiftPanelOutput::BBShiftPanelOutput(unsigned int startChannel, unsigned int channelCount) :
@@ -276,17 +277,38 @@ bool BBShiftPanelOutput::isPWMPanel() {
 int BBShiftPanelOutput::Init(Json::Value config) {
     LogDebug(VB_CHANNELOUT, "BBShiftPanelOutput::Init(JSON)\n");
 
-    for (auto& pinName : PRU_PINS) {
-        const PinCapabilities& pin = PinCapabilities::getPinByName(pinName);
-        pin.configPin("pru1out", true);
-    }
-
     Json::Value root;
     std::string subType = config["configName"].asString();
     int outputs = CapeUtils::INSTANCE.getLicensedOutputs();
     if (!CapeUtils::INSTANCE.getPanelConfig(subType, root)) {
         LogErr(VB_CHANNELOUT, "Could not read panel pin configuration for %s\n", subType.c_str());
         return 0;
+    }
+
+    // Mux only the pins the cape actually uses: the named control pins plus
+    // the data pins its outputs reference.  On the AM62x every PRU1 pin can
+    // alternatively be muxed to PRU0, so a cape that lists fewer outputs
+    // leaves the unreferenced data pins available for another driver (e.g.
+    // BBShiftString on the other PRU) - the PRU still writes all 8 data
+    // bits of r30, writes to unmuxed bits just never reach a pin.  Capes
+    // without a controls section get the full historical pin set.
+    if (root.isMember("controls") && root["controls"].size()) {
+        std::set<std::string> pinNames;
+        for (auto const& name : root["controls"].getMemberNames()) {
+            pinNames.insert(root["controls"][name]["pin"].asString());
+        }
+        for (int i = 0; i < (int)root["outputs"].size(); i++) {
+            pinNames.insert(root["outputs"][i]["pin"].asString());
+        }
+        m_configuredPins.assign(pinNames.begin(), pinNames.end());
+    } else {
+        m_configuredPins = PRU_PINS;
+    }
+    for (auto& pinName : m_configuredPins) {
+        PinCapabilities::getPinByName(pinName).configPin("pru1out", true);
+    }
+    if (root["controls"].isMember("oe")) {
+        m_oePin = root["controls"]["oe"]["pin"].asString();
     }
     m_numOutputs = root["outputs"].size();
     if (m_numOutputs > MAX_OUTPUTS) {
@@ -312,7 +334,7 @@ int BBShiftPanelOutput::Init(Json::Value config) {
     // singlePRU = true;
     if (!singlePRU) {
         // if not using a single PRU, then we need to change the OE pin to the other PRU
-        const PinCapabilities& pin = PinCapabilities::getPinByName("P1-36");
+        const PinCapabilities& pin = PinCapabilities::getPinByName(m_oePin);
         pin.configPin("pru0out", true);
     }
     m_panelWidth = config["panelWidth"].asInt();
@@ -342,6 +364,20 @@ int BBShiftPanelOutput::Init(Json::Value config) {
     } else if (m_panelType == PANEL_TYPE_FM6373) {
         m_addressingMode = ADDRESSING_MODE_FM6373;
         m_panelType = 0;
+    }
+
+    // A combo cape shares the PRUSS with a string driver on the other PRU:
+    // panels run single-PRU with the smaller split shared-memory ring and
+    // must not touch anything the other driver owns.  (The flag is also
+    // honored from the output config for bench testing.)
+    m_sharedPRUSS = root["sharedPRUSS"].asBool() || config["sharedPRUSS"].asBool();
+    if (m_sharedPRUSS) {
+        if (isPWMPanel()) {
+            LogErr(VB_CHANNELOUT, "PWM panel types require both PRUs and cannot be used on a shared panels+strings cape\n");
+            WarningHolder::AddWarning("PWM panel types (FM6363C/FM6353/FM6373) cannot be used on a shared panels+strings cape");
+            return 0;
+        }
+        singlePRU = true;
     }
 
     if (isPWMPanel()) {
@@ -515,10 +551,12 @@ int BBShiftPanelOutput::StartPRU() {
         }
     } else {
         if (singlePRU) {
+            // on a shared cape the string driver owns the shared RAM half
+            // and the other PRU - never clear them from here
             if (m_numOutputSlots == 16) {
-                started &= pru->run("/opt/fpp/src/non-gpl/BBShiftPanel/BBShiftPanel_single_16.out");
+                started &= pru->run("/opt/fpp/src/non-gpl/BBShiftPanel/BBShiftPanel_single_16.out", !m_sharedPRUSS);
             } else {
-                started &= pru->run("/opt/fpp/src/non-gpl/BBShiftPanel/BBShiftPanel_single.out");
+                started &= pru->run("/opt/fpp/src/non-gpl/BBShiftPanel/BBShiftPanel_single.out", !m_sharedPRUSS);
             }
         } else {
             if (m_numOutputSlots == 16) {
@@ -551,10 +589,15 @@ int BBShiftPanelOutput::StartPRU() {
     // Both panel types are fed through a ring in the PRU shared memory (see
     // SMEMRing.hp); attach() must happen after run() since the firmware load
     // clears the PRU memories (and writes while the PRUSS is powered down
-    // are silently dropped).  For now the panels get the entire shared RAM;
-    // when panels later share the PRUSS with a pixel string program on the
-    // other PRU this becomes the SMEM_RING_SPLIT configuration.
-    m_ring.attach(pru, SMEM_RING_DEFAULT_BASE, SMEM_RING_DEFAULT_SIZE, false);
+    // are silently dropped).  A sole owner gets the entire shared RAM; on a
+    // shared cape the panels are the PRU1 consumer and take the SPLIT1 half
+    // (BBShiftString's PRU0 program uses SPLIT0, matching its existing
+    // per-PRU split assignment).
+    if (m_sharedPRUSS) {
+        m_ring.attach(pru, SMEM_RING_SPLIT1_BASE, SMEM_RING_SPLIT_SIZE, false);
+    } else {
+        m_ring.attach(pru, SMEM_RING_DEFAULT_BASE, SMEM_RING_DEFAULT_SIZE, false);
+    }
     uint32_t bytesPerPixel = (m_numOutputSlots * 6 * 2) / 16;
     uint32_t strideLen = rowLen * bytesPerPixel;
     uint32_t numStride = m_strideSchedule.empty() ? (numRows * m_colorDepth) : (m_strideSchedule.size() * numRows);
@@ -682,13 +725,15 @@ int BBShiftPanelOutput::Close(void) {
     if (!m_autoCreatedModelName.empty()) {
         PixelOverlayManager::INSTANCE.removeAutoOverlayModel(m_autoCreatedModelName);
     }
-    for (auto& pinName : PRU_PINS) {
+    // release only the pins this cape muxed; other drivers (a future
+    // panels + strings combo cape) may own the rest
+    for (auto& pinName : m_configuredPins) {
         const PinCapabilities& pin = PinCapabilities::getPinByName(pinName);
         pin.releasePin();
     }
     if (!singlePRU) {
         // if not using a single PRU, then we need to change the OE pin to the other PRU
-        const PinCapabilities& pin = PinCapabilities::getPinByName("P1-36");
+        const PinCapabilities& pin = PinCapabilities::getPinByName(m_oePin);
         pin.releasePin();
     }
     if (isPWMPanel()) {

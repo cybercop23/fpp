@@ -175,6 +175,19 @@ private:
     std::vector<std::vector<uint8_t>> m_vsAffine;
     std::map<std::string, std::string> m_usedPins;
 
+    // per-PRU pin sets; the platform defaults unless the cape overrides
+    // them by name (combo capes with nonstandard pinouts).  The cape only
+    // carries header pin names - the r30 bit numbers are resolved here
+    // from the platform pin table and published to the firmware at runtime
+    std::vector<std::string> m_dataPins[2];
+    std::vector<std::string> m_ctrlPins[2];
+    bool m_pinNamesOverridden[2] = { false, false };
+    int m_clockBit[2] = { 0, 0 };
+    int m_latchBit[2] = { 0, 0 };
+    // sharing the PRUSS with a panel driver on the other PRU: never clear
+    // the shared RAM or the other PRU's memory, no FalconV5 listeners
+    bool m_sharedPRUSS = false;
+
     uint32_t m_curFrame = 0;
     uint32_t m_licensedOutputs = 0;
 

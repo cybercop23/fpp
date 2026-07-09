@@ -78,6 +78,20 @@ static const std::string PRU1_ENABLE_PIN = "P2-22";
 static const std::vector<std::string> PRU_CTRL_PINS[2] = { PRU0_CTRL_PINS, PRU1_CTRL_PINS };
 static const std::vector<std::string> PRU_DATA_PINS[2] = { PRU0_DATA_PINS, PRU1_DATA_PINS };
 
+// r30 bit numbers of the clock/latch pins, matching the compile-time
+// defaults in BBShiftString.asm (CONTROL_BIT_BASE + CLOCK_PIN/LATCH_PIN);
+// a cape's pruPinConfig clockPin/latchPin names override them and the
+// resolved values are published to the firmware at PINCFG_OFFSET
+#ifdef PLATFORM_BBB
+static const int DEFAULT_CLOCK_BIT[2] = { 15, 10 };
+static const int DEFAULT_LATCH_BIT[2] = { 14, 11 };
+#else
+static const int DEFAULT_CLOCK_BIT[2] = { 19, 19 };
+static const int DEFAULT_LATCH_BIT[2] = { 16, 16 };
+#endif
+// must match PINCFG_OFFSET in BBShiftString.asm
+#define PINCFG_OFFSET 0x1FE8
+
 BBShiftStringOutput::BBShiftStringOutput(unsigned int startChannel, unsigned int channelCount) :
     ChannelOutput(startChannel, channelCount) {
     LogDebug(VB_CHANNELOUT, "BBShiftStringOutput::BBShiftStringOutput(%u, %u)\n",
@@ -223,6 +237,59 @@ int BBShiftStringOutput::Init(Json::Value config) {
         return 0;
     }
 
+    // A combo cape shares the PRUSS with a panel driver: this side must not
+    // clear the shared RAM or the other PRU's memory on a restart, and the
+    // FalconV5 listener (a PRU0 program whose capture area overlaps the
+    // panel ring) is unavailable.  (Also honored from the output config for
+    // bench testing.)
+    m_sharedPRUSS = root["sharedPRUSS"].asBool() || config["sharedPRUSS"].asBool();
+
+    // Default pin sets, overridable per PRU by the cape for combo pinouts.
+    // The cape only ever names header pins (P2-02 style); the mapping to
+    // r30 bit numbers happens here via the per-platform pin table, so a new
+    // SBC in the same form factor can reuse the same capes and eeproms
+    // (exactly how the PocketBeagle2 picked up PocketBeagle1 capes).  The
+    // resolved clock/latch bits are published to the firmware at runtime.
+    for (int p = 0; p < 2; p++) {
+        m_dataPins[p] = PRU_DATA_PINS[p];
+        m_ctrlPins[p] = PRU_CTRL_PINS[p];
+        m_clockBit[p] = DEFAULT_CLOCK_BIT[p];
+        m_latchBit[p] = DEFAULT_LATCH_BIT[p];
+        m_pinNamesOverridden[p] = false;
+    }
+    for (auto const& pc : root["pruPinConfig"]) {
+        int p = pc["pru"].asInt();
+        if (p < 0 || p > 1) {
+            continue;
+        }
+        if (pc.isMember("dataPins")) {
+            m_dataPins[p].clear();
+            for (auto const& pin : pc["dataPins"]) {
+                m_dataPins[p].push_back(pin.asString());
+            }
+            m_pinNamesOverridden[p] = true;
+        }
+        m_ctrlPins[p].clear();
+        for (auto const& nm : { "clockPin", "latchPin" }) {
+            if (pc.isMember(nm)) {
+                std::string pinName = pc[nm].asString();
+                m_ctrlPins[p].push_back(pinName);
+                const BBBPinCapabilities* bp = (const BBBPinCapabilities*)(PinCapabilities::getPinByName(pinName).ptr());
+                // pruPin() returns uint8_t; the unmapped value (-1) needs
+                // the sign restored
+                int bit = bp ? (int8_t)bp->pruPin(p) : -1;
+                if (bit < 0) {
+                    LogErr(VB_CHANNELOUT, "%s %s has no known PRU%d r30 bit\n", nm, pinName.c_str(), p);
+                    WarningHolder::AddWarning("BBShiftString: unusable control pin " + pinName);
+                } else if (strcmp(nm, "clockPin") == 0) {
+                    m_clockBit[p] = bit;
+                } else {
+                    m_latchBit[p] = bit;
+                }
+            }
+        }
+    }
+
     int maxStringLen = 0;
     bool hasV5SR = false;
     for (int i = 0; i < config["outputs"].size(); i++) {
@@ -267,14 +334,32 @@ int BBShiftStringOutput::Init(Json::Value config) {
             int pru = root["outputs"][x]["pru"].asInt();
             int pin = root["outputs"][x]["pin"].asInt();
             int pinIdx = root["outputs"][x]["index"].asInt();
-            for (auto& a : PRU_CTRL_PINS[pru]) {
+            for (auto& a : m_ctrlPins[pru]) {
                 if (m_usedPins.find(a) == m_usedPins.end()) {
                     m_usedPins[a] = "pru" + std::to_string(pru) + "out";
                 }
             }
-            const std::string& pinName = PRU_DATA_PINS[pru][pin];
+            if (pin >= (int)m_dataPins[pru].size()) {
+                LogErr(VB_CHANNELOUT, "Output %d references pru %d data pin %d but only %d exist\n",
+                       x, pru, pin, (int)m_dataPins[pru].size());
+                continue;
+            }
+            const std::string& pinName = m_dataPins[pru][pin];
             if (m_usedPins.find(pinName) == m_usedPins.end()) {
                 m_usedPins[pinName] = "pru" + std::to_string(pru) + "out";
+            }
+            // with the default pin sets the cape's pin index is the r30 bit;
+            // cape-named pins resolve through the platform pin table
+            int bit = pin;
+            if (m_pinNamesOverridden[pru]) {
+                const BBBPinCapabilities* bp = (const BBBPinCapabilities*)(PinCapabilities::getPinByName(pinName).ptr());
+                bit = bp ? (int8_t)bp->pruPin(pru) : -1;
+                if (bit < 0 || bit >= MAX_PINS_PER_PRU) {
+                    LogErr(VB_CHANNELOUT, "Data pin %s maps to PRU%d r30 bit %d; the firmware supports bits 0-%d\n",
+                           pinName.c_str(), pru, bit, MAX_PINS_PER_PRU - 1);
+                    WarningHolder::AddWarning("BBShiftString: unusable data pin " + pinName);
+                    continue;
+                }
             }
 
             // printf("pru: %d  pin: %d  idx: %d\n", pru, pin, pinIdx);
@@ -296,10 +381,10 @@ int BBShiftStringOutput::Init(Json::Value config) {
             }
 
             if (pru == 0) {
-                m_pru0.stringMap[pin][pinIdx] = x;
+                m_pru0.stringMap[bit][pinIdx] = x;
                 m_pru0.maxStringLen = std::max(m_pru0.maxStringLen, m_strings[x]->m_outputChannels);
             } else {
-                m_pru1.stringMap[pin][pinIdx] = x;
+                m_pru1.stringMap[bit][pinIdx] = x;
                 m_pru1.maxStringLen = std::max(m_pru1.maxStringLen, m_strings[x]->m_outputChannels);
             }
             if (curRecPort >= 0) {
@@ -361,6 +446,15 @@ int BBShiftStringOutput::Init(Json::Value config) {
 #endif
 
     supportsV5Listeners = root.isMember("falconV5ListenerConfig");
+    if (m_sharedPRUSS && (supportsV5Listeners || hasV5SR)) {
+        // the listener is a PRU0 program and its capture area overlaps the
+        // panel ring half of the shared RAM
+        if (hasV5SR) {
+            WarningHolder::AddWarning("FalconV5 receivers are not supported on a shared panels+strings cape");
+        }
+        supportsV5Listeners = false;
+        hasV5SR = false;
+    }
     if (supportsV5Listeners) {
         // if the cape supports v5 listeners, the enable pin needs to be
         // configured or data won't be sent on port1 of each receiver
@@ -397,6 +491,17 @@ int BBShiftStringOutput::Init(Json::Value config) {
     return retVal;
 }
 
+// Publish the resolved clock/latch r30 bit numbers to the firmware (see
+// PINCFG_OFFSET in BBShiftString.asm; the 0xA5 marker distinguishes a real
+// config from cleared memory).  Must land after run() - the firmware load
+// clears the data RAM - and the firmware rereads it while waiting for the
+// first frame command.
+static void publishPinConfig(BBBPru* pru, int clockBit, int latchBit) {
+    uint32_t v = (uint32_t)(clockBit & 0xFF) | (((uint32_t)(latchBit & 0xFF)) << 8) | (0xA5u << 24);
+    *(volatile uint32_t*)(pru->data_ram + PINCFG_OFFSET) = v;
+    __sync_synchronize();
+}
+
 int BBShiftStringOutput::StartPRU() {
     m_curFrame = 0;
     for (auto& a : m_usedPins) {
@@ -411,11 +516,12 @@ int BBShiftStringOutput::StartPRU() {
     if (m_pru1.maxStringLen) {
         m_pru1.pru = new BBBPru(1, mapShared, false);
         m_pru1.pruData = (BBShiftStringData*)m_pru1.pru->data_ram;
-        if (!m_pru1.pru->run("/opt/fpp/src/non-gpl/BBShiftString/BBShiftString_pru1.out")) {
+        if (!m_pru1.pru->run("/opt/fpp/src/non-gpl/BBShiftString/BBShiftString_pru1.out", !m_sharedPRUSS)) {
             LogErr(VB_CHANNELOUT, "BBShiftString: Unable to start PRU1. May require a reboot.\n");
             WarningHolder::AddWarning("BBShiftString: Unable to start PRU1. May require a reboot.");
             return 0;
         }
+        publishPinConfig(m_pru1.pru, m_clockBit[1], m_latchBit[1]);
 #ifndef PLATFORM_BBB
         // the firmware polls for the ring location; the upper half of the
         // shared RAM keeps clear of the FalconV5 listener capture area
@@ -427,11 +533,12 @@ int BBShiftStringOutput::StartPRU() {
     if (m_pru0.maxStringLen) {
         m_pru0.pru = new BBBPru(0, mapShared, false);
         m_pru0.pruData = (BBShiftStringData*)m_pru0.pru->data_ram;
-        if (!m_pru0.pru->run("/opt/fpp/src/non-gpl/BBShiftString/BBShiftString_pru0.out")) {
+        if (!m_pru0.pru->run("/opt/fpp/src/non-gpl/BBShiftString/BBShiftString_pru0.out", !m_sharedPRUSS)) {
             LogErr(VB_CHANNELOUT, "BBShiftString: Unable to start PRU0. May require a reboot.\n");
             WarningHolder::AddWarning("BBShiftString: Unable to start PRU0. May require a reboot.");
             return 0;
         }
+        publishPinConfig(m_pru0.pru, m_clockBit[0], m_latchBit[0]);
 #ifndef PLATFORM_BBB
         m_pru0.ring.attach(m_pru0.pru, SMEM_RING_SPLIT0_BASE, SMEM_RING_SPLIT_SIZE, true);
 #endif

@@ -42,25 +42,76 @@
 #define RUNNING_ON_PRU1
 #endif
 
+// Pin positions within r30.  The clock and latch positions are only the
+// power-on defaults: the ARM resolves the cape's pin names to r30 bit
+// numbers and publishes them at PINCFG_OFFSET (see BBShiftString.cpp), so
+// one firmware serves any pinout on a platform.  The data byte and the
+// (rarely used) enable pin remain compile time; both can still be
+// overridden from the build command line if a pinout ever forces it.
 #ifdef AM33XX
+#ifndef CONTROL_BYTE
 #define CONTROL_BYTE r30.b1
+#endif
+#ifndef DATA_BYTE
 #define DATA_BYTE r30.b0
+#endif
 #ifdef RUNNING_ON_PRU1
+#ifndef CLOCK_PIN
 #define CLOCK_PIN 2
+#endif
+#ifndef LATCH_PIN
 #define LATCH_PIN 3
-#define ENABLE_PIN 0
-#else
-#define CLOCK_PIN 7
-#define LATCH_PIN 6
+#endif
+#ifndef ENABLE_PIN
 #define ENABLE_PIN 0
 #endif
 #else
+#ifndef CLOCK_PIN
+#define CLOCK_PIN 7
+#endif
+#ifndef LATCH_PIN
+#define LATCH_PIN 6
+#endif
+#ifndef ENABLE_PIN
+#define ENABLE_PIN 0
+#endif
+#endif
+#else
+#ifndef CONTROL_BYTE
 #define CONTROL_BYTE r30.b2
+#endif
+#ifndef DATA_BYTE
 #define DATA_BYTE r30.b0
+#endif
+#ifndef CLOCK_PIN
 #define CLOCK_PIN 3
+#endif
+#ifndef LATCH_PIN
 #define LATCH_PIN 0
+#endif
+#ifndef ENABLE_PIN
 #define ENABLE_PIN 2
 #endif
+#endif
+
+// numeric r30 bit of CONTROL_BYTE's bit 0, to convert the byte-relative
+// defaults above into the full-register bit numbers the toggles use
+#ifndef CONTROL_BIT_BASE
+#ifdef AM33XX
+#define CONTROL_BIT_BASE 8
+#else
+#define CONTROL_BIT_BASE 16
+#endif
+#endif
+
+// Runtime clock/latch positions: full r30 bit numbers, published by the ARM
+// as a u32 at PINCFG_OFFSET in our data RAM ({clock, latch, 0, 0xA5}); the
+// 0xA5 marker distinguishes a real config from cleared memory.  Loaded in
+// the command wait loop, so a value written any time before the first frame
+// command takes effect.  r29.b2/b3 are free (cur_data only uses r29.w0).
+#define PINCFG_OFFSET 0x1FE8
+#define clockBit r29.b2
+#define latchBit r29.b3
 
 ENABLE_SEND .macro
     SET CONTROL_BYTE, CONTROL_BYTE, ENABLE_PIN
@@ -169,16 +220,16 @@ UNPRELOAD_DATA .macro dataAddress
 
 
 TOGGLE_CLOCK .macro
-    SET CONTROL_BYTE, CONTROL_BYTE, CLOCK_PIN
+    SET r30, r30, clockBit
     NOP
-    CLR CONTROL_BYTE, CONTROL_BYTE, CLOCK_PIN
+    CLR r30, r30, clockBit
     //NOP
     .endm
 
 TOGGLE_LATCH .macro
-    SET CONTROL_BYTE, CONTROL_BYTE, LATCH_PIN
+    SET r30, r30, latchBit
     NOP
-    CLR CONTROL_BYTE, CONTROL_BYTE, LATCH_PIN
+    CLR r30, r30, latchBit
     NOP
     .endm
 
@@ -340,6 +391,11 @@ RINGCFGWAIT:
 	LDI 	r2, 0x1
 	SBCO	&r2, CONST_PRUDRAM, 8, 4
 
+    // clock/latch default to the compiled positions until the ARM publishes
+    // the resolved ones
+    LDI     clockBit, (CONTROL_BIT_BASE + CLOCK_PIN)
+    LDI     latchBit, (CONTROL_BIT_BASE + LATCH_PIN)
+
     // Make sure the data address and command are cleared at start
 	LDI 	r1, 0x0
 	LDI 	r2, 0x0
@@ -352,6 +408,15 @@ RINGCFGWAIT:
 _LOOP:
     //make sure the clock starts
     RESET_PRU_CLOCK tmpReg1, tmpReg2
+
+    // pick up the runtime clock/latch bit numbers if the ARM has published
+    // them (reread while idle so they always apply before the first frame)
+    LDI     tmpReg1, PINCFG_OFFSET
+    LBCO    &tmpReg2, CONST_PRUDRAM, tmpReg1, 4
+    QBNE    NOPINCFG, tmpReg2.b3, 0xA5
+    MOV     clockBit, tmpReg2.b0
+    MOV     latchBit, tmpReg2.b1
+NOPINCFG:
 
 	// Load the pointer to the buffer from PRU DRAM into data_addr, packet addr and the
 	// start command into commandReg

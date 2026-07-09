@@ -28,6 +28,13 @@ non-gpl/BBShiftString/BBShiftString_pru0.out: non-gpl/BBShiftString/BBShiftStrin
 	clpru -v3 -DAM62X -z /opt/fpp/src/pru/AM62x_PRU0.cmd -o "non-gpl/BBShiftString/BBShiftString_pru0.out" "/tmp/BBShiftString_pru0.obj" -i/usr/share/ti/cgt-pru/lib -i/usr/share/ti/cgt-pru/include --library=libc.a
 	@rm "/tmp/BBShiftString_pru0.asm" "/tmp/BBShiftString_pru0.obj"
 
+# Nonstandard pinouts (e.g. a shared panels + strings cape) need no firmware
+# variant: the cape names its pins in pruPinConfig, the C++ resolves them to
+# r30 bit numbers via the platform pin table, the data bits map at prep time
+# and the clock/latch bits are published to the firmware at runtime.  Only
+# if a pinout ever forces the data bits out of r30.b0 would a variant with
+# -DDATA_BYTE=r30.bN be needed here.
+
 else
 
 non-gpl/BBShiftString/BBShiftString_pru1.out: non-gpl/BBShiftString/BBShiftString.asm

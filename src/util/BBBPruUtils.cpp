@@ -366,7 +366,7 @@ BBBPru::~BBBPru() {
     }
 }
 
-bool BBBPru::run(const std::string& program) {
+bool BBBPru::run(const std::string& program, bool clearSharedMems) {
     LogDebug(VB_CHANNELOUT, "BBBPru[%d]::run(%s)\n", pru_num, program.c_str());
 
     bool enabled = true;
@@ -381,11 +381,13 @@ bool BBBPru::run(const std::string& program) {
         CopyFileContents(program, "/lib/firmware/" + FIRMWARE_PREFIX + "-pru" + std::to_string(pru_num) + "-fw");
     }
     clearPRUMem(data_ram, data_ram_size);
-    if (shared_ram) {
-        clearPRUMem(shared_ram, shared_ram_size);
-    }
-    if (other_data_ram) {
-        clearPRUMem(other_data_ram, other_data_ram_size);
+    if (clearSharedMems) {
+        if (shared_ram) {
+            clearPRUMem(shared_ram, shared_ram_size);
+        }
+        if (other_data_ram) {
+            clearPRUMem(other_data_ram, other_data_ram_size);
+        }
     }
     /*
     printf("DL:  %p\n", data_ram);
