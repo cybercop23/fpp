@@ -27,6 +27,7 @@
 #include "../Warnings.h"
 #include "../common.h"
 #include "../log.h"
+#include "../settings.h"
 
 #include "PanelInterleaveHandler.h"
 #include "overlays/PixelOverlay.h"
@@ -562,10 +563,40 @@ int BBBMatrix::Init(Json::Value config) {
             }
         }
         outputFile << "\n";
+#ifdef PLATFORM_BBB
+        // Dual PRU split output: the copy PRU writes up to two of the data
+        // GPIO banks itself (see FalconMatrixPRUCpy.asm), roughly a 1.35x
+        // higher pixel clock.  The controls bank and GPIO0 (which has
+        // multi-microsecond write-landing jitter on the L4_WKUP bus) stay
+        // on the output PRU so their behavior is unchanged.  AM335x only.
+        if (!m_singlePRU && !root.get("noSplitOutput", false).asBool() && getSettingInt("BBBMatrixNoSplitOutput", 0) == 0) {
+            int cnt = 0;
+            for (int x = 3; x > 0; x--) { // never GPIO0
+                if (minPort[x] != 99 && x != controlGpio && cnt < 2) {
+                    m_splitCpyBanks[x] = true;
+                    cnt++;
+                }
+            }
+            m_splitOutput = cnt > 0;
+        }
+        if (m_splitOutput) {
+            LogDebug(VB_CHANNELOUT, "BBBMatrix: split output, copy PRU owns GPIO banks:%s%s%s\n",
+                     m_splitCpyBanks[1] ? " 1" : "", m_splitCpyBanks[2] ? " 2" : "", m_splitCpyBanks[3] ? " 3" : "");
+        }
+#endif
         for (int x = 0; x < 4; x++) {
             if (minPort[x] != 99) {
                 if (x == controlGpio) {
                     outputFile << "#define OUTPUT_GPIO_" << std::to_string(x) << "(a, b, c, d) OUTPUT_GPIO_FORCE_CLEAR a, b, c, d\n";
+                } else if (m_splitCpyBanks[x]) {
+                    // in split mode the copy PRU owns this bank; the output
+                    // PRU compiles the bank's writes out
+                    outputFile << "#if defined(SPLIT_GPIO) && !defined(IN_CPY_PRU)\n";
+                    outputFile << "#define OUTPUT_GPIO_" << std::to_string(x) << "(a, b, c, d)\n";
+                    outputFile << "#else\n";
+                    outputFile << "#define OUTPUT_GPIO_" << std::to_string(x) << "(a, b, c, d) OUTPUT_GPIO a, b, c, d\n";
+                    outputFile << "#endif\n";
+                    outputFile << "#define CPY_OWNS_GPIO" << std::to_string(x) << "\n";
                 } else {
                     outputFile << "#define OUTPUT_GPIO_" << std::to_string(x) << "(a, b, c, d) OUTPUT_GPIO a, b, c, d\n";
                 }
@@ -587,6 +618,9 @@ int BBBMatrix::Init(Json::Value config) {
     char buf[200];
     if (m_singlePRU) {
         compileArgs.push_back("-DSINGLEPRU");
+    }
+    if (m_splitOutput) {
+        compileArgs.push_back("-DSPLIT_GPIO");
     }
     snprintf(buf, sizeof(buf), "-DRUNNING_ON_PRU%d", pru);
     compileArgs.push_back(buf);

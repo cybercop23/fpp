@@ -11,6 +11,26 @@ ROW_LOOP:
 
     LDI pixelCount, ROW_LEN
         .newblock
+#ifdef SPLIT_GPIO
+NEXT_PIXEL:
+        ; The copy PRU has already written its banks for this pixel; the
+        ; publish leaves this PRU's bank words in r18-r21
+        WAIT_SPLIT_DATA
+
+        CLOCK_LO
+        OUTPUT_GPIOS r18, r19, r20, r21
+        CLOCK_HI
+        CHECK_FOR_DISPLAY_OFF
+
+        SUB pixelCount, pixelCount, 1
+        QBEQ DONE_PIXELS, pixelCount, 0
+        ; release the copy PRU for the next pixel; the last pixel's release
+        ; is deferred until after the latch so the copy PRU's writes stay
+        ; clear of it
+        ACK_SPLIT
+        QBA NEXT_PIXEL
+DONE_PIXELS:
+#else
 NEXT_PIXEL:
         ; Load the 8 GPIO bit flags (4 for each of 2 pixels)
         ; consecutive registers, starting at pixel_data
@@ -29,6 +49,7 @@ NEXT_PIXEL:
         QBEQ DONE_PIXELS, pixelCount, 0
         QBA NEXT_PIXEL
 DONE_PIXELS:
+#endif
 
 
 #ifdef USING_PWM
@@ -67,6 +88,24 @@ NO_EXTRA_DELAY:
 
         DISPLAY_ON
 
+#ifdef SPLIT_GPIO
+        ; deferred release of the copy PRU for the row's last pixel; at the
+        ; end of the frame skip it and park the copy PRU instead so it never
+        ; touches its banks between frames
+        ADD row, row, 1
+        QBNE ROW_ACK_CONTINUE, row, ROWS
+        LDI row, 0
+		SUB bright, bright, 1
+		QBNE ROW_ACK_CONTINUE2, bright, 0
+        SPLIT_FRAME_END
+        QBA READ_LOOP
+ROW_ACK_CONTINUE2:
+        ACK_SPLIT
+        QBA ROW_LOOP
+ROW_ACK_CONTINUE:
+        ACK_SPLIT
+        QBA ROW_LOOP
+#else
         ADD row, row, 1
         QBNE ROW_LOOP, row, ROWS
 
@@ -77,5 +116,6 @@ NO_EXTRA_DELAY:
 		QBNE ROW_LOOP, bright, 0
 
         QBA READ_LOOP
+#endif
 
 

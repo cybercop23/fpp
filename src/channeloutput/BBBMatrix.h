@@ -76,6 +76,9 @@ private:
     Matrix* m_matrix;
     PanelMatrix* m_panelMatrix;
     bool m_singlePRU = false;
+    // dual PRU split output: the copy PRU also writes these GPIO banks
+    bool m_splitOutput = false;
+    bool m_splitCpyBanks[4] = { false, false, false, false };
     size_t m_dataOffset = 0;
 
     int m_panelWidth;

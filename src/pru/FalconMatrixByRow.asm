@@ -15,6 +15,24 @@ ROW_LOOP:
         CHECK_FOR_DISPLAY_OFF
 
         LDI pixelCount, ROW_LEN
+#ifdef SPLIT_GPIO
+NEXT_PIXEL:
+            ; The copy PRU has already written its banks for this pixel;
+            ; the publish leaves this PRU's bank words in r18-r21
+            WAIT_SPLIT_DATA
+
+            CLOCK_LO
+            OUTPUT_GPIOS r18, r19, r20, r21
+            CLOCK_HI
+            CHECK_FOR_DISPLAY_OFF
+
+            SUB pixelCount, pixelCount, 1
+            QBEQ DONE_PIXELS, pixelCount, 0
+            ; last pixel's release is deferred to after the latch
+            ACK_SPLIT
+            QBA NEXT_PIXEL
+DONE_PIXELS:
+#else
 NEXT_PIXEL:
 
 	; Load the 8 GPIO bit flags (4 for each of 2 pixels)
@@ -34,6 +52,7 @@ NEXT_PIXEL:
             QBEQ DONE_PIXELS, pixelCount, 0
             QBA NEXT_PIXEL
 DONE_PIXELS:
+#endif
 
 #ifdef ENABLESTATS
         //write some debug data into sram to read in c code
@@ -95,6 +114,10 @@ NO_EXTRA_DELAY:
 		SUB bright, bright, 1
 
 		QBGE ROW_DONE, bright, 0
+#ifdef SPLIT_GPIO
+            ; deferred release of the copy PRU for the scan's last pixel
+            ACK_SPLIT
+#endif
             QBA ROW_LOOP
 ROW_DONE:
 
@@ -106,6 +129,12 @@ ROW_DONE:
         ; Some panels need a fully blank row to prevent some ghosting
         ; we will do that as quickly as possible
         ZERO &r18, 16
+#ifdef SPLIT_GPIO
+        ; the copy PRU is parked (its release comes at the next scan's
+        ; pixel publish), so drive its banks' data pins low here; they
+        ; stay low for the whole blank row
+        CLEAR_CPY_BANKS
+#endif
         LDI pixelCount, ROW_LEN
         LATCH_LO
         READ_TO_FLUSH
@@ -139,8 +168,19 @@ DISPLAY_ALREADY_OFF_BLANK:
 #endif
 
         QBNE READ_LOOP_DONE, row, ROWS
+#ifdef SPLIT_GPIO
+            ; frame done: park the copy PRU; the deferred release is not
+            ; needed (and skipping it keeps the copy PRU's banks untouched
+            ; between frames)
+            SPLIT_FRAME_END
+#endif
             QBA READ_LOOP
 READ_LOOP_DONE:
+#ifdef SPLIT_GPIO
+        ; deferred release of the copy PRU after the row switch (and the
+        ; blank row, when enabled)
+        ACK_SPLIT
+#endif
 
 		QBA NEW_ROW_LOOP
 

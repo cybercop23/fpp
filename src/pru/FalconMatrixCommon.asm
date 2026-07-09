@@ -227,4 +227,85 @@ REREAD:
     .endm
 
 
+#ifdef SPLIT_GPIO
+; Split output mode: the copy PRU prefetches the pixel data, writes the GPIO
+; banks it owns (CPY_OWNS_GPIOx) itself, then publishes the pixel's four
+; bank words + a sequence number through scratchpad bank 11 (r17..r21).
+; This PRU waits for the publish, writes its own banks + the clock, and
+; acknowledges through bank 10 - so the copy PRU's data writes always land
+; before this PRU's clock edge, and never change under a pending clock.
+;
+; NOTE: the scratchpad banks are PACKED - a transfer always starts at bank
+; offset 0 no matter which register it starts from - so each bank carries
+; exactly one record and every transfer moves the whole record:
+;   bank 10 (this PRU -> copy): r14 = control (frame base address, 0 to
+;            park, 0xFFFFFFF to exit), r15 = pixels-clocked sequence
+;   bank 11 (copy -> this PRU): r17 = published sequence, r18-r21 = the
+;            pixel's four GPIO bank words
+; Both sequence counters restart at 0 each frame, so a stale publish from
+; the tail of the previous frame can never match the first expected pixel.
+#define split_ctrl        r14
+#define split_pixel_seq   r15
+
+; announce a new frame: reset the pixel sequence and publish the frame
+; base address (data_addr must already be loaded)
+SPLIT_FRAME_START .macro
+    MOV  split_ctrl, data_addr
+    LDI  split_pixel_seq, 0
+    XOUT 10, &split_ctrl, 8
+    .endm
+
+; park the copy PRU between frames
+SPLIT_FRAME_END .macro
+    LDI  split_ctrl, 0
+    XOUT 10, &split_ctrl, 8
+    .endm
+
+; tell the copy PRU to exit
+SPLIT_EXIT .macro
+    LDI32 split_ctrl, 0xFFFFFFF
+    XOUT 10, &split_ctrl, 8
+    .endm
+
+; wait for the copy PRU to publish the next pixel (and its own banks to be
+; written); leaves the four bank words in r18-r21
+WAIT_SPLIT_DATA .macro
+    .newblock
+    ADD  split_pixel_seq, split_pixel_seq, 1
+WAITPUB?:
+    XIN  11, &data_from_other_pru, 20
+    QBNE WAITPUB?, data_from_other_pru, split_pixel_seq
+    .endm
+
+; release the copy PRU to write its banks for the next pixel
+ACK_SPLIT .macro
+    XOUT 10, &split_ctrl, 8
+    .endm
+
+; drive the copy-owned banks' data pins low (used for the blank row where
+; the copy PRU is parked and this PRU clocks out zeros)
+CLEAR_CPY_BANKS .macro
+#ifdef CPY_OWNS_GPIO0
+    LDI32 gpio_base, GPIO0
+    MOV   out_clr, gpio0_led_mask
+    SBBO  &out_clr, gpio_base, GPIO_CLRDATAOUT, 4
+#endif
+#ifdef CPY_OWNS_GPIO1
+    LDI32 gpio_base, GPIO1
+    MOV   out_clr, gpio1_led_mask
+    SBBO  &out_clr, gpio_base, GPIO_CLRDATAOUT, 4
+#endif
+#ifdef CPY_OWNS_GPIO2
+    LDI32 gpio_base, GPIO2
+    MOV   out_clr, gpio2_led_mask
+    SBBO  &out_clr, gpio_base, GPIO_CLRDATAOUT, 4
+#endif
+#ifdef CPY_OWNS_GPIO3
+    LDI32 gpio_base, GPIO3
+    MOV   out_clr, gpio3_led_mask
+    SBBO  &out_clr, gpio_base, GPIO_CLRDATAOUT, 4
+#endif
+    .endm
+#endif
+
 #endif
