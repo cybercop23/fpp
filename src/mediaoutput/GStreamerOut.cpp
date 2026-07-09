@@ -28,6 +28,8 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <fstream>
+#include <unistd.h>
+#include <vector>
 #include <sstream>
 #include <condition_variable>
 #include <thread>
@@ -74,6 +76,44 @@ GStreamerOutput* GStreamerOutput::m_currentInstance = nullptr;
 // ──────────────────────────────────────────────────────────────────────────────
 static constexpr int PIPELINE_TEARDOWN_TIMEOUT_MS = 10000;
 static std::atomic<int> s_consecutiveWedgeEvents{ 0 };
+// Ensures the escalation decision (restart vs reboot) is made exactly once
+// per process — additional wedge events racing in while shutdown is already
+// underway must not re-record restarts or re-trigger anything.
+static std::atomic<bool> s_wedgeShutdownTriggered{ false };
+
+// Wedge-triggered restart history, kept in tmpfs: survives fppd restarts but
+// is cleared by a reboot — exactly the lifetime of the VideoCore firmware
+// state we're trying to recover.  On platforms without /run/fppd (macOS,
+// Docker) the file is unusable and the count stays at 1, which keeps the
+// reboot rung disengaged there by construction.
+static constexpr const char* WEDGE_RESTART_STATE_FILE = "/run/fppd/gstreamer_wedge_restarts";
+static constexpr long long WEDGE_RESTART_WINDOW_MS = 2LL * 60 * 60 * 1000; // 2 hours
+
+// Record that a wedge-triggered fppd restart is happening now and return how
+// many such restarts (including this one) occurred within the window.
+static int RecordWedgeRestartAndCount() {
+    long long now = GetTimeMS();
+    std::vector<long long> stamps;
+    {
+        std::ifstream in(WEDGE_RESTART_STATE_FILE);
+        std::string line;
+        while (in && std::getline(in, line)) {
+            long long v = atoll(line.c_str());
+            if (v > 0 && v <= now && (now - v) < WEDGE_RESTART_WINDOW_MS) {
+                stamps.push_back(v);
+            }
+        }
+    }
+    stamps.push_back(now);
+    std::ofstream out(WEDGE_RESTART_STATE_FILE, std::ios::trunc);
+    if (!out) {
+        return 1;
+    }
+    for (long long s : stamps) {
+        out << s << "\n";
+    }
+    return (int)stamps.size();
+}
 
 static void RecordWedgeEventAndMaybeRestart(const char* what) {
     int fails = s_consecutiveWedgeEvents.fetch_add(1) + 1;
@@ -81,11 +121,47 @@ static void RecordWedgeEventAndMaybeRestart(const char* what) {
     int limit = getSettingInt("GStreamerWedgeRestartLimit", 3);
     LogErr(VB_MEDIAOUT, "GStreamer: %s (consecutive decoder-wedge events: %d, restart limit: %d)\n",
            what, fails, limit);
-    if (limit > 0 && fails >= limit) {
-        LogErr(VB_MEDIAOUT, "GStreamer: %d consecutive pipeline wedges — hardware decoder is not recoverable in-process, restarting fppd\n", fails);
-        WarningHolder::AddWarningTimeout(300, 37, "Restarting fppd: hardware media decoder wedged (repeated pipeline hangs, issue #2695)");
-        ShutdownFPPD(true);
+    if (limit <= 0 || fails < limit) {
+        return;
     }
+    if (s_wedgeShutdownTriggered.exchange(true)) {
+        return; // restart/reboot already in flight
+    }
+
+    // A process restart re-opens the V4L2 device, which recovers the decoder
+    // when the wedge is driver-side.  But the dmesg evidence from issue #2727
+    // shows the wedge can live in the VideoCore FIRMWARE (VCHIQ stops
+    // answering, "invalid message context") — no userspace restart resets
+    // that; only a reboot reinitializes the firmware.  So: restart first,
+    // and if wedge-triggered restarts keep happening within the window, the
+    // restart rung clearly isn't working — escalate to a system reboot.
+    // GStreamerWedgeRebootLimit is the number of wedge-triggered restarts
+    // within 2 hours that triggers the reboot (default 2: one restart gets a
+    // chance to fix it, the second escalates).  0 disables the reboot rung.
+    int rebootLimit = getSettingInt("GStreamerWedgeRebootLimit", 2);
+    int recentRestarts = RecordWedgeRestartAndCount();
+    if (rebootLimit > 0 && recentRestarts >= rebootLimit) {
+        LogErr(VB_MEDIAOUT, "GStreamer: %d wedge-triggered fppd restarts within %d minutes did not recover the decoder — "
+                            "VideoCore firmware is wedged (issues #2695/#2727), REBOOTING the system\n",
+               recentRestarts, (int)(WEDGE_RESTART_WINDOW_MS / 60000));
+        WarningHolder::AddWarning(37, "Rebooting: hardware video decoder firmware wedged; fppd restart did not recover it");
+        sync();
+        if (system("/usr/sbin/reboot") != 0) {
+            // Reboot unavailable (container, dev box) — fall back to the
+            // restart rung rather than doing nothing.
+            LogErr(VB_MEDIAOUT, "GStreamer: reboot command failed, falling back to fppd restart\n");
+            ShutdownFPPD(true);
+            return;
+        }
+        // Exit cleanly while the system goes down.
+        ShutdownFPPD(false);
+        return;
+    }
+
+    LogErr(VB_MEDIAOUT, "GStreamer: %d consecutive pipeline wedges — hardware decoder is not recoverable in-process, restarting fppd (restart %d/%d before reboot escalation)\n",
+           fails, recentRestarts, rebootLimit);
+    WarningHolder::AddWarningTimeout(300, 37, "Restarting fppd: hardware media decoder wedged (repeated pipeline hangs, issue #2695)");
+    ShutdownFPPD(true);
 }
 
 // Drive a pipeline to GST_STATE_NULL on a reaper thread with a deadline.
