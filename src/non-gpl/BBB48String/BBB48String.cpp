@@ -28,6 +28,7 @@
 
 // FPP includes
 #include "../../Sequence.h"
+#include "../FalconV5Support/FalconV5Support.h"
 #include "../../Warnings.h"
 #include "../../common.h"
 #include "../../log.h"
@@ -83,6 +84,8 @@ BBB48StringOutput::~BBB48StringOutput() {
         delete m_pru;
     if (m_pru0)
         delete m_pru0;
+    if (falconV5Support)
+        delete falconV5Support;
 }
 
 static void compilePRUCode(const char* program,
@@ -241,6 +244,91 @@ void BBB48StringOutput::createOutputLengths(FrameData& d,
         args.push_back(v);
     }
     outputFile.close();
+}
+
+void BBB48StringOutput::setupFalconV4Support(Json::Value& root, std::vector<std::string>& args) {
+    // Group Falcon smart receiver ports into 4-port chains and prepare the
+    // config packet.  Only the send-only V4 protocol is possible here:
+    // these capes have no listener hardware, so a V5 selection falls back
+    // to V4 handling.  The packet content is static for a configuration,
+    // so it is generated once and pre-transposed into the frame's byte-lane
+    // format; PrepData appends it to the frame every twelfth frame.
+    uint32_t masks[4] = { 0, 0, 0, 0 };
+    int x = 0;
+    while (x < m_strings.size()) {
+        int p = x;
+        PixelString* p1 = m_strings[x++];
+        if (!p1->m_isSmartReceiver ||
+            (p1->smartReceiverType != PixelString::ReceiverType::FalconV4 &&
+             p1->smartReceiverType != PixelString::ReceiverType::FalconV5)) {
+            continue;
+        }
+        if (p1->smartReceiverType == PixelString::ReceiverType::FalconV5) {
+            LogWarn(VB_CHANNELOUT, "Falcon V5 (bidirectional) is not supported on BBB48String; using send-only V4 handling for output %d\n", p + 1);
+            p1->smartReceiverType = PixelString::ReceiverType::FalconV4;
+        }
+        PixelString* p2 = x < m_strings.size() ? m_strings[x++] : nullptr;
+        PixelString* p3 = x < m_strings.size() ? m_strings[x++] : nullptr;
+        PixelString* p4 = x < m_strings.size() ? m_strings[x++] : nullptr;
+
+        const PinCapabilities& pin = PinCapabilities::getPinByName(root["outputs"][p]["pin"].asString());
+        if (p1->m_isInverted) {
+            WarningHolder::AddWarning("BBB48String: Falcon smart receivers are not supported on inverted output " + std::to_string(p + 1));
+            continue;
+        }
+        if (!falconV5Support) {
+            falconV5Support = new FalconV5Support();
+        }
+        falconV5Support->addReceiverChain(p1, p2, p3, p4, 0, 0, true);
+        masks[pin.mappedGPIOIdx()] |= 1 << pin.mappedGPIO();
+        // the four lines carry continuous pixel data - none of the v1/v2
+        // style mid-frame gpio toggling
+        p1->m_gpioCommands.clear();
+        if (p2) {
+            p2->m_gpioCommands.clear();
+        }
+        if (p3) {
+            p3->m_gpioCommands.clear();
+        }
+        if (p4) {
+            p4->m_gpioCommands.clear();
+        }
+    }
+    if (!falconV5Support || falconV5Support->getReceiverChains().empty()) {
+        return;
+    }
+    args.push_back("-DFALCONV4");
+    for (int g = 1; g < 4; g++) { // GPIO0 chains were rejected above
+        if (masks[g]) {
+            char buf[40];
+            snprintf(buf, sizeof(buf), "-DFALCON_MASK_GPIO%d=0x%08X", g, masks[g]);
+            args.push_back(buf);
+        }
+    }
+
+    std::vector<std::array<uint8_t, 64>> packets;
+    packets.resize(m_strings.size());
+    for (auto& pk : packets) {
+        memset(&pk[0], 0, 64);
+    }
+    for (auto& rc : falconV5Support->getReceiverChains()) {
+        rc->generateConfigPacket(&packets[rc->getPixelStrings()[0]->m_portNumber][0]);
+    }
+    int numStrings = m_gpioData.gpioStringMap.size();
+    m_falconPacketLanes.assign(57 * numStrings, 0);
+    for (int lane = 0; lane < numStrings; lane++) {
+        int idx = m_gpioData.gpioStringMap[lane];
+        if (idx < 0) {
+            continue;
+        }
+        for (int b = 0; b < 57; b++) {
+            // reverse the bits: the firmware clocks MSB first, the wire
+            // wants the UART LSB first
+            uint8_t v = packets[idx][b];
+            v = ((v * 0x0802LU & 0x22110LU) | (v * 0x8020LU & 0x88440LU)) * 0x10101LU >> 16;
+            m_falconPacketLanes[b * numStrings + lane] = v;
+        }
+    }
 }
 
 /*
@@ -422,6 +510,8 @@ int BBB48StringOutput::Init(Json::Value config) {
         m_gpio0Data.gpioStringMap.push_back(-1);
     }
 
+    setupFalconV4Support(root, split1args);
+
     std::string v = "-DOUTPUTS=";
     v += std::to_string(m_gpioData.gpioStringMap.size());
     split1args.push_back(v);
@@ -489,6 +579,8 @@ int BBB48StringOutput::Init(Json::Value config) {
     // overlap us
     m_gpioData.frameSize =
         m_gpioData.gpioStringMap.size() * std::max(2400, m_gpioData.maxStringLen);
+    // room for the Falcon V4 config packet appended after the frame data
+    m_gpioData.frameSize += m_falconPacketLanes.size();
     // leave a full memory page between to avoid conflicts
     int offset = ((m_gpioData.frameSize / 4096) + 2) * 4096;
     m_gpio0Data.frameSize = m_gpio0Data.gpioStringMap.size() *
@@ -817,6 +909,14 @@ void BBB48StringOutput::PrepData(unsigned char* channelData) {
     prepData(m_gpioData, channelData);
     prepData(m_gpio0Data, channelData);
     m_testCycle = -1;
+
+    if (!m_falconPacketLanes.empty() && (m_curFrame % 12) == 1) {
+        // append the config packet after the frame data; the firmware sends
+        // it when the command has the packet bit set
+        memcpy(m_gpioData.curData + m_gpioData.outputStringLen * m_gpioData.gpioStringMap.size(),
+               m_falconPacketLanes.data(), m_falconPacketLanes.size());
+        m_sendFalconPacket = true;
+    }
 }
 
 void BBB48StringOutput::sendData(FrameData& d, uint32_t* dptr) {
@@ -881,10 +981,16 @@ int BBB48StringOutput::SendData(unsigned char* channelData) {
         // pixel counting needs the GPIO commands and such turned off
         flag = 0x8000;
     }
-    m_pruData->command = m_gpioData.outputStringLen | flag;
     if (m_pru0Data) {
         m_pru0Data->command = m_gpio0Data.outputStringLen | flag;
     }
+    if (m_sendFalconPacket) {
+        // bit 16: a Falcon V4 config packet follows the frame data (only
+        // the main firmware build has the falcon section, never GPIO0)
+        flag |= 0x10000;
+        m_sendFalconPacket = false;
+    }
+    m_pruData->command = m_gpioData.outputStringLen | flag;
 
     return m_channelCount;
 }

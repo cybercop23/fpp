@@ -539,6 +539,13 @@ _LOOP:
 #if defined(DDRONLY)
     SET bit_flags, bit_flags, 3
 #endif
+#ifdef FALCONV4
+    // command bit 16 = a Falcon V4 config packet is appended to the frame;
+    // stash it before cur_data (the upper command word) is cleared
+    QBBC NO_FV4_FLAG, r1, 16
+        SET bit_flags, bit_flags, 4
+NO_FV4_FLAG:
+#endif
     LDI cur_data, 0
     LDI next_check,  $CODE(NO_PIXELS_CHECK)
     QBBS SKIP_OUTPUT_CHECKS, data_len, 15
@@ -701,6 +708,152 @@ WORD_LOOP_DONE:
                 CLEAR_IF_NOT_EQUAL gpio0_led_mask, gpio0_address, 0
     #endif
     
+
+#ifdef FALCONV4
+// Falcon V4 send-only config packet.  57 bytes ride as extra byte-slots
+// appended to the frame data (bytes pre-reversed by the ARM so the LSB goes
+// out first) and are sent UART style on the falcon chain lines only: a
+// low/high framing lead-in, then per byte a low start bit, 8 data bits and
+// a high stop bit, each FALCONV4_PERIOD wide (~885kHz - the same wire
+// timing BBShiftString's Falcon path uses).  Every other output stays at
+// its post-frame low: the FALCON_MASK_GPIOn defines (generated per config
+// by BBB48String.cpp) cover only the first port line of each chain.  The
+// led mask registers are done for this frame so they carry the falcon
+// masks here; they reload from the scratch pad next frame.
+#define FALCONV4_PERIOD  1130
+    QBBC NO_FALCON_PACKET, bit_flags, 4
+    CLR bit_flags, bit_flags, 4
+#ifdef FALCON_MASK_GPIO0
+    LDI32 gpio0_led_mask, FALCON_MASK_GPIO0
+#endif
+#ifdef FALCON_MASK_GPIO1
+    LDI32 gpio1_led_mask, FALCON_MASK_GPIO1
+#endif
+#ifdef FALCON_MASK_GPIO2
+    LDI32 gpio2_led_mask, FALCON_MASK_GPIO2
+#endif
+#ifdef FALCON_MASK_GPIO3
+    LDI32 gpio3_led_mask, FALCON_MASK_GPIO3
+#endif
+
+    // framing lead-in: falcon lines low, then high (UART idle)
+#ifdef FALCON_MASK_GPIO0
+    SBBO &gpio0_led_mask, gpio0_address, GPIO_CLRDATAOUT, 4
+#endif
+#ifdef FALCON_MASK_GPIO1
+    SBBO &gpio1_led_mask, gpio1_address, GPIO_CLRDATAOUT, 4
+#endif
+#ifdef FALCON_MASK_GPIO2
+    SBBO &gpio2_led_mask, gpio2_address, GPIO_CLRDATAOUT, 4
+#endif
+#ifdef FALCON_MASK_GPIO3
+    SBBO &gpio3_led_mask, gpio3_address, GPIO_CLRDATAOUT, 4
+#endif
+    SLEEPNS 15300, r8, 0
+#ifdef FALCON_MASK_GPIO0
+    SBBO &gpio0_led_mask, gpio0_address, GPIO_SETDATAOUT, 4
+#endif
+#ifdef FALCON_MASK_GPIO1
+    SBBO &gpio1_led_mask, gpio1_address, GPIO_SETDATAOUT, 4
+#endif
+#ifdef FALCON_MASK_GPIO2
+    SBBO &gpio2_led_mask, gpio2_address, GPIO_SETDATAOUT, 4
+#endif
+#ifdef FALCON_MASK_GPIO3
+    SBBO &gpio3_led_mask, gpio3_address, GPIO_SETDATAOUT, 4
+#endif
+    SLEEPNS 53500, r8, 0
+
+    RESET_PRU_CLOCK r8, r9
+    LDI data_len, 57
+FALCON_BYTE_LOOP:
+    // load the byte lanes for this packet byte while the previous cell
+    // (or the lead-in) completes
+    READ_DATA OUTPUTS
+    WAITNS_LOOP FALCONV4_PERIOD, r8, r9
+    RESET_PRU_CLOCK r8, r9
+    // start bit: falcon lines low
+#ifdef FALCON_MASK_GPIO0
+    SBBO &gpio0_led_mask, gpio0_address, GPIO_CLRDATAOUT, 4
+#endif
+#ifdef FALCON_MASK_GPIO1
+    SBBO &gpio1_led_mask, gpio1_address, GPIO_CLRDATAOUT, 4
+#endif
+#ifdef FALCON_MASK_GPIO2
+    SBBO &gpio2_led_mask, gpio2_address, GPIO_CLRDATAOUT, 4
+#endif
+#ifdef FALCON_MASK_GPIO3
+    SBBO &gpio3_led_mask, gpio3_address, GPIO_CLRDATAOUT, 4
+#endif
+    LDI bit_num, 8
+FALCON_BIT_LOOP:
+    SUB bit_num, bit_num, 1
+    // compute the low pins for this bit during the current cell: zeros
+    // seeded from the falcon mask, the DO_OUTPUT macros drop the pins
+    // whose data bit is one (non-falcon lanes never had a bit to drop)
+    MOV gpio0_zeros, gpio0_led_mask
+    MOV gpio1_zeros, gpio1_led_mask
+    MOV gpio2_zeros, gpio2_led_mask
+    MOV gpio3_zeros, gpio3_led_mask
+#ifdef FALCON_MASK_GPIO0
+    DO_OUTPUT_GPIO0
+#endif
+#ifdef FALCON_MASK_GPIO1
+    DO_OUTPUT_GPIO1
+#endif
+#ifdef FALCON_MASK_GPIO2
+    DO_OUTPUT_GPIO2
+#endif
+#ifdef FALCON_MASK_GPIO3
+    DO_OUTPUT_GPIO3
+#endif
+    WAITNS_LOOP FALCONV4_PERIOD, r8, r9
+    RESET_PRU_CLOCK r8, r9
+    // drive the cell: ones high, zeros low
+#ifdef FALCON_MASK_GPIO0
+    XOR r30, gpio0_zeros, gpio0_led_mask
+    SET_IF_NOT_EQUAL r30, gpio0_address, 0
+    CLEAR_IF_NOT_EQUAL gpio0_zeros, gpio0_address, 0
+#endif
+#ifdef FALCON_MASK_GPIO1
+    XOR r30, gpio1_zeros, gpio1_led_mask
+    SET_IF_NOT_EQUAL r30, gpio1_address, 0
+    CLEAR_IF_NOT_EQUAL gpio1_zeros, gpio1_address, 0
+#endif
+#ifdef FALCON_MASK_GPIO2
+    XOR r30, gpio2_zeros, gpio2_led_mask
+    SET_IF_NOT_EQUAL r30, gpio2_address, 0
+    CLEAR_IF_NOT_EQUAL gpio2_zeros, gpio2_address, 0
+#endif
+#ifdef FALCON_MASK_GPIO3
+    XOR r30, gpio3_zeros, gpio3_led_mask
+    SET_IF_NOT_EQUAL r30, gpio3_address, 0
+    CLEAR_IF_NOT_EQUAL gpio3_zeros, gpio3_address, 0
+#endif
+    QBNE FALCON_BIT_LOOP, bit_num, 0
+    // stop bit after the last data cell: falcon lines high
+    WAITNS_LOOP FALCONV4_PERIOD, r8, r9
+    RESET_PRU_CLOCK r8, r9
+#ifdef FALCON_MASK_GPIO0
+    SBBO &gpio0_led_mask, gpio0_address, GPIO_SETDATAOUT, 4
+#endif
+#ifdef FALCON_MASK_GPIO1
+    SBBO &gpio1_led_mask, gpio1_address, GPIO_SETDATAOUT, 4
+#endif
+#ifdef FALCON_MASK_GPIO2
+    SBBO &gpio2_led_mask, gpio2_address, GPIO_SETDATAOUT, 4
+#endif
+#ifdef FALCON_MASK_GPIO3
+    SBBO &gpio3_led_mask, gpio3_address, GPIO_SETDATAOUT, 4
+#endif
+    SUB data_len, data_len, 1
+    QBNE FALCON_BYTE_LOOP, data_len, 0
+    // hold the final stop cell, then leave the falcon lines high (UART
+    // idle) until the next frame's data pulls them low, matching the
+    // BBShiftString behavior
+    WAITNS_LOOP FALCONV4_PERIOD, r8, r9
+NO_FALCON_PACKET:
+#endif
 
 #if defined(SPLIT_GPIO0) && defined(USES_GPIO0)
     // send some clears (shouldn't be needed) to make sure GPIO0 wakes up

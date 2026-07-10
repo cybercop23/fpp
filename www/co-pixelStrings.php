@@ -1146,11 +1146,11 @@ function readCapes($cd, $capes)
         return false;
     }
     function SupportsFalconV4SmartReceivers(subType) {
-        // send-only config packets work on any BBShiftString cape
+        // send-only config packets work on any BBShiftString or BBB48String cape
         var subType = GetPixelStringCapeFileName();
         var val = KNOWN_CAPES[subType];
         if (val && val.hasOwnProperty("driver")) {
-            return val["driver"] == "BBShiftString";
+            return val["driver"] == "BBShiftString" || val["driver"] == "BBB48String";
         }
         return false;
     }

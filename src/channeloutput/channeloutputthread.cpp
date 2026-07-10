@@ -23,6 +23,7 @@
 
 #include "../MultiSync.h"
 #include "../Sequence.h"
+#include "../Warnings.h"
 #include "../channeltester/ChannelTester.h"
 #include "../commands/Commands.h"
 #include "../common.h"
@@ -487,7 +488,21 @@ void CalculateNewChannelOutputDelay(float mediaPosition) {
  */
 void CalculateNewChannelOutputDelayForFrame(int expectedFramesSent) {
     int diff = channelOutputFrame - expectedFramesSent;
-    if (!multiSync->isMultiSyncEnabled()) {
+    bool allowFrameSkip = !multiSync->isMultiSyncEnabled();
+    if (!allowFrameSkip && diff <= -(RefreshRate / 2)) {
+        // A player sending multisync normally only slews LightDelay so the
+        // remotes aren't yanked around by frame jumps, but the slew is capped
+        // at 15ms per frame.  If the output is persistently slower than the
+        // step time, slewing can never catch back up to the media clock and
+        // playback drifts out of sync without bound.  Once we are more than
+        // half a second behind, jump — the remotes follow the frame numbers
+        // in the sync packets, so they jump with us.
+        LogWarn(VB_CHANNELOUT, "Sequence is %d frames behind the media position and cannot catch up by slewing; skipping ahead.  Channel output may be too slow for %d fps.\n",
+                -diff, (int)RefreshRate);
+        WarningHolder::AddWarningTimeout("Sequence playback cannot keep up with the media; skipping frames to stay in sync", 30);
+        allowFrameSkip = true;
+    }
+    if (allowFrameSkip) {
         if (diff < -4) {
             // pretty far behind master, lets just skip forward
             if (diff > -(RefreshRate / 2)) {
