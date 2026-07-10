@@ -1392,8 +1392,26 @@ void MultiSync::PeriodicPing() {
             UpdateUnicastDestinations();
         }
         lock.unlock();
-        for (auto& address : httpPingAddresses) {
-            PingSingleRemoteViaHTTP(address);
+        if (!httpPingAddresses.empty()) {
+            // These are blocking curl probes (connect timeout of a couple
+            // seconds each) to remotes we haven't heard from in a while.  This
+            // runs from the fppd main loop, which is the same thread that drains
+            // the MultiSync control socket (ProcessControlPacket).  Doing the
+            // probes inline stalls sync-packet processing for the duration of the
+            // timeouts, which on a remote shows up as the output freezing for a
+            // second or two and then jumping to catch up.  Run them on a
+            // short-lived detached thread instead; UpdateSystem() takes
+            // m_systemsLock so it is safe to touch the systems list from here.
+            bool expected = false;
+            if (m_httpPingInProgress.compare_exchange_strong(expected, true)) {
+                std::thread([this, addrs = std::move(httpPingAddresses)]() {
+                    SetThreadName("FPP-HTTPPing");
+                    for (auto& address : addrs) {
+                        PingSingleRemoteViaHTTP(address);
+                    }
+                    m_httpPingInProgress = false;
+                }).detach();
+            }
         }
     }
     if (superLongGap) {

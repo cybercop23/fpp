@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include "fpp-json-fwd.h"
 #include <sys/types.h>
+#include <atomic>
 #include <mutex>
 #include <pthread.h>
 #include <map>
@@ -390,6 +391,9 @@ private:
 
     unsigned long m_lastPingTime;
     unsigned long m_lastCheckTime;
+    // Set while a background thread is running the blocking HTTP remote probes
+    // kicked off by PeriodicPing(), so we never pile up overlapping probe threads.
+    std::atomic_bool m_httpPingInProgress{ false };
     int m_lastMediaHalfSecond;
     int m_lastFrame;
     int m_lastFrameSent;
