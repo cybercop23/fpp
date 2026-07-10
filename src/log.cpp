@@ -14,9 +14,12 @@
 #include <cstring>
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <chrono>
+#include <mutex>
 #include <sstream>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -36,6 +39,66 @@ char logFileName[1024] = "";
 bool logToStdOut = true;
 // char logLevelStr[16];
 // char logMaskStr[1024];
+
+// Persistent handle for the log file so each log line is a single write()
+// instead of a full fopen/write/fclose cycle.  On slow SD cards the per-line
+// open/close metadata traffic was enough that a card-internal stall could
+// block the (real-time) channel output thread mid-log and drop frames.
+//
+// logrotate rotates fppd.log by rename (no copytruncate and no signal to
+// fppd), so we periodically stat() the path and reopen when the inode under
+// our name changes or the file disappears.
+//
+// A recursive_timed_mutex guards the handle: recursive because the crash
+// handler calls LogErr and may re-enter on the same thread; timed so that if
+// another thread is wedged inside a write (e.g. stalled storage) a crashing
+// thread gives up and falls back to stderr instead of hanging the process.
+static std::recursive_timed_mutex logFileLock;
+static FILE* persistentLogFile = nullptr;
+static ino_t persistentLogIno = 0;
+static dev_t persistentLogDev = 0;
+static time_t lastRotationCheck = 0;
+
+// Must be called with logFileLock held.
+static void closePersistentLogFile() {
+    if (persistentLogFile) {
+        fclose(persistentLogFile);
+        persistentLogFile = nullptr;
+        persistentLogIno = 0;
+        persistentLogDev = 0;
+        lastRotationCheck = 0;
+    }
+}
+
+// Must be called with logFileLock held.  Returns the persistent handle for
+// logFileName, (re)opening it as needed, or nullptr if it cannot be opened.
+static FILE* getPersistentLogFile(time_t now) {
+    if (persistentLogFile && now != lastRotationCheck) {
+        // At most once a second, check whether the file we have open is still
+        // the one at logFileName (logrotate renames it, a user may delete it).
+        lastRotationCheck = now;
+        struct stat st;
+        if ((stat(logFileName, &st) != 0) ||
+            (st.st_ino != persistentLogIno) || (st.st_dev != persistentLogDev)) {
+            closePersistentLogFile();
+        }
+    }
+    if (!persistentLogFile) {
+        persistentLogFile = fopen(logFileName, "a");
+        if (persistentLogFile) {
+            // Line buffered: each log line still hits the kernel immediately
+            // (matching the old open/write/close behavior) but as one write().
+            setvbuf(persistentLogFile, nullptr, _IOLBF, 8192);
+            struct stat st;
+            if (fstat(fileno(persistentLogFile), &st) == 0) {
+                persistentLogIno = st.st_ino;
+                persistentLogDev = st.st_dev;
+            }
+            lastRotationCheck = now;
+        }
+    }
+    return persistentLogFile;
+}
 
 void FPPLogger::Init() {
     if (all.empty()) {
@@ -214,32 +277,37 @@ void _LogWrite(const char* file, int line, int level, FPPLoggerInstance& facilit
                         tid, facility.name.c_str(), file, line, format);
 
     if (logFileName[0]) {
-        FILE* logFile;
-
-        bool close = true;
         if (!strcmp(logFileName, "stderr")) {
-            logFile = stderr;
-            close = false;
+            va_start(arg, format);
+            vfprintf(stderr, timeStr, arg);
+            va_end(arg);
         } else if (!strcmp(logFileName, "stdout")) {
-            logFile = stdout;
-            close = false;
+            va_start(arg, format);
+            vfprintf(stdout, timeStr, arg);
+            va_end(arg);
         } else {
-            logFile = fopen(logFileName, "a");
-            if (!logFile) {
-                fprintf(stderr, "Error: Unable to open log file for writing!\n");
+            std::unique_lock<std::recursive_timed_mutex> lock(logFileLock, std::defer_lock);
+            if (lock.try_lock_for(std::chrono::seconds(2))) {
+                FILE* logFile = getPersistentLogFile(tv.tv_sec);
+                if (logFile) {
+                    va_start(arg, format);
+                    vfprintf(logFile, timeStr, arg);
+                    va_end(arg);
+                } else {
+                    fprintf(stderr, "Error: Unable to open log file for writing!\n");
+                    va_start(arg, format);
+                    vfprintf(stderr, timeStr, arg);
+                    va_end(arg);
+                    return;
+                }
+            } else {
+                // Could not get the log file lock (holder likely wedged on
+                // stalled storage); don't hang here - emit to stderr instead.
                 va_start(arg, format);
                 vfprintf(stderr, timeStr, arg);
                 va_end(arg);
                 return;
             }
-        }
-
-        va_start(arg, format);
-        vfprintf(logFile, timeStr, arg);
-        va_end(arg);
-
-        if (close) {
-            fclose(logFile);
         }
     }
     if (strcmp(logFileName, "stdout") && logToStdOut) {
@@ -250,6 +318,8 @@ void _LogWrite(const char* file, int line, int level, FPPLoggerInstance& facilit
 }
 
 void SetLogFile(const char* filename, bool toStdOut) {
+    std::unique_lock<std::recursive_timed_mutex> lock(logFileLock);
+    closePersistentLogFile();
     strcpy(logFileName, filename);
     logToStdOut = toStdOut;
 }
