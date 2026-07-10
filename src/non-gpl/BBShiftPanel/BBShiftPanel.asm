@@ -36,7 +36,7 @@
 #define OCLR_PIN    18
 
 // data RAM offset of the panel-init parameter block; clear of the
-// brightness table (ends ~0xC08) and the SMEM ring config/stats (0x1FE0+).
+// brightness table (ends ~0x1808) and the SMEM ring config/stats (0x1FE0+).
 // Must match BBShiftPanel.cpp.
 #define PANEL_INIT_OFFSET 0x1E00
 // data RAM offset of the addressing config (u32: b0 = row address type,

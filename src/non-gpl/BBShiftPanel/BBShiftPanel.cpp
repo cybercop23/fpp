@@ -1277,7 +1277,12 @@ uint32_t BBShiftPanelOutput::computeMaxBrightnessCycles() {
     // brightness; it passes through 0x8800 at 256, 0xA800 at 384, 0xC800 at
     // 512 and 0xE800 at 640 (the values the old stepped defaults used).
     uint32_t maxBright = 64 * effLen + 18432;
-    maxBright = std::clamp(maxBright, 0x8800u, 0xE800u);
+    // The ramp and its bounds are tuned for 16 scan rows.  With fewer rows
+    // each row owns a larger share of the frame so the on-times may grow
+    // (1/8 scan); with more rows they must shrink or the refresh tanks
+    // (1/32 scan P2.5 panels) - scale the bounds by 16/numRows so all scan
+    // ratios get the same refresh contract.
+    maxBright = std::clamp(maxBright, 0x8800u * 16 / numRows, 0xE800u * 16 / numRows);
     if (FileExists(FPP_DIR_MEDIA("/config/panel_timing.txt"))) {
         std::string v = GetFileContents(FPP_DIR_MEDIA("/config/panel_timing.txt"));
         if (!v.empty()) {
@@ -1297,10 +1302,11 @@ void BBShiftPanelOutput::buildStrideSchedule() {
     uint32_t cyclesPerPixel = (m_numOutputSlots == 16) ? 48 : 26;
     uint32_t shiftCycles = rowLen * cyclesPerPixel + 100;
 
-    // Capacity limit: the PRU brightness table holds 384 stride entries
+    // Capacity limit: the PRU brightness table holds 768 stride entries
+    // (24 slots at 32 rows, so 1/32 scan panels keep a split-pulse budget)
     uint32_t bytesPerPixel = (m_numOutputSlots * 6 * 2) / 16;
     uint32_t strideLen = rowLen * bytesPerPixel;
-    int maxSlots = 384 / (int)numRows;
+    int maxSlots = 768 / (int)numRows;
     if (maxSlots < m_colorDepth) {
         // no room for splitting, the base schedule has to fit regardless
         maxSlots = m_colorDepth;

@@ -47,7 +47,10 @@ typedef struct {
             // 2 uint32_t for each stride
             // first uint32_t is the brightness, number of clock ticks for on
             // second uint32_t - bit 32 is flag to output black after this row,  bits 25-31 is the address, lower 24 is extra "off" time
-            uint32_t brightness[12 * 32 * 2]; // 12bits*32 rows * 2
+            // (24 slots x 32 rows: enough split-pulse budget for 12 bit
+            // color on 1/32 scan panels; ends at 0x1808 in the PRU data
+            // RAM, clear of the config areas at 0x1DF8+)
+            uint32_t brightness[24 * 32 * 2];
         } __attribute__((__packed__));
         struct {
             // Panels that handle the PWM themselves, all data is shifted out and the panel displays it automatically
