@@ -81,6 +81,17 @@ private:
     // event has not yet been drained.  Guarded by mediaOutputLock (only touched
     // from SyncDisplay / WaitForPendingFlip, both of which hold that lock).
     bool m_flipPending = false;
+
+    // Flip-path health counters (guarded by mediaOutputLock like m_flipPending).
+    // Logged rate-limited at Warn so brief output hitches are visible without
+    // debug logging: a stutter on the panel with these counters unchanged means
+    // the delay is NOT in the KMS flip path.
+    uint32_t m_flipWaitTimeouts = 0;
+    uint32_t m_flipRejects = 0;
+    uint32_t m_slowSyncs = 0;
+    int m_maxSyncMS = 0;
+    long long m_lastFlipWarnMS = 0;
+
     CardInfo* m_cardInfo = nullptr;
 };
 

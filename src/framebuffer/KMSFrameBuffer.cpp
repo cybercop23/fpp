@@ -506,6 +506,8 @@ void KMSFrameBuffer::WaitForPendingFlip(int timeoutMs) {
     int r = poll(&pfd, 1, timeoutMs);
     if (r > 0 && (pfd.revents & POLLIN)) {
         drmHandleEvent(m_cardFd, &evctx);
+    } else {
+        m_flipWaitTimeouts++;
     }
     // If we timed out (or errored) give up on this flip so the next frame can
     // proceed rather than blocking forever.
@@ -521,6 +523,7 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
         return;
     }
     if (mediaOutputStatus.output != m_connectorName) {
+        long long syncStart = GetTimeMS();
         int im = ioctl(m_cardFd, DRM_IOCTL_SET_MASTER, 0);
         if (im == 0) {
             // If the previous flip hasn't retired yet, wait for its vblank
@@ -534,12 +537,18 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
                 WaitForPendingFlip(timeoutMs);
             }
 
+            bool wasEnabled = m_displayEnabled;
             int ret = -1;
             if (m_displayEnabled) {
                 ret = drmModePageFlip(m_cardFd, m_crtcId, m_fb[m_cPage].fb_id,
                                       DRM_MODE_PAGE_FLIP_EVENT, this);
             }
             if (ret) {
+                if (wasEnabled) {
+                    // Flip rejected on an already-enabled display; the modeset
+                    // fallback below costs multiple vblanks.
+                    m_flipRejects++;
+                }
                 // First flip after enable, or the flip was rejected: bring the
                 // display up with a full modeset/plane commit, then queue a flip.
                 if (!m_displayEnabled) {
@@ -557,6 +566,26 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
             }
             m_flipPending = (ret == 0);
             ioctl(m_cardFd, DRM_IOCTL_DROP_MASTER, 0);
+
+            // Track flip-path health.  A single sync should normally complete
+            // well inside one refresh interval; count the ones that don't and
+            // surface them (rate-limited) at Warn level so output stutters can
+            // be correlated with (or ruled out of) the KMS flip path without
+            // needing debug logging.
+            long long syncEnd = GetTimeMS();
+            int tookMS = (int)(syncEnd - syncStart);
+            if (tookMS > 20) {
+                m_slowSyncs++;
+                if (tookMS > m_maxSyncMS) {
+                    m_maxSyncMS = tookMS;
+                }
+            }
+            if ((m_slowSyncs || m_flipWaitTimeouts || m_flipRejects) &&
+                (syncEnd - m_lastFlipWarnMS) > 10000) {
+                m_lastFlipWarnMS = syncEnd;
+                LogWarn(VB_CHANNELOUT, "KMSFrameBuffer %s flip-path delays since start: %u syncs >20ms (max %dms), %u flip wait timeouts, %u flip rejects\n",
+                        m_connectorName.c_str(), m_slowSyncs, m_maxSyncMS, m_flipWaitTimeouts, m_flipRejects);
+            }
         }
     }
 }
