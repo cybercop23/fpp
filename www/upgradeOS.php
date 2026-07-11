@@ -90,17 +90,42 @@ if (preg_match('/^https?:/', $_GET['os'])) {
 
 
     // For now, we'll fork wget to get the file.   There is an issue with OpenSSL combined with the cURL built into PHP
-    // on certain versions of debian (which includes what was shipped with FPP 8.5) which is causing very 
-    // slow transfers if using the above curl_easy stuff.   
+    // on certain versions of debian (which includes what was shipped with FPP 8.5) which is causing very
+    // slow transfers if using the above curl_easy stuff.
 
-    $retryCount = 0;
-    $command = "sudo wget -c --quiet --show-progress --progress=bar:force:noscroll " . $_GET['os'] . " -O /home/fpp/media/upload/$baseFile 2>&1";
-    //$command = "sudo curl --progress-bar -L " . $_GET['os'] . " -o /home/fpp/media/upload/$baseFile 2>&1";
+    // If an "Upgrade Source" other than github.com is configured (another FPP
+    // instance on the LAN), pull the .fppos from that mirror's uploads dir
+    // instead of re-downloading from GitHub. This matches the source setting
+    // already honored by the FPP-software update path (scripts/git_pull). The
+    // mirror is only a candidate; if it fails we fall back to the GitHub URL.
+    global $settings;
+    $upgradeSource = isset($settings['UpgradeSource']) ? $settings['UpgradeSource'] : 'github.com';
+    $urls = array($_GET['os']);
+    if ($upgradeSource != '' && $upgradeSource != 'github.com'
+        && preg_match('#^https?://github\.com/#i', $_GET['os'])) {
+        // $baseFile is the whitelist-validated basename() from above, safe to interpolate.
+        array_unshift($urls, "http://" . $upgradeSource . "/api/file/uploads/" . $baseFile);
+    }
+
     $rc = 1;
-    while ($retryCount < 20 && $rc != 0) {
-        echo "Running command: $command\n";
-        passthru($command, $rc);
-        $retryCount++;
+    foreach ($urls as $idx => $url) {
+        if (count($urls) > 1) {
+            if ($idx == 0) {
+                echo "Downloading from local FPP mirror ${upgradeSource}...\n";
+            } else {
+                echo "Mirror download failed, falling back to GitHub...\n";
+            }
+        }
+        $command = "sudo wget -c --quiet --show-progress --progress=bar:force:noscroll " . $url . " -O /home/fpp/media/upload/$baseFile 2>&1";
+        $retryCount = 0;
+        while ($retryCount < 20 && $rc != 0) {
+            echo "Running command: $command\n";
+            passthru($command, $rc);
+            $retryCount++;
+        }
+        if ($rc == 0) {
+            break;
+        }
     }
     if ($rc != 0) {
         echo ("Download aborted!\n");

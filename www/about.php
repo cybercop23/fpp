@@ -831,7 +831,8 @@
                         for (const file of data["files"]) {
                             osAssetMap[file["asset_id"]] = {
                                 name: file["filename"],
-                                url: file["url"]
+                                url: file["url"],
+                                source: file["source"]
                             };
 
                             var isLegacyVersion = legacyVersionRegex.test(file['filename']);
@@ -856,6 +857,12 @@
                             var label = file["filename"];
                             if (!file["downloaded"]) {
                                 label += " (download)";
+                                // Keep the exact "(download)" token above (UpgradeOS/DownloadOS
+                                // key off it); append the source origin separately so the user
+                                // sees the image is available from their local Upgrade Source.
+                                if (file["source"]) {
+                                    label += " from " + file["source"];
+                                }
                             }
                             options.push({
                                 value: file["asset_id"],

@@ -149,34 +149,22 @@ function GitOSReleases()
     curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($curl, CURLOPT_CONNECTTIMEOUT_MS, 4000);
     $request_content = curl_exec($curl);
+    $request_error = curl_error($curl);
     curl_close($curl);
 
     $rc = array('status' => 'ERROR');
+    $releases = array();
+    $githubOk = false;
 
-    if ($request_content === false) {
-        $rc['status'] = "Error";
-        $rc['message'] = curl_error($curl);
-    } else {
+    if ($request_content !== false) {
+        $githubOk = true;
         $data = json_decode($request_content, true);
-        $rc["downloaded"] = $existingFiles;
-        $releases = array();
         foreach ($data as $r) {
             if (isset($r["assets"]) && $settings['OSImagePrefix'] != "") {
                 foreach ($r["assets"] as $file) {
                     $name = $file["name"];
                     if (str_ends_with($name, ".fppos")) {
-                        if ($platforms == "all") {
-                            $row = array();
-                            $row["tag"] = $r["tag_name"];
-                            $row["release_name"] = $r["name"];
-                            $row["filename"] = $name;
-                            $row["url"] = $file["browser_download_url"];
-                            $row["asset_id"] = $file["id"];
-                            $row["downloaded"] = in_array($name, $existingFiles);
-                            $row["size"] = $file["size"];
-                            $row["prerelease"] = $r["prerelease"];
-                            array_push($releases, $row);
-                        } else if (MatchesDeviceOSImage($name, $settings)) {
+                        if ($platforms == "all" || MatchesDeviceOSImage($name, $settings)) {
                             $row = array();
                             $row["tag"] = $r["tag_name"];
                             $row["release_name"] = $r["name"];
@@ -192,8 +180,75 @@ function GitOSReleases()
                 }
             }
         }
+    }
+
+    // When an "Upgrade Source" other than github.com is configured (another FPP
+    // instance on the LAN), also list the .fppos images that FPP actually has in
+    // its uploads dir, so images can be pulled from the LAN instead of GitHub --
+    // including images GitHub has since rolled past (e.g. an older nightly). This
+    // is done in addition to the GitHub list; entries present in both are tagged
+    // with their source and pointed at the mirror.
+    $upgradeSource = isset($settings['UpgradeSource']) ? $settings['UpgradeSource'] : 'github.com';
+    if ($upgradeSource != '' && $upgradeSource != 'github.com') {
+        $srcCurl = curl_init();
+        curl_setopt($srcCurl, CURLOPT_URL, "http://" . $upgradeSource . "/api/files/uploads");
+        curl_setopt($srcCurl, CURLOPT_FAILONERROR, true);
+        curl_setopt($srcCurl, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($srcCurl, CURLOPT_CONNECTTIMEOUT_MS, 4000);
+        curl_setopt($srcCurl, CURLOPT_TIMEOUT, 8);
+        $srcContent = curl_exec($srcCurl);
+        curl_close($srcCurl);
+        $srcData = ($srcContent !== false) ? json_decode($srcContent, true) : null;
+        if (isset($srcData["files"]) && is_array($srcData["files"])) {
+            // Index the GitHub entries by filename so a source copy annotates the
+            // existing entry rather than adding a duplicate row.
+            $indexByName = array();
+            foreach ($releases as $i => $rel) {
+                $indexByName[$rel["filename"]] = $i;
+            }
+            foreach ($srcData["files"] as $sf) {
+                $name = isset($sf["name"]) ? $sf["name"] : "";
+                if (!str_ends_with($name, ".fppos")) {
+                    continue;
+                }
+                if ($platforms != "all" && !MatchesDeviceOSImage($name, $settings)) {
+                    continue;
+                }
+                $srcUrl = "http://" . $upgradeSource . "/api/file/uploads/" . $name;
+                if (isset($indexByName[$name])) {
+                    // Available from the source too -- pull it from the LAN and
+                    // flag the origin so the UI can label it.
+                    $releases[$indexByName[$name]]["source"] = $upgradeSource;
+                    $releases[$indexByName[$name]]["url"] = $srcUrl;
+                } else {
+                    // Source-only image (GitHub no longer offers it).
+                    $lname = strtolower($name);
+                    $row = array();
+                    $row["tag"] = "";
+                    $row["release_name"] = "From " . $upgradeSource;
+                    $row["filename"] = $name;
+                    $row["url"] = $srcUrl;
+                    // Synthetic, positive-integer asset id so about.php's numeric
+                    // option-cleanup (parseInt(value) > 0) still clears it on reload.
+                    $row["asset_id"] = sprintf("%u", crc32($name));
+                    $row["downloaded"] = in_array($name, $existingFiles);
+                    $row["size"] = isset($sf["sizeBytes"]) ? intval($sf["sizeBytes"]) : 0;
+                    $row["prerelease"] = (strpos($lname, "nightly") !== false || strpos($lname, "alpha") !== false || strpos($lname, "beta") !== false);
+                    $row["source"] = $upgradeSource;
+                    array_push($releases, $row);
+                    $indexByName[$name] = count($releases) - 1;
+                }
+            }
+        }
+    }
+
+    if ($githubOk || !empty($releases)) {
         $rc['status'] = 'OK';
+        $rc['downloaded'] = $existingFiles;
         $rc['files'] = $releases;
+    } else {
+        $rc['status'] = "Error";
+        $rc['message'] = $request_error;
     }
 
     return json($rc);

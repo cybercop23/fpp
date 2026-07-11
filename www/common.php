@@ -3078,12 +3078,37 @@ function getKnownFPPSystems()
     $arr = json_decode($data, true);
 
     if (array_key_exists("systems", $arr)) {
+        // De-duplicate by hostname: one device can advertise several addresses
+        // (IPv4 + IPv6, multiple NICs), and without this each shows as its own
+        // entry. Keep a single entry per host, preferring a routable IPv4. Skip
+        // addresses that aren't reachable from a browser -- loopback (127.x /
+        // ::1) and link-local (169.254/16 APIPA, fe80::/10 whose zone id is
+        // host-specific) -- matching the filtering multisync.php applies to the
+        // same multiSyncSystems data. (Hostname is used rather than UUID by
+        // preference; two distinct devices sharing a hostname will collapse to
+        // one entry, which is an accepted trade-off here.)
+        $chosen = array(); // lowercased hostname => ['address'=>, 'hostname'=>, 'isIPv4'=>]
         foreach ($arr["systems"] as $i) {
             // FPP Systems are 0x01 to 0x80
-            if ($i["typeId"] >= 1 && $i["typeId"] < 128) {
-                $desc = $i["address"] . " - " . $i["hostname"];
-                $backupHosts[$desc] = $i["address"];
+            if (!($i["typeId"] >= 1 && $i["typeId"] < 128)) {
+                continue;
             }
+            $addr = $i["address"];
+            $addrl = strtolower($addr);
+            if (strpos($addr, '169.254') === 0 || strpos($addrl, 'fe80') === 0
+                || strpos($addr, '127.') === 0 || $addrl === '::1') {
+                continue;
+            }
+            $key = strtolower($i["hostname"]);
+            $isIPv4 = (strpos($addr, ':') === false);
+            // First sighting of this host, or upgrade an IPv6 pick to an IPv4 one.
+            if (!isset($chosen[$key]) || ($isIPv4 && !$chosen[$key]['isIPv4'])) {
+                $chosen[$key] = array('address' => $addr, 'hostname' => $i["hostname"], 'isIPv4' => $isIPv4);
+            }
+        }
+        foreach ($chosen as $c) {
+            $desc = $c['address'] . " - " . $c['hostname'];
+            $backupHosts[$desc] = $c['address'];
         }
         ksort($backupHosts);
     }
