@@ -286,7 +286,18 @@
             html += '<div align="right">';
 
             if (installed) {
-                if (!data.hasOwnProperty('allowUpdates') || data.allowUpdates) {
+                // Determine the effective allowUpdates flag. A matching version
+                // entry's allowUpdates overrides the top-level value; when neither
+                // is set, updates are allowed by default. This lets a plugin freeze
+                // an old FPP major (pinned sha, allowUpdates: 0 on that entry) while
+                // keeping updates enabled on the current-major entry.
+                var allowUpdates = true;
+                if (data.hasOwnProperty('allowUpdates'))
+                    allowUpdates = data.allowUpdates ? true : false;
+                if ((compatibleVersion >= 0) && data.versions[compatibleVersion].hasOwnProperty('allowUpdates'))
+                    allowUpdates = data.versions[compatibleVersion].allowUpdates ? true : false;
+
+                if (allowUpdates) {
                     html += "<div class='pendingSpan updatesAvailable'";
                     if (!data.updatesAvailable)
                         html += " style='display: none;'";
