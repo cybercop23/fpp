@@ -7915,7 +7915,7 @@ function OnMultisyncChanged (mscheck, tblCommand) {
 	} else {
 		$('#' + tblCommand + '_multisyncHosts_row').hide();
 		// Clear the host list so a hidden, stale value isn't saved with the command.
-		$('#' + tblCommand + '_multisyncHosts').val('');
+		SetMultisyncHosts(tblCommand, '');
 	}
 }
 // Repopulate one command argument's content list from the remote host(s).
@@ -7934,7 +7934,9 @@ function ReloadArgContentList (tblCommand, x, baseUrl) {
 	}
 }
 function OnMultisyncHostsChanged (hosts, tblCommand) {
-	var baseURL = $(hosts).val();
+	// ReloadArgContentList()/ReloadContentList() query a single remote, so use
+	// the first selected host as the base for populating arg content lists.
+	var baseURL = String($(hosts).val() || '').split(',')[0].trim();
 	if (baseURL != undefined && baseURL != '') {
 		for (var x = 1; x < 20; x++) {
 			ReloadArgContentList(tblCommand, x, baseURL);
@@ -7942,79 +7944,95 @@ function OnMultisyncHostsChanged (hosts, tblCommand) {
 	}
 }
 
-// Turn the Multisync "Hosts" field into a jQuery-UI multi-value autocomplete:
-// discovered hosts are suggested per comma-separated term and arbitrary
-// hosts can still be typed. Falls back to the native datalist if jQuery-UI
-// isn't loaded on the page.
-function InitMultisyncHostsAutocomplete (tblCommand) {
-	var input = $('#' + tblCommand + '_multisyncHosts');
-	if (input.length == 0 || typeof input.autocomplete !== 'function') {
+// The Multisync "Hosts" field is a scrollable list of checkboxes (one per
+// discovered host) plus a small text box for adding arbitrary hosts. Checkboxes
+// are single-tap on touch/"Big Button" kiosk displays and scroll cleanly for
+// large device lists, with no jQuery-UI dependency. The saved value is kept as a
+// comma-separated string in the hidden #<tblCommand>_multisyncHosts input so the
+// save/load paths and the backend are unchanged. See issue #2733.
+
+// Escape a value for safe use inside a single-quoted HTML attribute.
+function EscapeMultisyncHost (v) {
+	return String(v).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/</g, '&lt;');
+}
+
+// Find the checkbox for a host by comparing decoded values (robust to any
+// characters, unlike an attribute selector built from escaped HTML).
+function FindMultisyncHostCheckbox (container, host) {
+	return container.find('input.multisyncHostCheckbox').filter(function () {
+		return $(this).val() === host;
+	});
+}
+
+// Build one checkbox row for the host list.
+function MultisyncHostCheckboxHtml (tblCommand, value, label, checked) {
+	var v = EscapeMultisyncHost(value);
+	return (
+		"<label class='d-block text-nowrap fw-normal mb-0 py-1'>" +
+		"<input type='checkbox' class='multisyncHostCheckbox me-2'" +
+		" value='" + v + "'" + (checked ? ' checked' : '') +
+		" onChange='SyncMultisyncHostsFromSelect(\"" + tblCommand + "\");'>" +
+		EscapeMultisyncHost(label) + '</label>'
+	);
+}
+
+// Collect checked hosts, push them into the hidden input (comma string) and
+// refresh any arg content lists that populate from the chosen remote (see #2016).
+function SyncMultisyncHostsFromSelect (tblCommand) {
+	var hosts = [];
+	$('#' + tblCommand + '_multisyncHostsSelect input.multisyncHostCheckbox:checked').each(function () {
+		hosts.push($(this).val());
+	});
+	var hidden = $('#' + tblCommand + '_multisyncHosts');
+	hidden.val(hosts.join(','));
+	OnMultisyncHostsChanged(hidden[0], tblCommand);
+}
+
+// Add a manually typed host (e.g. an offline device not in the discovered list)
+// as a new checked row, then re-sync.
+function AddCustomMultisyncHost (tblCommand) {
+	var box = $('#' + tblCommand + '_multisyncHostsCustom');
+	var host = (box.val() || '').trim();
+	if (host == '') {
 		return;
 	}
-
-	var available = [];
-	$.each(GetRemotes(), function (k, v) {
-		available.push({ label: v, value: k });
-	});
-
-	// Drop the native datalist so two suggestion popups don't show at once.
-	input.removeAttr('list');
-
-	function split (val) {
-		return val.split(/,\s*/);
+	var container = $('#' + tblCommand + '_multisyncHostsSelect');
+	var existing = FindMultisyncHostCheckbox(container, host);
+	if (existing.length == 0) {
+		container.append(MultisyncHostCheckboxHtml(tblCommand, host, host, true));
+	} else {
+		existing.prop('checked', true);
 	}
-	function extractLast (term) {
-		return split(term).pop();
-	}
+	box.val('');
+	SyncMultisyncHostsFromSelect(tblCommand);
+}
 
-	input
-		.on('keydown', function (event) {
-			// Don't let Tab move focus while a menu item is highlighted.
-			if (
-				event.keyCode === $.ui.keyCode.TAB &&
-				$(this).autocomplete('instance').menu.active
-			) {
-				event.preventDefault();
-			}
+// Reflect a saved comma-separated host string into the checkbox list: check
+// matching hosts and append any saved-but-unknown host as a new checked row.
+function SetMultisyncHosts (tblCommand, csv) {
+	var hidden = $('#' + tblCommand + '_multisyncHosts');
+	hidden.val(csv || '');
+	var container = $('#' + tblCommand + '_multisyncHostsSelect');
+	if (container.length == 0) {
+		return;
+	}
+	var hosts = String(csv || '')
+		.split(',')
+		.map(function (h) {
+			return h.trim();
 		})
-		.on('focus', function () {
-			$(this).autocomplete('search', extractLast(this.value));
-		})
-		.on('click', function () {
-			// The field keeps focus after a host is picked, so a focus event
-			// won't fire on the next click. Reopen the suggestions on click too.
-			$(this).autocomplete('search', extractLast(this.value));
-		})
-		.autocomplete({
-			minLength: 0,
-			open: function () {
-				// The command editor often lives inside a Bootstrap modal
-				// (z-index ~1050); the jQuery-UI menu defaults to z-index 100
-				// and would render behind it. Lift it above the modal.
-				$(this).autocomplete('widget').css('z-index', 100000);
-			},
-			source: function (request, response) {
-				var term = extractLast(request.term).toLowerCase();
-				response(
-					available.filter(function (item) {
-						return item.label.toLowerCase().indexOf(term) !== -1;
-					})
-				);
-			},
-			focus: function () {
-				// Keep the typed value while arrowing through the menu.
-				return false;
-			},
-			select: function (event, ui) {
-				var terms = split(this.value);
-				terms.pop(); // remove the term being completed
-				terms.push(ui.item.value); // add the selected host
-				terms.push(''); // trailing delimiter so the next host can be typed
-				this.value = terms.join(',');
-				OnMultisyncHostsChanged(this, tblCommand);
-				return false;
-			}
+		.filter(function (h) {
+			return h != '';
 		});
+	container.find('input.multisyncHostCheckbox').prop('checked', false);
+	$.each(hosts, function (i, host) {
+		var cb = FindMultisyncHostCheckbox(container, host);
+		if (cb.length == 0) {
+			container.append(MultisyncHostCheckboxHtml(tblCommand, host, host, true));
+		} else {
+			cb.prop('checked', true);
+		}
+	});
 }
 
 var remoteIpList = null;
@@ -8081,28 +8099,40 @@ function CommandSelectChanged (
 		tblCommand +
 		'");\'></input></td></tr>';
 	$('#' + tblCommand).append(line);
+	// Hosts row: a scrollable checkbox list (single-tap, touch/kiosk friendly,
+	// no jQuery-UI needed) plus a text box to add an arbitrary host. A hidden
+	// input keeps the comma-separated value that the save/load paths and the
+	// backend expect. See issue #2733.
 	line =
 		"<tr id='" +
 		tblCommand +
-		"_multisyncHosts_row' style='display:none'><td>Hosts:</td><td><input style='width:100%;' type='text' id='" +
+		"_multisyncHosts_row' style='display:none'><td>Hosts:</td><td>" +
+		"<input type='hidden' id='" +
 		tblCommand +
-		"_multisyncHosts' class='arg_multisyncHosts'";
+		"_multisyncHosts' class='arg_multisyncHosts'>";
 	line +=
-		" list='" +
+		"<div class='checkboxSelectList border rounded overflow-auto px-2 py-1' id='" +
 		tblCommand +
-		"_multisyncHosts_list' onChange='OnMultisyncHostsChanged(this, \"" +
-		tblCommand +
-		'");\'></input>';
-	line += "<datalist id='" + tblCommand + "_multisyncHosts_list'>";
+		"_multisyncHostsSelect'>";
 	remotes = GetRemotes();
 	$.each(remotes, function (k, v) {
-		line += "<option value='" + k + "'>" + v + '</option>\n';
+		line += MultisyncHostCheckboxHtml(tblCommand, k, v, false);
 	});
-	line += '</datalist></td></tr>';
+	line += '</div>';
+	line +=
+		"<div class='d-flex gap-1 mt-1'><input type='text' class='flex-fill' id='" +
+		tblCommand +
+		"_multisyncHostsCustom' placeholder='Add host…'" +
+		" onkeydown='if(event.keyCode==13){event.preventDefault();AddCustomMultisyncHost(\"" +
+		tblCommand +
+		"\");}'>";
+	line +=
+		"<input type='button' class='buttons' value='Add' onclick='AddCustomMultisyncHost(\"" +
+		tblCommand +
+		"\");'></div>";
+	line += '</td></tr>';
 
 	$('#' + tblCommand).append(line);
-
-	InitMultisyncHostsAutocomplete(tblCommand);
 
 	argPrintFunc(tblCommand, configAdjustable, co['args']);
 }
@@ -8387,7 +8417,7 @@ function PrintArgInputs (tblCommand, configAdjustable, args, startCount = 1) {
 					line += " data-contentlisturl='" + OverlayModelContentListUrl(val['contentListUrl']) + "'";
 				}
 				if (val['type'] == 'multistring') {
-					line += ' multiple';
+					line += " multiple data-multistring='1'";
 				}
 
 				if (typeof val['children'] === 'object') {
@@ -8474,7 +8504,7 @@ function PrintArgInputs (tblCommand, configAdjustable, args, startCount = 1) {
 					ID +
 					"'";
 				if (val['type'] == 'multistring') {
-					line += ' multiple';
+					line += " multiple data-multistring='1'";
 				}
 				if (typeof val['contentListUrl'] != 'undefined') {
 					line += " data-contentlisturl='" + OverlayModelContentListUrl(val['contentListUrl']) + "'";
@@ -8672,6 +8702,16 @@ function PrintArgInputs (tblCommand, configAdjustable, args, startCount = 1) {
 			line += '</select>';
 		}
 
+		// A multistring is a native <select multiple>; overlay a scrollable
+		// checkbox list (single-tap, touch/kiosk friendly) that mirrors it. The
+		// <select> stays the source of truth for save/load/content-reload. #2733
+		if (val['type'] == 'multistring') {
+			line +=
+				"<div id='" +
+				ID +
+				"_checks' class='checkboxSelectList border rounded overflow-auto px-2 py-1'></div>";
+		}
+
 		line += '</td></tr>';
 		$('#' + tblCommand).append(line);
 		if (typeof val['contentListUrl'] != 'undefined') {
@@ -8754,11 +8794,52 @@ function PrintArgInputs (tblCommand, configAdjustable, args, startCount = 1) {
 
 	if (tblCommand == 'playlistEntryCommandOptions') UpdateChildVisibility();
 
+	// Build the checkbox overlay for every multistring select now that their
+	// options (including any synchronously fetched content lists) are in place.
+	$('#' + tblCommand + " select[data-multistring='1']").each(function () {
+		SyncMultistringChecks(this);
+	});
+
 	for (var i = 0; i < initFuncs.length; i++) {
 		if (typeof window[initFuncs[i]] == 'function') {
 			window[initFuncs[i]]();
 		}
 	}
+}
+
+// Mirror a multistring <select multiple> (the source of truth for save/load and
+// content reloads) into a scrollable, touch-friendly checkbox list, and hide the
+// native select. Rebuilt whenever the option list or selection changes. #2733
+function SyncMultistringChecks (sel) {
+	var $sel = $(sel);
+	var id = $sel.attr('id');
+	if (!id) {
+		return;
+	}
+	var $container = $('#' + id + '_checks');
+	if ($container.length === 0) {
+		return;
+	}
+	$sel.addClass('d-none'); // the checkbox list replaces the native multi-select
+	$container.empty();
+	$sel.find('option').each(function () {
+		var opt = this;
+		if (opt.value === '') {
+			return; // skip an allowBlanks placeholder
+		}
+		var $label = $("<label class='d-block text-nowrap fw-normal mb-0 py-1'></label>");
+		var $cb = $("<input type='checkbox' class='me-2'>");
+		$cb.prop('checked', opt.selected);
+		if (opt.title) {
+			$label.attr('title', opt.title);
+		}
+		$cb.on('change', function () {
+			opt.selected = this.checked;
+			$sel.trigger('change'); // fire onChange/child-visibility handlers
+		});
+		$label.append($cb).append(document.createTextNode(opt.text));
+		$container.append($label);
+	});
 }
 
 function ReloadContentList (baseUrl, inp) {
@@ -8875,6 +8956,11 @@ function ReloadContentList (baseUrl, inp) {
 			arg.val(selectedValue);
 		}
 	}
+
+	// Rebuild the checkbox overlay after the option list has been repopulated.
+	if (arg.attr('data-multistring')) {
+		SyncMultistringChecks(arg[0]);
+	}
 }
 
 function PopulateExistingCommand (
@@ -8905,7 +8991,7 @@ function PopulateExistingCommand (
 						baseUrl = val;
 					}
 					$('#' + tblCommand + '_multisyncHosts_row').show();
-					$('#' + tblCommand + '_multisyncHosts').val(val);
+					SetMultisyncHosts(tblCommand, val);
 				}
 			}
 		} else {
@@ -8939,6 +9025,8 @@ function PopulateExistingCommand (
 							return ~$.inArray(this.text, split);
 						}
 					);
+					// Reflect the loaded selection into the checkbox overlay.
+					SyncMultistringChecks(inp[0]);
 				} else {
 					// Update the colour fields differently
 					if (inp.attr('type') === 'color') {

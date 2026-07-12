@@ -4368,3 +4368,11 @@ a.api-anchor {
 .svg-fault-fill {
 	--color_fill: red;
 }
+
+/* Scrollable checkbox multi-select used by the command editor (multisync Hosts
+   field and multistring args, issue #2733): scroll boundary so a large list
+   doesn't push the dialog off-screen. Border, rounding, padding, spacing and
+   layout use Bootstrap utilities. */
+.checkboxSelectList {
+	max-height: 180px;
+}

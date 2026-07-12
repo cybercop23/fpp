@@ -318,7 +318,16 @@ function DeleteProxy()
 /**
  * Get all remote FPPs
  *
- * Returns the list of known remote FPP systems from `fppd` multiSync discovery.
+ * Returns the list of known remote FPP systems from `fppd` multiSync discovery,
+ * keyed by address. Addresses that can't serve as a useful command/plugin target
+ * are filtered out:
+ *   - loopback (127.0.0.0/8, ::1) — the local box discovering itself.
+ *   - IPv6 link-local (fe80::/10) — needs a host-specific zone id and can't be
+ *     unicast by fppd anyway (MultiSync::SendUnicastPacket is IPv4-only).
+ *   - IPv4 link-local / APIPA (169.254.0.0/16) — dropped when the same device
+ *     also has a routable address; kept only when it is all the device has, so a
+ *     link-local-only host stays selectable.
+ * Multiple routable addresses for one device are left intact.
  *
  * @route GET /api/remotes
  * @response 200 Known remote FPP systems
@@ -338,13 +347,70 @@ function GetRemotes()
     curl_setopt($curl, CURLOPT_CONNECTTIMEOUT_MS, 200);
     $request_content = curl_exec($curl);
 
-    $remotes = array();
     $j = json_decode($request_content, true);
-    foreach ($j["systems"] as $host) {
-        if ($host["address"] != $host["hostname"]) {
-            $remotes[$host["address"]] = $host["address"] . " - " . $host["hostname"];
+    $systems = (is_array($j) && isset($j["systems"]) && is_array($j["systems"]))
+        ? $j["systems"]
+        : array();
+
+    // Classify an address: 'loopback', 'fe80', 'apipa' (IPv4 link-local) or 'routable'.
+    $classify = function ($ip) {
+        $ipl = strtolower($ip);
+        if (strpos($ip, '127.') === 0 || $ipl === '::1') {
+            return 'loopback';
+        }
+        if (strpos($ipl, 'fe80') === 0) {
+            return 'fe80';
+        }
+        if (strpos($ip, '169.254.') === 0) {
+            return 'apipa';
+        }
+        return 'routable';
+    };
+
+    // Group entries by device so we can tell whether a device has any routable
+    // address before deciding to drop its link-local one. Prefer UUID, then
+    // hostname, then the address itself.
+    $deviceKey = function ($host) {
+        if (!empty($host["uuid"])) {
+            return 'uuid:' . $host["uuid"];
+        }
+        if (!empty($host["hostname"])) {
+            return 'host:' . $host["hostname"];
+        }
+        return 'addr:' . $host["address"];
+    };
+
+    // First pass: which devices have at least one routable address?
+    $hasRoutable = array();
+    foreach ($systems as $host) {
+        if (!isset($host["address"])) {
+            continue;
+        }
+        if ($classify($host["address"]) === 'routable') {
+            $hasRoutable[$deviceKey($host)] = true;
+        }
+    }
+
+    // Second pass: build the address => label map, applying the filter.
+    $remotes = array();
+    foreach ($systems as $host) {
+        if (!isset($host["address"])) {
+            continue;
+        }
+        $address = $host["address"];
+        $class = $classify($address);
+        if ($class === 'loopback' || $class === 'fe80') {
+            continue;
+        }
+        // Drop APIPA only when the device has a routable address to use instead.
+        if ($class === 'apipa' && !empty($hasRoutable[$deviceKey($host)])) {
+            continue;
+        }
+        $hostname = isset($host["hostname"]) ? $host["hostname"] : $address;
+        if ($address != $hostname) {
+            $remotes[$address] = $address . " - " . $hostname;
         } else {
-            $remotes[$host["address"]] = $host["address"];
+            $remotes[$address] = $address;
         }
     }
     return json($remotes);
