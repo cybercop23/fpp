@@ -56,6 +56,13 @@
     function CommandEditorPresetSelectChanged() {
         if (typeof commandEditorPresets != 'string') {
             var presetName = $('#presetNames').val();
+            if (presetName == '') {
+                // Deselecting the preset resets the fields below back to the
+                // state the editor opened with.
+                PopulateExistingCommand(commandEditorData, 'editorCommand', 'tblCommandEditor');
+                $('#btnSaveDirectEditorCommand').prop('disabled', true);
+                return;
+            }
             for (var i = 0; i < commandEditorPresets.commands.length; i++) {
                 if (commandEditorPresets.commands[i].name == presetName) {
                     PopulateExistingCommand(commandEditorPresets.commands[i], 'editorCommand', 'tblCommandEditor');
@@ -280,13 +287,6 @@
 </script>
 
 <style>
-    #tblCommandEditor .commandEditorHint {
-        font-style: italic;
-        font-size: 0.875em;
-        color: var(--fpp-text-secondary);
-        padding-bottom: 8px;
-    }
-
     #tblCommandEditor td:first-child {
         padding-right: 8px;
         width: 25%;
@@ -295,30 +295,17 @@
 
 <table width="100%" class="tblCommandEditor settingsTable" id="tblCommandEditor">
     <tr class='presetSelect'>
-        <td colspan="2">
-            <h2>Load from Preset</h2>
-        </td>
-    </tr>
-    <tr class='presetSelect'>
-        <td colspan="2" class="commandEditorHint">Selecting a preset pre-populates the command and its options below
-        </td>
-    </tr>
-    <tr class='presetSelect'>
-        <td>Preset:</td>
-        <td><select id='presetNames' onChange='CommandEditorPresetSelectChanged();'></select></td>
-    </tr>
-    <tr>
-        <td colspan="2">
-            <h2>Command Settings</h2>
-        </td>
+        <td class="text-nowrap">Load Existing Command Preset:</td>
+        <td><select id='presetNames' onChange='CommandEditorPresetSelectChanged();'
+                title="Selecting a preset pre-populates the command and its options below"></select></td>
     </tr>
     <tr>
         <td>Command:</td>
         <td><select id="editorCommand" onChange="CommandEditorCommandChanged();"></select></td>
     </tr>
 </table>
-<hr>
-<center>
+<hr class="mt-4">
+<div class="text-center pb-3">
     <input id="btnSaveEditorCommand" type="button" class="buttons wideButton" value="Accept Changes"
         onClick="CommandEditorSave();">
     <input id="btnRunEditorCommand" type="button" class="buttons wideButton" value="Run Now"
@@ -327,5 +314,4 @@
         onClick="CommandEditorSaveDirect();" disabled='disabled'>
     <input id="btnCancelCommandEditor" type="button" class="buttons wideButton" value="Cancel Edit"
         onClick="CommandEditorCancel();">
-
-</center>
+</div>
