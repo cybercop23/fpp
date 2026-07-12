@@ -3652,7 +3652,7 @@
         </p>
         <label for="selectVendor">Vendor:</label>
         <select id="selectVendor" class="selectVendor form-control" onChange="PopulatePanelTypes();">
-            <option value="">Select Vendor</option>
+            <option value="">-- Select Vendor --</option>
         </select>
         <label for="selectPanel">Panel Type:</label>
         <select id="selectPanel" class="selectPanel form-control" onChange="PanelTypeSelected();">

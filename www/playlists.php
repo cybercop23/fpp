@@ -628,7 +628,7 @@
             if (typeof initialPlaylist !== 'undefined') {
                 LoadInitialPlaylist();
             } else {
-                $('#playlistSelect').prepend('<option value="" disabled selected>Select a Playlist</option>');
+                $('#playlistSelect').prepend('<option value="" disabled selected>-- Select a Playlist --</option>');
             }
 
             // Handle browser back/forward button
@@ -727,7 +727,7 @@
             var currentName = $('#txtPlaylistName').val();
             var count = selected.length;
 
-            var options = '<option value="">Select target playlist...</option>';
+            var options = '<option value="">-- Select target playlist --</option>';
             for (var i = 0; i < playListArray.length; i++) {
                 if (playListArray[i].name == currentName) continue;
                 options += '<option value="' + playListArray[i].name + '">' + playListArray[i].name + ' (' + playListArray[i].total_items + ' items)</option>';

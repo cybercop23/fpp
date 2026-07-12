@@ -489,7 +489,7 @@
                 "<td>" + (currentRows + 1) + "</td>" +
                 "<td><input class='active' type='checkbox' checked></td>" +
                 "<td><select class='type' onChange='ProcessorTypeSelected(this);'>" +
-                "<option value=''>Select a type</option>" +
+                "<option value=''>-- Select a type --</option>" +
                 "<option value='Remap'>Remap</option>" +
                 "<option value='Brightness'>Brightness</option>" +
                 "<option value='Hold Value'>Hold Value</option>" +

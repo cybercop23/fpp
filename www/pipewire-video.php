@@ -575,7 +575,7 @@
             switch (type) {
                 case 'hdmi':
                     html += '<select class="form-select form-select-sm" style="width:auto;" onchange="UpdateMemberField(' + gi + ',' + mi + ',\'connector\',this.value)">';
-                    html += '<option value="">— Select Connector —</option>';
+                    html += '<option value="">-- Select Connector --</option>';
                     for (var i = 0; i < availableConnectors.length; i++) {
                         var c = availableConnectors[i];
                         var sel = (member.connector === c.connector) ? ' selected' : '';
@@ -600,7 +600,7 @@
 
                 case 'overlay':
                     html += '<select class="form-select form-select-sm" style="width:auto;" onchange="UpdateMemberField(' + gi + ',' + mi + ',\'overlayModel\',this.value)">';
-                    html += '<option value="">— Select Model —</option>';
+                    html += '<option value="">-- Select Model --</option>';
                     for (var i = 0; i < availableOverlays.length; i++) {
                         var m = availableOverlays[i];
                         var sel = (member.overlayModel === m.name) ? ' selected' : '';

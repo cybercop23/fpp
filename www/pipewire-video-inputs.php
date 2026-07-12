@@ -480,7 +480,7 @@
                     html += '<div class="col-auto">';
                     if (availableV4l2Devices.length > 0) {
                         html += '<select class="form-select form-select-sm" style="width:auto;" onchange="UpdateSourceField(' + index + ',\'device\',this.value)">';
-                        html += '<option value="">— Select Device —</option>';
+                        html += '<option value="">-- Select Device --</option>';
                         for (var i = 0; i < availableV4l2Devices.length; i++) {
                             var d = availableV4l2Devices[i];
                             var sel = (source.device === d.device) ? ' selected' : '';

@@ -23,7 +23,7 @@
                     }
                     names.sort();
 
-                    var options = "<option value=''>---- Select a Command Preset ----</option>";
+                    var options = "<option value=''>-- Select a Command Preset --</option>";
                     for (var i = 0; i < names.length; i++) {
                         options += "<option value='" + names[i] + "'>" + names[i] + "</option>";
                     }

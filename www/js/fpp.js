@@ -6372,7 +6372,7 @@ function PopulatePlaylists (sequencesAlso, options) {
 				// Default to a placeholder rather than auto-selecting the first
 				// playlist (whose details aren't loaded on page load anyway).
 				playlistOptionsText +=
-					'<option value="" selected>&lt;Select Playlist or Sequence&gt;</option>';
+					'<option value="" selected>-- Select Playlist or Sequence --</option>';
 				playlistOptionsText += "<optgroup label='Playlists'>";
 			}
 			for (let j = 0; j < playListArray.length; j++) {

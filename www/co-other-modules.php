@@ -1216,7 +1216,7 @@
         rest += "<div class='col-sm-2'>&nbsp;</div>";
         rest += "<div class='col-sm-2'><input id='channelValue' type='number' min='1' max='255' value='" + config.value + "'></div>";
         rest += "<div class='col-sm-5 command-select'><select id='presetName'>";
-        rest += "<option value='' " + (config.preset == "" ? "selected" : "") + ">--Select Command Preset--</option>";
+        rest += "<option value='' " + (config.preset == "" ? "selected" : "") + ">-- Select Command Preset --</option>";
         var commands = commandPresets.commands;
         for (var a in commands) {
             var n = commands[a].name;

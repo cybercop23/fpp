@@ -3674,7 +3674,7 @@
                             <div class="form-actions multisyncBulkActions  ">
                                 <b>Action for selected systems:</b>
                                 <select id='multiAction' onChange='multiActionChanged();'>
-                                    <option value='noop'>---- Select an Action ----</option>
+                                    <option value='noop'>-- Select an Action --</option>
                                     <option value='upgradeFPP'>Upgrade FPP</option>
                                     <option value='upgradeOS'>Upgrade OS</option>
                                     <option value='restartFPPD'>Restart FPPD</option>

@@ -719,7 +719,7 @@
             html += '<i class="fas fa-play"></i> Play Click Track</button>';
             html += '<span style="margin: 0 10px; color: #999;">or</span>';
             html += '<select id="sync-media-select-' + index + '" class="form-control form-control-sm" style="display:inline-block; width:auto; max-width:300px; vertical-align:middle;">';
-            html += '<option value="">— Select from library —</option>';
+            html += '<option value="">-- Select from library --</option>';
             html += '</select> ';
             html += '<button class="buttons btn-outline-info btn-sm" id="sync-media-btn-' + index + '" onclick="PlayCalibrationMedia(' + index + ')">';
             html += '<i class="fas fa-music"></i> Play</button>';
