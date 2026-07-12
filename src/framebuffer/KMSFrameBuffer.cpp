@@ -576,15 +576,21 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
             int tookMS = (int)(syncEnd - syncStart);
             if (tookMS > 20) {
                 m_slowSyncs++;
+                m_lastSlowSyncMS = tookMS;
                 if (tookMS > m_maxSyncMS) {
                     m_maxSyncMS = tookMS;
                 }
             }
-            if ((m_slowSyncs || m_flipWaitTimeouts || m_flipRejects) &&
+            // Warn only when a new delay event has occurred since the last
+            // warning (rate-limited), so each warning line timestamps actual
+            // trouble rather than repeating stale totals.
+            uint64_t eventTotal = (uint64_t)m_slowSyncs + m_flipWaitTimeouts + m_flipRejects;
+            if (eventTotal != m_warnedEventTotal &&
                 (syncEnd - m_lastFlipWarnMS) > 10000) {
                 m_lastFlipWarnMS = syncEnd;
-                LogWarn(VB_CHANNELOUT, "KMSFrameBuffer %s flip-path delays since start: %u syncs >20ms (max %dms), %u flip wait timeouts, %u flip rejects\n",
-                        m_connectorName.c_str(), m_slowSyncs, m_maxSyncMS, m_flipWaitTimeouts, m_flipRejects);
+                m_warnedEventTotal = eventTotal;
+                LogWarn(VB_CHANNELOUT, "KMSFrameBuffer %s flip-path delay (last %dms); totals since start: %u syncs >20ms (max %dms), %u flip wait timeouts, %u flip rejects\n",
+                        m_connectorName.c_str(), m_lastSlowSyncMS, m_slowSyncs, m_maxSyncMS, m_flipWaitTimeouts, m_flipRejects);
             }
         }
     }

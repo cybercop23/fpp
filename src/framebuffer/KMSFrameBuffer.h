@@ -90,7 +90,11 @@ private:
     uint32_t m_flipRejects = 0;
     uint32_t m_slowSyncs = 0;
     int m_maxSyncMS = 0;
+    int m_lastSlowSyncMS = 0;
     long long m_lastFlipWarnMS = 0;
+    // Totals as of the last warning, so we only log when something new
+    // happened (a warning line then timestamps the event itself).
+    uint64_t m_warnedEventTotal = 0;
 
     CardInfo* m_cardInfo = nullptr;
 };
