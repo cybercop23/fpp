@@ -255,6 +255,55 @@ function GitOSReleases()
 }
 
 /**
+ * Get OS release notes for a tag
+ *
+ * Proxies the GitHub `FalconChristmas/fpp` release-by-tag API so the browser does
+ * not call api.github.com directly (same pattern/UA/timeout as GitOSReleases).
+ * Returns the raw GitHub release object on success; a non-200 status otherwise so
+ * the caller's error handler fires.
+ *
+ * @route GET /api/git/releases/notes/{tag}
+ * @response 200 GitHub release object for the tag
+ * @response 400 Invalid tag
+ * @response 404 Release not found for the tag
+ */
+function GitOSReleaseNotes()
+{
+    $tag = params('tag');
+
+    // Release tags are simple (e.g. "9.5", "10.0-beta2"); reject anything else
+    // before it reaches the GitHub URL.
+    if (!preg_match('/^[A-Za-z0-9._-]+$/', $tag)) {
+        http_response_code(400);
+        return json(array('status' => 'ERROR', 'message' => 'Invalid tag'));
+    }
+
+    $curl = curl_init();
+    curl_setopt($curl, CURLOPT_URL, "https://api.github.com/repos/FalconChristmas/fpp/releases/tags/" . rawurlencode($tag));
+    curl_setopt($curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 6.2; WOW64; rv:17.0) Gecko/20100101 Firefox/17.0");
+    curl_setopt($curl, CURLOPT_FAILONERROR, true);
+    curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($curl, CURLOPT_CONNECTTIMEOUT_MS, 4000);
+    $request_content = curl_exec($curl);
+    $http_code = curl_getinfo($curl, CURLINFO_HTTP_CODE);
+    curl_close($curl);
+
+    if ($request_content === false || $http_code >= 400) {
+        http_response_code(404);
+        return json(array('status' => 'ERROR', 'message' => 'Release notes not found'));
+    }
+
+    $data = json_decode($request_content, true);
+    if ($data === null) {
+        http_response_code(502);
+        return json(array('status' => 'ERROR', 'message' => 'Invalid response from GitHub'));
+    }
+
+    return json($data);
+}
+
+/**
  * Get release asset sizes
  *
  * Returns release asset size information from the GitHub `FalconChristmas/fpp` releases API.

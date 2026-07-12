@@ -3446,6 +3446,36 @@
         }
       }
     },
+    "/api/git/releases/notes/{tag}": {
+      "parameters": [
+        {
+          "name": "tag",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "git"
+        ],
+        "summary": "Get OS release notes for a tag",
+        "description": "Proxies the GitHub `FalconChristmas/fpp` release-by-tag API so the browser does not call api.github.com directly (same pattern/UA/timeout as GitOSReleases). Returns the raw GitHub release object on success; a non-200 status otherwise so the caller's error handler fires.",
+        "responses": {
+          "200": {
+            "description": "GitHub release object for the tag"
+          },
+          "400": {
+            "description": "Invalid tag"
+          },
+          "404": {
+            "description": "Release not found for the tag"
+          }
+        }
+      }
+    },
     "/api/git/releases/os/{All}": {
       "parameters": [
         {
@@ -6947,7 +6977,7 @@
           "remotes"
         ],
         "summary": "Get all remote FPPs",
-        "description": "Returns the list of known remote FPP systems from `fppd` multiSync discovery.",
+        "description": "Returns the list of known remote FPP systems from `fppd` multiSync discovery, keyed by address. Addresses that can't serve as a useful command/plugin target are filtered out: - loopback (127.0.0.0/8, ::1) \u2014 the local box discovering itself. - IPv6 link-local (fe80::/10) \u2014 needs a host-specific zone id and can't be unicast by fppd anyway (MultiSync::SendUnicastPacket is IPv4-only). - IPv4 link-local / APIPA (169.254.0.0/16) \u2014 dropped when the same device also has a routable address; kept only when it is all the device has, so a link-local-only host stays selectable. Multiple routable addresses for one device are left intact.",
         "responses": {
           "200": {
             "description": "Known remote FPP systems",

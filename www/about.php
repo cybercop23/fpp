@@ -40,53 +40,77 @@
         var osUpgradeAvailable = false;
         var forceOsUpgradeTest = false; // Test mode flag - prevents PopulateOSSelect from overwriting
         var currentOSRelease = null;
+        var currentFPPVersion = null;
 
         /**
-         * Parse OS version from release string or filename
-         * Extracts year-month pattern (e.g., "2025-11" from "v2025-11" or "Pi-9.3_2025-11.fppos")
+         * An image is "local" (already on disk) when it is not a downloadable
+         * GitHub/source asset. Files inserted from osUpdateFiles aren't in
+         * osAssetMap and are always on disk; assets in the map carry a
+         * `downloaded` flag from the releases API.
          */
-        function parseOSVersion(str) {
-            if (!str) return null;
-            var match = str.match(/(\d{4})-(\d{2})/);
-            if (match) {
-                return { year: parseInt(match[1]), month: parseInt(match[2]) };
-            }
-            return null;
+        function isOSImageLocal(os) {
+            return (os in osAssetMap) ? !!osAssetMap[os].downloaded : true;
         }
 
         /**
-         * Check if available OS version is newer than current
+         * Build the installed-OS baseline used to decide "is an upgrade available".
+         * The installed OS *image* records only a build date (rfs_version ->
+         * "v2026-06"), so the version comes from the installed FPP *software*
+         * version (advancedView.Version) and the image date is used only as a
+         * tiebreaker. Returns null if the version can't be parsed so callers can
+         * fall back to the old presence-based check.
          */
-        function isNewerOSVersion(available, current) {
-            if (!available || !current) return false;
-            if (available.year > current.year) return true;
-            if (available.year === current.year && available.month > current.month) return true;
-            return false;
+        function parseInstalledOSBaseline() {
+            if (!currentFPPVersion) return null;
+            var vm = currentFPPVersion.match(/(\d+)\.(\d+)(?:\.(\d+))?/);
+            if (!vm) return null;
+            var dm = currentOSRelease ? currentOSRelease.match(/(\d{4})-?(\d{2})/) : null;
+            return {
+                major: parseInt(vm[1]),
+                minor: parseInt(vm[2]),
+                patch: vm[3] !== undefined ? parseInt(vm[3]) : 0,
+                dateNum: dm ? parseInt(dm[1] + dm[2]) : 0
+            };
         }
 
         /**
-         * Check if any available OS in the dropdown is newer than installed
+         * Check if any available OS in the dropdown is newer than installed.
+         * Version trumps image date: compare major.minor.patch first (reusing the
+         * same parseOSFilename() the dropdown sort uses), and only when the version
+         * matches, use the image build date as the tiebreaker. This keeps the
+         * "OS upgrade available" banner consistent with the version-sorted list.
          */
         function checkForNewerOS() {
-            var currentVersion = parseOSVersion(currentOSRelease);
-            if (!currentVersion) {
-                // Can't determine current version, fall back to old behavior
+            var baseline = parseInstalledOSBaseline();
+            if (!baseline) {
+                // Can't determine installed version, fall back to old behavior
                 return $('#osSelect option').length > 1;
             }
 
             var hasNewerOS = false;
             $('#osSelect option').each(function () {
-                if (this.value !== '') {
-                    // Nightly builds are listed for dev users but should not
-                    // trigger the "OS upgrade available" banner.
-                    if (/nightly/i.test(this.text)) {
-                        return;
-                    }
-                    var availableVersion = parseOSVersion(this.text);
-                    if (isNewerOSVersion(availableVersion, currentVersion)) {
-                        hasNewerOS = true;
-                        return false;
-                    }
+                if (this.value === '') return;
+                // Nightly builds are listed for dev users but should not
+                // trigger the "OS upgrade available" banner.
+                if (/nightly/i.test(this.text)) return;
+
+                var info = parseOSFilename(this.text);
+                var candPatch = info.patch !== null ? info.patch : 0;
+                var newer;
+                if (info.major !== baseline.major) {
+                    newer = info.major > baseline.major;
+                } else if (info.minor !== baseline.minor) {
+                    newer = info.minor > baseline.minor;
+                } else if (candPatch !== baseline.patch) {
+                    newer = candPatch > baseline.patch;
+                } else {
+                    // Same version -- a prerelease of the installed version is not
+                    // an upgrade; otherwise a newer build date is.
+                    newer = !info.prereleaseType && info.dateNum > baseline.dateNum;
+                }
+                if (newer) {
+                    hasNewerOS = true;
+                    return false;
                 }
             });
 
@@ -555,6 +579,7 @@
                 if (data.advancedView) {
                     if (data.advancedView.Version) {
                         $('#fppVersionValue').text(data.advancedView.Version);
+                        currentFPPVersion = data.advancedView.Version;
                     }
                     if (data.advancedView.Platform) {
                         $('#platformValue').text(data.advancedView.Platform);
@@ -832,7 +857,9 @@
                             osAssetMap[file["asset_id"]] = {
                                 name: file["filename"],
                                 url: file["url"],
-                                source: file["source"]
+                                source: file["source"],
+                                downloaded: file["downloaded"],
+                                tag: file["tag"]
                             };
 
                             var isLegacyVersion = legacyVersionRegex.test(file['filename']);
@@ -857,9 +884,10 @@
                             var label = file["filename"];
                             if (!file["downloaded"]) {
                                 label += " (download)";
-                                // Keep the exact "(download)" token above (UpgradeOS/DownloadOS
-                                // key off it); append the source origin separately so the user
-                                // sees the image is available from their local Upgrade Source.
+                                // The "(download)" token is cosmetic only -- UpgradeOS/DownloadOS
+                                // decide locality via osAssetMap[...].downloaded (isOSImageLocal),
+                                // not this label. Append the source origin so the user sees the
+                                // image is available from their local Upgrade Source.
                                 if (file["source"]) {
                                     label += " from " + file["source"];
                                 }
@@ -939,14 +967,12 @@
             }
             if (os in osAssetMap) {
                 osName = osAssetMap[os].name;
-                os = osAssetMap[os].url;
+                // Already-downloaded assets upgrade from the local file (its
+                // filename); otherwise fetch from the download URL.
+                os = isOSImageLocal(os) ? osAssetMap[os].name : osAssetMap[os].url;
             }
-
-            //override file location from git to local if already downloaded
-            if ($('#osSelect option:selected').text().toLowerCase().indexOf('(download)') === -1) {
-                os = $('#osSelect option:selected').text();
-                osName = $('#osSelect option:selected').text();
-            }
+            // Entries not in osAssetMap are locally-inserted files; `os` is already
+            // the filename, which upgradeOS.php resolves against the uploads dir.
 
             var keepOptFPP = '';
             if ($('#keepOptFPP').is(':checked')) {
@@ -969,20 +995,18 @@
 
         function DownloadOS() {
             var os = $('#osSelect').val();
-            var osName = os;
 
             if (os == '')
                 return;
 
-            if (os in osAssetMap) {
-                osName = osAssetMap[os].name;
-                os = osAssetMap[os].url;
-
-                DisplayProgressDialog('osDownload', 'FPP Download OS Image');
-                StreamURL('upgradeOS.php?wrapped=1&downloadOnly=1&os=' + os, 'osDownloadText', 'OSDownloadDone');
-            } else {
+            if (isOSImageLocal(os)) {
                 alert('This fppos image has already been downloaded.');
+                return;
             }
+
+            var url = osAssetMap[os].url;
+            DisplayProgressDialog('osDownload', 'FPP Download OS Image');
+            StreamURL('upgradeOS.php?wrapped=1&downloadOnly=1&os=' + url, 'osDownloadText', 'OSDownloadDone');
         }
 
         function OSDownloadDone() {
@@ -992,9 +1016,10 @@
         }
 
         function ViewOSReleaseNotes() {
+            var os = $('#osSelect').val();
             var osVersion = $('#osSelect option:selected').text();
 
-            if (!osVersion || osVersion == '-- Choose an OS Version --') {
+            if (os == '') {
                 DialogError('No OS Selected', 'Please select an OS version first to view its release notes.');
                 return;
             }
@@ -1016,9 +1041,19 @@
                 return;
             }
 
-            // Extract version tag from OS filename (e.g., BBB-9.3_2025-11.fppos -> 9.3)
-            var versionMatch = osVersion.match(/(v?\d+\.\d+(?:\.\d+)?(?:-[a-z]+\d*)?)/i);
-            if (!versionMatch) {
+            // Prefer the authoritative GitHub release tag from the releases API.
+            // GitHub tags point releases at major.minor (e.g. tag "9.5" for
+            // Pi-9.5.3_*.fppos), so deriving the tag from the filename patch 404s.
+            // Fall back to major.minor from the filename for locally-inserted files
+            // that have no asset entry.
+            var tag = (os in osAssetMap && osAssetMap[os].tag) ? osAssetMap[os].tag : null;
+            if (!tag) {
+                var versionMatch = osVersion.match(/(\d+)\.(\d+)/);
+                if (versionMatch) {
+                    tag = versionMatch[1] + '.' + versionMatch[2];
+                }
+            }
+            if (!tag) {
                 var html = '<div class="fpp-alert fpp-alert--warning" style="display: block;">';
                 html += '<div><i class="fas fa-info-circle"></i> <strong>Could not determine version number from selected OS.</strong></div>';
                 html += '<div class="mt-3">';
@@ -1031,15 +1066,9 @@
                 return;
             }
 
-            var version = versionMatch[1];
-            // Remove 'v' prefix if present - GitHub tags use numeric version (e.g., 9.3, not v9.3)
-            if (version.startsWith('v') || version.startsWith('V')) {
-                version = version.substring(1);
-            }
-
-            // Fetch release notes from GitHub API
+            // Fetch release notes through the api/git proxy (same path as the OS list)
             $.ajax({
-                url: 'https://api.github.com/repos/FalconChristmas/fpp/releases/tags/' + version,
+                url: 'api/git/releases/notes/' + encodeURIComponent(tag),
                 dataType: 'json',
                 success: function (release) {
                     var html = '<div style=\"max-height: 70vh; overflow-y: auto;\">';
@@ -1103,7 +1132,7 @@
                 },
                 error: function () {
                     var html = '<div class="fpp-alert fpp-alert--warning" style="display: block;">';
-                    html += '<div><i class="fas fa-info-circle"></i> <strong>Release notes not found for version ' + version + '.</strong></div>';
+                    html += '<div><i class="fas fa-info-circle"></i> <strong>Release notes not found for version ' + tag + '.</strong></div>';
                     html += '<div class="mt-3">This may be because:</div>';
                     html += '<ul style="margin: 0.5rem 0 1rem 1.5rem; padding: 0;">';
                     html += '<li>This is a minor version update. Refer to the major version for release notes.</li>';

@@ -1584,6 +1584,7 @@ set autoindent
 set ignorecase
 set mouse=r
 syntax on
+colorscheme desert
 EOF
 
 chmod 644 ${FPPHOME}/.vimrc
