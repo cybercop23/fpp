@@ -266,6 +266,10 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 	// same way install_plugin / UpgradePlugin do -- fpp_install.sh with
 	// FPPDIR/SRCDIR, preferring scripts/ with the legacy repo-root fallback.
 	$pluginBase = $settings['pluginDirectory'] . '/' . $plugin;
+	// git preserves mode bits, so a plugin committed at 0644 clones in
+	// non-executable and the is_executable() gate below would silently skip
+	// it; normalize the files FPP runs first (mirrors install_plugin).
+	exec($SUDO . ' sh -c ' . escapeshellarg('cd ' . $pluginBase . ' && { [ -d scripts ] && chmod a+x scripts/* 2>/dev/null; for f in callbacks fpp_install.sh fpp_uninstall.sh; do [ -f "$f" ] && chmod a+x "$f"; done; }'));
 	$installScript = $pluginBase . '/scripts/fpp_install.sh';
 	if (!is_executable($installScript)) {
 		$installScript = $pluginBase . '/fpp_install.sh';

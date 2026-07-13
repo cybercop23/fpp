@@ -42,6 +42,17 @@ if [ "${FPPPLATFORM}" != "MacOS" ]; then
     $SUDO chown -R fpp:fpp $1
 fi
 
+# git preserves mode bits, so a plugin whose author committed its scripts at
+# mode 0644 clones in still non-executable and the -x gates below (and the
+# uninstall/upgrade/callback paths elsewhere) silently skip them. Normalize the
+# files FPP actually runs: scripts/* (FPP's convention for runnable files -- the
+# known entry points plus any author helpers kept there), the extension-less
+# callbacks dispatcher, and the legacy flat-layout install/uninstall scripts.
+[ -d "${PLUGINDIR}/$1/scripts" ] && $SUDO chmod a+x "${PLUGINDIR}/$1/scripts/"* 2>/dev/null
+for f in callbacks fpp_install.sh fpp_uninstall.sh; do
+    [ -f "${PLUGINDIR}/$1/$f" ] && $SUDO chmod a+x "${PLUGINDIR}/$1/$f"
+done
+
 # When FPP_SKIP_INSTALL_SCRIPT=1 the caller (the Plugin Manager) wants to
 # resolve the plugin's declared dependencies before its own install script
 # runs, so it clones here and runs the plugin's fpp_install.sh itself
