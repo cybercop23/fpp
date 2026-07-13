@@ -491,6 +491,24 @@ function ProgressDialogDone (textId) {
 function SetProgressDialogStatus (id, status) {
 	$('#' + id + ' .modal-title').text(status);
 }
+
+// Extract the most recent progress "stage" declared by a streamed operation via
+// logStage() (scripts/common) -- section-header lines of the form
+// "===== <message> =====". Returns the latest stage message, or '' if none seen
+// yet. This lets any streaming dialog show "what's happening now" without
+// pattern-matching incidental log wording: scripts declare their stages, and any
+// script that calls logStage participates automatically. Pair with StreamURL's
+// dataCallback. The required interior spaces mean a plain "=====...=====" rule
+// (no spaces) is NOT matched, only genuine logStage headers.
+function ParseLastStageMarker (text) {
+	var re = /^===== (.+?) =====\s*$/gm;
+	var m,
+		last = '';
+	while ((m = re.exec(text)) !== null) {
+		last = m[1];
+	}
+	return last;
+}
 function DoModalDialog (options) {
 	var dlg = $('#' + options.id);
 	if (dlg.length == 0) {
@@ -1396,7 +1414,8 @@ function StreamURL (
 	postData = null,
 	postContentType = null,
 	postProcessData = true,
-	raw = false
+	raw = false,
+	dataCallback = ''
 ) {
 	var last_response_len = false;
 	var outputArea = document.getElementById(id);
@@ -1453,6 +1472,13 @@ function StreamURL (
 				outputArea.scrollTop = outputArea.scrollHeight;
 				outputArea.parentElement.scrollTop =
 					outputArea.parentElement.scrollHeight;
+
+				// Optional progress hook: hand the caller the full accumulated
+				// response so it can scan for phase markers (robust to a marker
+				// being split across chunks) and update a status line.
+				if (dataCallback != '') {
+					window[dataCallback](response);
+				}
 			}
 		}
 	})

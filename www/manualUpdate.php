@@ -14,6 +14,15 @@ require_once("common.php");
 
 DisableOutputBuffering();
 
+// Emit a "===== <message> =====" stage header, matching the shell helper
+// logStage() in scripts/common, so the streaming FPP Upgrade dialog can drive
+// its status line from PHP-side phases too (git_pull emits its own). Reads as a
+// section header in the log and doubles as the machine-parsed progress marker.
+function logStage($msg)
+{
+  echo "===== $msg =====\n";
+}
+
 if (!$wrapped) {
   ?>
 
@@ -42,11 +51,10 @@ $s = floor($diffTime % 60);
 
 printf("----------------------\nElapsed Time: %02d:%02d:%02d\n", $h, $m, $s);
 ?>
-==========================================================================
 <?
 
 if ($return_val === 0) {
-  echo "Restarting fppd...\n";
+  logStage("Restarting FPP");
 
   // Compare and copy apache config if needed
   $srcConf = "/opt/fpp/etc/apache2.site";
@@ -80,9 +88,9 @@ if ($return_val === 0) {
 
   exec($SUDO . " rm -f /tmp/cache_*.cache");
   if (file_exists($fppDir . "/src/fppd")) {
-    print ("==========================================================================\n");
-    print ("Upgrade Complete.\n");
+    logStage("Upgrade Complete");
   } else {
+    logStage("Upgrade Failed");
     print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
     print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
     print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
@@ -92,6 +100,7 @@ if ($return_val === 0) {
     print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
   }
 } else {
+  logStage("Upgrade Failed");
   print ("Upgrade FAILED. See above for details.\n");
 }
 

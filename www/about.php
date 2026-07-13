@@ -825,9 +825,23 @@
             }
         }
 
+        // The upgrade is a single long stream with no item count, so instead of
+        // an "X of N" bar we surface which stage is running -- most useful during
+        // the multi-minute compile, when the log otherwise goes quiet. Stages are
+        // declared by the scripts via logStage() and parsed generically; this
+        // callback just binds the latest stage to this dialog's status line.
+        // SetProgressDialogStatus replaces the .modal-title, so we keep the
+        // "FPP Upgrade — " prefix to preserve the dialog's identity.
+        function FPPUpgradeProgress(response) {
+            var stage = ParseLastStageMarker(response);
+            if (stage != '')
+                SetProgressDialogStatus('fppUpgrade', 'FPP Upgrade — ' + stage);
+        }
+
         function UpgradeFPP() {
             DisplayProgressDialog('fppUpgrade', 'FPP Upgrade');
-            StreamURL('manualUpdate.php?wrapped=1', 'fppUpgradeText', 'FPPUpgradeDone');
+            SetProgressDialogStatus('fppUpgrade', 'FPP Upgrade — Starting…');
+            StreamURL('manualUpdate.php?wrapped=1', 'fppUpgradeText', 'FPPUpgradeDone', '', 'GET', null, null, true, false, 'FPPUpgradeProgress'); // trailing arg: generic stage-status hook
         }
 
         function FPPUpgradeDone() {

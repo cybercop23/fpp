@@ -142,6 +142,21 @@ teeOutput() {
 	fi
 }
 
+# logStage "<message>"
+#   Declare a coarse progress "stage" for long-running, streamed operations
+#   (FPP upgrade, OS upgrade, etc.). Emits a "===== <message> =====" section
+#   header: it reads naturally in the streamed log AND is parsed by streaming
+#   web dialogs to drive a status line -- see ParseLastStageMarker() in
+#   www/js/fpp.js. The point is that scripts *declare* their stages here, so the
+#   frontend never pattern-matches incidental log wording: reword any other log
+#   line freely, and as long as stage boundaries are marked with logStage the
+#   progress display keeps working. This is also the canonical form for the
+#   "===== ... =====" section headers already scattered through the scripts, so
+#   prefer it over ad-hoc echoes of that banner.
+logStage() {
+    echo "===== $1 ====="
+}
+
 getSetting() {
     SETTING=$1
     if [ -f "${CFGFILE}" ]; then

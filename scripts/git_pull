@@ -36,7 +36,7 @@ if curl --silent --head "${HTTPURL}" | grep -i "Content-Type: text/html; charset
     # -- unlike "git branch | grep '^\*'" it never returns "(HEAD detached...)".
     GITBRANCH=$(cd ${FPPDIR} && $SUDO git rev-parse --abbrev-ref HEAD 2>/dev/null)
 
-    echo "Upgrading git revision from branch ${GITBRANCH}"
+    logStage "Fetching updates from branch ${GITBRANCH}"
 
     if [ "x${FPPDIR}" = "x/opt/fpp" ]
     then
@@ -85,12 +85,14 @@ if curl --silent --head "${HTTPURL}" | grep -i "Content-Type: text/html; charset
         fi
     fi
     $SUDO ${SCRIPTDIR}/upgrade_config
+    logStage "Building FPP (longest step, please wait)"
     compileBinaries
 else
     echo "Can not access ${HTTPURL}, unable to pull git updates.  Check if you have Internet Access from this FPP by going to Help->System Health Check"
 
     if [ ! -x ${FPPBINDIR}/fppd ]; then
         echo "${FPPBINDIR}/fppd doesn't exist, need to build it"
+        logStage "Building FPP (longest step, please wait)"
         compileBinaries
     fi
 fi
