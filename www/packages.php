@@ -191,36 +191,24 @@
             }
 
             const url = `packagesHelper.php?action=install&package=${encodeURIComponent(packageName)}`;
-            $('#packageProgressPopupCloseButton').text('Please Wait').prop("disabled", true);
             DisplayProgressDialog("packageProgressPopup", `Installing Package: ${packageName}`);
             StreamURL(
                 url,
                 'packageProgressPopupText',
-                'EnableCloseButtonAfterOperation',
-                'EnableCloseButtonAfterOperation'
+                'ProgressDialogDone',
+                'ProgressDialogDone'
             );
         }
 
         function UninstallPackage(packageName) {
             const url = `packagesHelper.php?action=uninstall&package=${encodeURIComponent(packageName)}`;
-            $('#packageProgressPopupCloseButton').text('Please Wait').prop("disabled", true);
             DisplayProgressDialog("packageProgressPopup", `Uninstalling Package: ${packageName}`);
             StreamURL(
                 url,
                 'packageProgressPopupText',
-                'EnableCloseButtonAfterOperation',
-                'EnableCloseButtonAfterOperation'
+                'ProgressDialogDone',
+                'ProgressDialogDone'
             );
-        }
-
-        function EnableCloseButtonAfterOperation(id) {
-            $('#packageProgressPopupCloseButton')
-                .text('Close')
-                .prop("disabled", false)
-                .on('click', function () {
-                    $('#packageInput').val(''); // Clear the input field
-                    location.reload(); // Refresh the page when the close button is clicked
-                });
         }
 
         $(document).ready(function () {
@@ -272,25 +260,6 @@
                     <div class='packageDiv'>
                         <div id="packageInfo" class="mt-3 text-muted"></div>
                         <div id="overlay"></div>
-                    </div>
-                </div>
-
-                <div id="packageProgressPopup" class="modal taller-modal" tabindex="-1">
-                    <div class="modal-dialog modal-lg">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title">Installing Package</h5>
-                                <button type="button" class="btn-close" data-bs-dismiss="modal"
-                                    aria-label="Close"></button>
-                            </div>
-                            <div class="modal-body">
-                                <pre id="packageProgressPopupText" style="white-space: pre-wrap;"></pre>
-                            </div>
-                            <div class="modal-footer">
-                                <button id="packageProgressPopupCloseButton" type="button" class="btn btn-secondary"
-                                    data-bs-dismiss="modal" disabled>Close</button>
-                            </div>
-                        </div>
                     </div>
                 </div>
 

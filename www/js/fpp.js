@@ -469,6 +469,19 @@ function EnableModalDialogCloseButton (id) {
 	$('#' + id)
 		.find('#modalCloseButton')
 		.prop('disabled', false);
+	// Flip the footer progress button from the disabled "Please Wait" state
+	// back to an enabled "Close". No-op for modals without this button.
+	$('#' + id + 'CloseButton')
+		.prop('disabled', false)
+		.text('Close');
+}
+// Generic StreamURL done/error callback for progress dialogs opened via
+// DisplayProgressDialog. StreamURL invokes the callback with the output
+// element id, which is always "<modalId>Text"; strip the trailing "Text"
+// to recover the modal id and enable its Close button. Pass this instead of
+// writing a per-page wrapper whose only job is to enable the Close button.
+function ProgressDialogDone (textId) {
+	EnableModalDialogCloseButton(('' + textId).replace(/Text$/, ''));
 }
 function DoModalDialog (options) {
 	var dlg = $('#' + options.id);
@@ -588,6 +601,7 @@ function DisplayProgressDialog (id, title) {
 		class: 'modal-dialog-scrollable',
 		buttons: {
 			Close: {
+				text: 'Please Wait',
 				disabled: true,
 				id: id + 'CloseButton',
 				click: function () {
@@ -3539,7 +3553,7 @@ function UpgradeFPPVersion (newVersion) {
 		var opts = {
 			id: 'upgradeFPPDialog',
 			title: 'Upgrading to FPP v' + newVersion,
-			body: "<textarea style='width: 99%; height: 500px;' disabled id='upgradeFPPDialogText'>Starting upgrade....</textarea>",
+			body: "<textarea class='w-100' style='height: 55vh; min-height: 200px;' disabled id='upgradeFPPDialogText'>Starting upgrade....</textarea>",
 			class: 'modal-dialog-scrollable',
 			backdrop: 'static',
 			keyboard: false,

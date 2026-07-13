@@ -273,10 +273,6 @@ function GetVideoInfo (file) {
 		});
 	});
 }
-function mp3GainProgressDialogDone () {
-	$('#mp3GainProgressCloseButton').prop('disabled', false);
-	EnableModalDialogCloseButton('mp3GainProgress');
-}
 function ButtonHandler (table, button) {
 	var selectedCount = $('#tbl' + table + ' tr.selectedEntry').length;
 	var filename = '';
@@ -450,8 +446,8 @@ function ButtonHandler (table, button) {
 		StreamURL(
 			'run_mp3gain.php',
 			'mp3GainProgressText',
-			'mp3GainProgressDialogDone',
-			'mp3GainProgressDialogDone',
+			'ProgressDialogDone',
+			'ProgressDialogDone',
 			'POST',
 			postData,
 			'application/json'
@@ -793,7 +789,6 @@ function BulkAddPlaylist () {
 }
 
 function RunScriptDone () {
-	$('#runScriptCloseButton').prop('disabled', false);
 	EnableModalDialogCloseButton('runScriptDialog');
 }
 
@@ -801,14 +796,16 @@ function RunScript (scriptName) {
 	var options = {
 		id: 'runScriptDialog',
 		title: 'Run Script',
-		body: "<textarea style='width: 99%; height: 500px;' disabled id='runScriptText'></textarea>",
+		class: 'modal-dialog-scrollable',
+		body: "<textarea class='w-100' style='height: 55vh; min-height: 200px;' disabled id='runScriptText'></textarea>",
 		noClose: true,
 		keyboard: false,
 		backdrop: 'static',
 		footer: '',
 		buttons: {
 			Close: {
-				id: 'runScriptCloseButton',
+				text: 'Please Wait',
+				id: 'runScriptDialogCloseButton',
 				click: function () {
 					CloseModalDialog('runScriptDialog');
 				},
@@ -818,7 +815,7 @@ function RunScript (scriptName) {
 		}
 	};
 
-	$('#runScriptCloseButton').prop('disabled', true);
+	$('#runScriptDialogCloseButton').prop('disabled', true).text('Please Wait');
 	DoModalDialog(options);
 
 	StreamURL(

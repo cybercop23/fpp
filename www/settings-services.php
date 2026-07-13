@@ -13,7 +13,6 @@ if (file_exists('/etc/fpp/platform') && !file_exists('/etc/fpp/container')) {
 function KioskInstallDone() {
     SetRebootFlag();
     EnableModalDialogCloseButton("enableKioskPopup");
-    $('#enableKioskPopupCloseButton').prop("disabled", false);
 }
 function DisableKiosk() {
     SetSetting("Kiosk", 0, 0, 1);

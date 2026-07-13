@@ -2296,14 +2296,24 @@ if ($skipHTMLCodeOutput === false) {
                     closeOnEscape: false,
                     backdrop: true,
                     body: $('#copyPopup').html(),
-                    class: "no-close",
+                    class: "no-close modal-dialog-scrollable",
                     buttons: {
-
+                        Close: {
+                            text: 'Please Wait',
+                            disabled: true,
+                            id: 'copyPopup_ModalCloseButton',
+                            class: 'btn-secondary',
+                            click: function () {
+                                CloseCopyDialog();
+                            }
+                        }
                     }
                 });
 
-                // $('#copyPopup').fppDialog({ height: 600, width: 900, title: title, dialogClass: 'no-close' });
-                // $('#copyPopup').fppDialog( "moveToTop" );
+                // The modal element persists in the DOM between copies (CloseCopyDialog
+                // does not reload the page), so force the button back to its disabled
+                // "Please Wait" state on each open.
+                $('#copyPopup_ModalCloseButton').prop('disabled', true).text('Please Wait');
                 $('#copyText').val('');
 
                 StreamURL(url, 'copyText', 'CopyDone', 'CopyTimeoutError');
@@ -2326,7 +2336,7 @@ if ($skipHTMLCodeOutput === false) {
             }
 
             function CopyDone() {
-                $('#closeDialogButton').show();
+                EnableModalDialogCloseButton('copyPopup_Modal');
             }
 
             function CopyTimeoutError() {
@@ -3712,10 +3722,8 @@ if ($skipHTMLCodeOutput === false) {
             </script>
             <?php include 'common/footer.inc'; ?>
         </div>
-        <div id='copyPopup' title='FPP Backup/Restore' style="display: none;">
-            <textarea style='min-height: 600px; width: 100%' disabled id='copyText'></textarea>
-            <input id='closeDialogButton' type='button' class='buttons' value='Close' onClick='CloseCopyDialog();'
-                style='display: none;'>
+        <div id='copyPopup' title='FPP Backup/Restore' class="d-none">
+            <textarea class="w-100" style='height: 55vh; min-height: 200px;' disabled id='copyText'></textarea>
         </div>
 
         <datalist id='usbDirectories'>

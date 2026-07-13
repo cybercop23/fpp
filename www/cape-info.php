@@ -178,18 +178,60 @@ if (isset($settings["cape-info"])) {
         // Define API host for use in JavaScript
         var apiHost = '<?php echo $APIhost; ?>';
 
+        // Open the shared EEPROM sign/voucher progress dialog. Built via the standard
+        // DoModalDialog helper (not the legacy fppDialog shim); the footer button starts
+        // as a disabled "Please Wait" and is flipped to "Close" by EnableUpgradeDialogButton.
+        function OpenUpgradeDialog(title) {
+            DoModalDialog({
+                id: 'upgradePopup',
+                title: title,
+                class: 'modal-lg modal-dialog-scrollable',
+                backdrop: 'static',
+                keyboard: false,
+                noClose: true,
+                body: "<textarea class='w-100' style='height: 55vh; min-height: 200px;' disabled id='upgradeText'></textarea>",
+                buttons: {
+                    Close: {
+                        text: 'Please Wait',
+                        disabled: true,
+                        id: 'upgradeDialogButton',
+                        class: 'btn-secondary',
+                        click: function () {
+                            CloseUpgradeDialog(false);
+                        }
+                    }
+                }
+            });
+            // DoModalDialog reuses an existing modal without rebuilding its footer,
+            // so explicitly reset the button to "Please Wait" on every open.
+            ResetUpgradeDialogButton();
+        }
+
         function CloseUpgradeDialog(reload = false) {
-            $('#upgradePopup').fppDialog('close');
+            CloseModalDialog('upgradePopup');
             if (reload)
                 location.reload();
         }
 
-
-
-        function RestoreDone() {
-            EnableModalDialogCloseButton("RestoreEEPROM");
-            $("#RestoreEEPROMCloseButton").prop("disabled", false);
+        // Reset the upgrade dialog's single footer button to its disabled
+        // "Please Wait" state each time the dialog is opened.
+        function ResetUpgradeDialogButton() {
+            $('#upgradeDialogButton').prop('disabled', true).text('Please Wait');
         }
+
+        // Enable the button as "Close" once the operation finishes. On success the
+        // page reloads on close (reload=true); on error it just closes (reload=false).
+        function EnableUpgradeDialogButton(reload) {
+            $('#upgradeDialogButton')
+                .prop('disabled', false)
+                .text('Close')
+                .off('click')
+                .on('click', function () {
+                    CloseUpgradeDialog(reload);
+                });
+        }
+
+
 
         function RestoreFirmwareDone() {
             var txt = $('#RestoreEEPROMText').val();
@@ -200,10 +242,13 @@ if (isset($settings["cape-info"])) {
                     var filename = $('#backupFile').val();
                     var resetDefaults = $('#resetDefaultsConfig').is(':checked') ? '&resetDefaults=true' : '';
                     $('#RestoreEEPROMText').html('');
-                    StreamURL('upgradeCapeFirmware.php?force=true&filename=' + filename + resetDefaults, 'RestoreEEPROMText', 'RestoreDone', 'RestoreDone', 'GET', null, false, false);
+                    StreamURL('upgradeCapeFirmware.php?force=true&filename=' + filename + resetDefaults, 'RestoreEEPROMText', 'ProgressDialogDone', 'ProgressDialogDone', 'GET', null, false, false);
+                    // The forced re-flash is now streaming; let its own callback enable
+                    // Close so the dialog can't be closed mid-flash.
+                    return;
                 }
             }
-            RestoreDone();
+            EnableModalDialogCloseButton("RestoreEEPROM");
         }
 
         function RestoreFirmware() {
@@ -212,11 +257,6 @@ if (isset($settings["cape-info"])) {
 
             DisplayProgressDialog("RestoreEEPROM", "Restore Cape Firmware");
             StreamURL('upgradeCapeFirmware.php?filename=' + filename + resetDefaults, 'RestoreEEPROMText', 'RestoreFirmwareDone', 'RestoreFirmwareDone', 'GET', null, false, false);
-        }
-
-        function UpgradeDone() {
-            EnableModalDialogCloseButton("UpgradeEEPROM");
-            $("#UpgradeEEPROMCloseButton").prop("disabled", false);
         }
 
         function UpgradeFirmwareDone() {
@@ -238,10 +278,13 @@ if (isset($settings["cape-info"])) {
                     }
 
                     $('#UpgradeEEPROMText').html('');
-                    StreamURL('upgradeCapeFirmware.php?force=true' + resetDefaults, 'UpgradeEEPROMText', 'UpgradeDone', 'UpgradeDone', 'POST', formData, false, false);
+                    StreamURL('upgradeCapeFirmware.php?force=true' + resetDefaults, 'UpgradeEEPROMText', 'ProgressDialogDone', 'ProgressDialogDone', 'POST', formData, false, false);
+                    // The forced re-flash is now streaming; let its own callback enable
+                    // Close so the dialog can't be closed mid-flash.
+                    return;
                 }
             }
-            UpgradeDone();
+            EnableModalDialogCloseButton("UpgradeEEPROM");
         }
         function UpgradeFirmware(force = false) {
             var eepromFile = $('#eepromVendorCapeVersions').val();
@@ -537,9 +580,7 @@ if (isset($settings["cape-info"])) {
             $('#voucherNumber').val(voucherNumber); // Save the toUpperCase()-ed value
             var url = 'api/cape/eeprom/voucher';
 
-            $('.dialogCloseButton').hide();
-            $('#upgradePopup').fppDialog({ height: 600, width: 900, title: "Redeem Voucher", dialogClass: 'no-close' });
-            $('#upgradePopup').fppDialog("moveToTop");
+            OpenUpgradeDialog("Redeem Voucher");
             $('#upgradeText').html('Voucher Redemption Status:\n');
 
             $('#upgradeText').append('- Contacting API to redeem voucher\n');
@@ -572,12 +613,12 @@ if (isset($settings["cape-info"])) {
                         SignEEPROMHelper(data.key, data.order, true);
                     } else {
                         $('#upgradeText').append('\nERROR redeeming voucher:\n\n' + data.Message);
-                        $('#errorDialogButton').show();
+                        EnableUpgradeDialogButton(false);
                     }
                 },
                 error: function () {
                     $('#upgradeText').append('\nERROR calling signing API\n');
-                    $('#errorDialogButton').show();
+                    EnableUpgradeDialogButton(false);
                 }
             });
         }
@@ -626,9 +667,7 @@ if (isset($settings["cape-info"])) {
             $('#licenseKey').val(key); // Save the toUpperCase()-ed value
             var url = 'api/cape/eeprom/signingData/' + key + '/' + order;
 
-            $('.dialogCloseButton').hide();
-            $('#upgradePopup').fppDialog({ height: 600, width: 900, title: "Sign Cape EEPROM", dialogClass: 'no-close' });
-            $('#upgradePopup').fppDialog("moveToTop");
+            OpenUpgradeDialog("Sign Cape EEPROM");
             $('#upgradeText').html('Signing Status:\n');
 
             $('#upgradeText').append('- Downloading signing packet from FPP\n');
@@ -664,37 +703,37 @@ if (isset($settings["cape-info"])) {
                                             if (data.Status == 'OK') {
                                                 SetRebootFlag();
                                                 $('#upgradeText').append('- Signing Complete.  Please reboot.\n');
-                                                $('#closeDialogButton').show();
+                                                EnableUpgradeDialogButton(true);
                                             } else {
                                                 $('#upgradeText').append('\nERROR processing signed packet: ' + data.Message + '\n');
-                                                $('#errorDialogButton').show();
+                                                EnableUpgradeDialogButton(false);
                                             }
                                         },
                                         error: function () {
                                             $('#upgradeText').append('\nERROR uploading signed packet\n');
-                                            $('#errorDialogButton').show();
+                                            EnableUpgradeDialogButton(false);
                                         }
                                     });
                                     // END of second nested AJAX call
                                 } else {
                                     $('#upgradeText').append('\nERROR signing packet: ' + data.Message + '\n');
-                                    $('#errorDialogButton').show();
+                                    EnableUpgradeDialogButton(false);
                                 }
                             },
                             error: function () {
                                 $('#upgradeText').append('\nERROR uploading signing packet\n');
-                                $('#errorDialogButton').show();
+                                EnableUpgradeDialogButton(false);
                             }
                         });
                         // END of first nested AJAX call
                     } else {
                         $('#upgradeText').append('\nERROR retrieving signing packet: ' + data.Message + '\n');
-                        $('#errorDialogButton').show();
+                        EnableUpgradeDialogButton(false);
                     }
                 },
                 error: function () {
                     $('#upgradeText').append('\nERROR retrieving signing packet from FPP\n');
-                    $('#errorDialogButton').show();
+                    EnableUpgradeDialogButton(false);
                 }
             });
         }
@@ -714,15 +753,15 @@ if (isset($settings["cape-info"])) {
                     if (data.Status == 'OK') {
                         SetRebootFlag();
                         $('#upgradeText').append('- Signing Complete.  Please reboot.\n\nYou may also check the <b>EEPROM Signature</b> tab prior to reboot to confirm the EEPROM was signed.');
-                        $('#closeDialogButton').show();
+                        EnableUpgradeDialogButton(true);
                     } else {
                         $('#upgradeText').append('\nERROR signing EEPROM:\n\n' + data.Message);
-                        $('#errorDialogButton').show();
+                        EnableUpgradeDialogButton(false);
                     }
                 },
                 error: function () {
                     $('#upgradeText').append('\nERROR calling signing API\n');
-                    $('#errorDialogButton').show();
+                    EnableUpgradeDialogButton(false);
                 }
             });
         }
@@ -745,9 +784,7 @@ if (isset($settings["cape-info"])) {
 
             $('#licenseKey').val(key); // Save the toUpperCase()-ed value
 
-            $('.dialogCloseButton').hide();
-            $('#upgradePopup').fppDialog({ height: 600, width: 900, title: "Sign Cape EEPROM", dialogClass: 'no-close' });
-            $('#upgradePopup').fppDialog("moveToTop");
+            OpenUpgradeDialog("Sign Cape EEPROM");
             $('#upgradeText').html('Signing Status:\n');
 
             SignEEPROMHelper(key, order);
@@ -1451,14 +1488,6 @@ if (isset($settings["cape-info"])) {
         <?php
         include 'common/footer.inc';
         ?>
-    </div>
-    <div id='upgradePopup' title='FPP Upgrade' style="display: none">
-        <textarea style='max-width:100%; max-height:100%; width: 100%; height:100%;' disabled id='upgradeText'>
-    </textarea>
-        <input id='closeDialogButton' type='button' class='buttons dialogCloseButton' value='Close'
-            onClick='CloseUpgradeDialog(true);' style='display: none;'>
-        <input id='errorDialogButton' type='button' class='buttons dialogCloseButton' value='Close'
-            onClick='CloseUpgradeDialog(false);' style='display: none;'>
     </div>
 </body>
 

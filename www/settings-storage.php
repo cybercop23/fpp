@@ -9,7 +9,6 @@ require_once('common.php');
 <script>
     function StorageDialogDone() {
         EnableModalDialogCloseButton("storageSettingsProgress");
-        $('#storageSettingsProgressCloseButton').prop("disabled", false);
         SetRebootFlag();
     }
     function growSDCardFS() {
@@ -82,39 +81,31 @@ require_once('common.php');
     <?php
     if ($settings['BeaglePlatform']) {
         ?>
-        function flashEMMCDone() {
-            $('#flashEMMCProgressCloseButton').prop("disabled", false);
-            EnableModalDialogCloseButton("flashEMMCProgress");
-        }
         function flashEMMC() {
             DisplayConfirmationDialog("flashEMMC", "Copy FPP to eMMC", $("#dialog-confirm-emmc"), function () {
                 DisplayProgressDialog("flashEMMCProgress", "Copy FPP to eMMC");
-                StreamURL("flashbbbemmc.php", 'flashEMMCProgressText', 'flashEMMCDone', 'flashEMMCDone');
+                StreamURL("flashbbbemmc.php", 'flashEMMCProgressText', 'ProgressDialogDone', 'ProgressDialogDone');
             });
         }
         function flashEMMCBtrfs() {
             DisplayConfirmationDialog("flashEMMC", "Copy FPP to eMMC", $("#dialog-confirm-emmc"), function () {
                 DisplayProgressDialog("flashEMMCProgress", "Copy FPP to eMMC");
-                StreamURL("flashbbbemmc-btrfs.php", 'flashEMMCProgressText', 'flashEMMCDone', 'flashEMMCDone');
+                StreamURL("flashbbbemmc-btrfs.php", 'flashEMMCProgressText', 'ProgressDialogDone', 'ProgressDialogDone');
             });
         }
         <?php
     }
     ?>
-    function flashUSBDone() {
-        $('#flashUSBProgressCloseButton').prop("disabled", false);
-        EnableModalDialogCloseButton("flashUSBProgress");
-    }
     function flashUSB(device) {
         DisplayConfirmationDialog("flashUSB", "Create new FPP on NVMe/USB/SD", $("#dialog-confirm-usb"), function () {
             DisplayProgressDialog("flashUSBProgress", "Create new FPP on NVMe/USB/SD");
-            StreamURL("flash-pi-usb.php?cone=false&dev=" + device, 'flashUSBProgressText', 'flashUSBDone', 'flashUSBDone');
+            StreamURL("flash-pi-usb.php?cone=false&dev=" + device, 'flashUSBProgressText', 'ProgressDialogDone', 'ProgressDialogDone');
         });
     }
     function cloneUSB(device) {
         DisplayConfirmationDialog("flashUSB", "Copy existing FPP to NVMe/USB/SD", $("#dialog-confirm-usb"), function () {
             DisplayProgressDialog("flashUSBProgress", "Copy existing FPP to NVMe/USB/SD");
-            StreamURL("flash-pi-usb.php?clone=true&dev=" + device, 'flashUSBProgressText', 'flashUSBDone', 'flashUSBDone');
+            StreamURL("flash-pi-usb.php?clone=true&dev=" + device, 'flashUSBProgressText', 'ProgressDialogDone', 'ProgressDialogDone');
         });
     }
 

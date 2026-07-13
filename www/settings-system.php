@@ -87,22 +87,25 @@ function ResetConfig() {
         CloseModalDialog("resetFPPDialog");
         DoModalDialog({
             id: "doResetFPPConfigDialog",
-            class: "modal-lg",
+            class: "modal-lg modal-dialog-scrollable",
             title: "Reset FPP Config",
-            body: "<textarea style='width: 99%; height: 92%; min-height: 200px;' disabled id='resetConfigText' style='display: none;'></textarea>",
+            body: "<textarea class='w-100' style='height: 55vh; min-height: 200px;' disabled id='resetConfigText'></textarea>",
             backdrop: "static",
             keyboard: false,
             noClose: true,
             buttons: {
                 Close: {
+                    text: 'Please Wait',
                     click: function() {
                         CloseModalDialog("doResetFPPConfigDialog");
                     },
                     disabled: true,
-                    id: "resetCloseButton"
+                    id: "doResetFPPConfigDialogCloseButton"
                 }
             }
         });
+        // Reset the button on reopen (DoModalDialog reuses the modal without rebuilding its footer).
+        $('#doResetFPPConfigDialogCloseButton').prop('disabled', true).text('Please Wait');
         var args = '';
         for (var i = 0; i < resetAreas.length; i++) {
             if ($('#rc_' + resetAreas[i]).is(':checked'))
@@ -118,7 +121,6 @@ function ResetConfig() {
 
 function ResetConfigDone() {
     SetRebootFlag();
-    $("#resetCloseButton").prop("disabled", false);
     EnableModalDialogCloseButton("doResetFPPConfigDialog");
 }
 

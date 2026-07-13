@@ -112,11 +112,6 @@ function readCapes($cd, $capes)
         reloadPage();
     }
 
-    function UpgradeDone() {
-        EnableModalDialogCloseButton("InstallVirtualEEPROM");
-        $("#InstallVirtualEEPROMCloseButton").prop("disabled", false);
-    }
-
     function InstallFirmwareDone() {
         var txt = $('#InstallVirtualEEPROMText').val();
         if (txt.includes("Cape does not match new firmware")) {
@@ -125,12 +120,15 @@ function readCapes($cd, $capes)
             if (confirm(msg)) {
                 var filename = $('#virtualEEPROM').val();
                 $('#upgradeText').html('');
-                StreamURL('upgradeCapeFirmware.php?force=true&resetDefaults=true&filename=' + filename, 'InstallVirtualEEPROMText', 'UpgradeDone', 'UpgradeDone', 'GET', null, false, false);
+                StreamURL('upgradeCapeFirmware.php?force=true&resetDefaults=true&filename=' + filename, 'InstallVirtualEEPROMText', 'ProgressDialogDone', 'ProgressDialogDone', 'GET', null, false, false);
+                // The forced re-flash is now streaming; let its own callback enable
+                // Close so the dialog can't be closed mid-flash.
+                return;
             } else {
                 reloadPage();
             }
         }
-        UpgradeDone();
+        EnableModalDialogCloseButton("InstallVirtualEEPROM");
     }
 
     function InstallFirmware() {

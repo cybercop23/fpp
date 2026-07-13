@@ -146,12 +146,7 @@ unset($lines);
             // Modern streaming dialog (matches about.php); its Close button
             // handles CloseModalDialog + page reload for us.
             DisplayProgressDialog('gitCheckout', 'Switching to version: ' + version);
-            StreamURL('gitCheckoutVersion.php?wrapped=1&version=' + version, 'gitCheckoutText', 'GitCheckoutDone');
-        }
-
-        function GitCheckoutDone() {
-            $('#gitCheckoutCloseButton').prop('disabled', false);
-            EnableModalDialogCloseButton('gitCheckout');
+            StreamURL('gitCheckoutVersion.php?wrapped=1&version=' + version, 'gitCheckoutText', 'ProgressDialogDone', 'ProgressDialogDone');
         }
 
         // Live filter over the rendered commit rows (message, author, or SHA).

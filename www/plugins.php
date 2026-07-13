@@ -26,11 +26,6 @@
             return 0;
         }
 
-        function PluginProgressDialogDone() {
-            $('#pluginsProgressPopupCloseButton').prop("disabled", false);
-            EnableModalDialogCloseButton("pluginsProgressPopup");
-        }
-
         function GetInstalledPlugins() {
             var url = 'api/plugin';
             $.ajax({
@@ -140,7 +135,7 @@
         function UpgradePlugin(plugin) {
             var url = 'api/plugin/' + plugin + '/upgrade?stream=true';
             DisplayProgressDialog("pluginsProgressPopup", "Upgrade Plugin");
-            StreamURL(url, 'pluginsProgressPopupText', 'PluginProgressDialogDone', 'PluginProgressDialogDone');
+            StreamURL(url, 'pluginsProgressPopupText', 'ProgressDialogDone', 'ProgressDialogDone');
         }
 
         function InstallPlugin(plugin, branch, sha) {
@@ -163,13 +158,13 @@
 
             var postData = JSON.stringify(pluginInfo);
             DisplayProgressDialog("pluginsProgressPopup", "Install Plugin");
-            StreamURL(url, 'pluginsProgressPopupText', 'PluginProgressDialogDone', 'PluginProgressDialogDone', 'POST', postData, 'application/json');
+            StreamURL(url, 'pluginsProgressPopupText', 'ProgressDialogDone', 'ProgressDialogDone', 'POST', postData, 'application/json');
         }
 
         function UninstallPlugin(plugin) {
             var url = 'api/plugin/' + plugin + '?stream=true'; // Assuming your API supports streaming for uninstall
             DisplayProgressDialog("pluginsProgressPopup", "Uninstall Plugin");
-            StreamURL(url, 'pluginsProgressPopupText', 'PluginProgressDialogDone', 'PluginProgressDialogDone', 'DELETE');
+            StreamURL(url, 'pluginsProgressPopupText', 'ProgressDialogDone', 'ProgressDialogDone', 'DELETE');
         }
 
         function ShowUninstallPluginPopup(plugin, pluginName) {
