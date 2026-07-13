@@ -62,12 +62,18 @@
          */
         function parseInstalledOSBaseline() {
             if (!currentFPPVersion) return null;
-            var vm = currentFPPVersion.match(/(\d+)\.(\d+)(?:\.(\d+))?/);
+            // Master/dev builds report the minor as "x" (e.g. "10.x-master-822-g...").
+            // Accept that form so we still return a usable baseline instead of falling
+            // back to the naive presence check.
+            var vm = currentFPPVersion.match(/(\d+)\.(?:(\d+)|x)(?:\.(\d+))?/i);
             if (!vm) return null;
             var dm = currentOSRelease ? currentOSRelease.match(/(\d{4})-?(\d{2})/) : null;
             return {
                 major: parseInt(vm[1]),
-                minor: parseInt(vm[2]),
+                // An "x" minor means a dev build that is ahead of every stable release
+                // of the same major, so treat it as effectively-infinite. Major still
+                // compares normally, so a newer major release is still flagged.
+                minor: vm[2] !== undefined ? parseInt(vm[2]) : Number.MAX_SAFE_INTEGER,
                 patch: vm[3] !== undefined ? parseInt(vm[3]) : 0,
                 dateNum: dm ? parseInt(dm[1] + dm[2]) : 0
             };
@@ -83,8 +89,14 @@
         function checkForNewerOS() {
             var baseline = parseInstalledOSBaseline();
             if (!baseline) {
-                // Can't determine installed version, fall back to old behavior
-                return $('#osSelect option').length > 1;
+                // Can't determine installed version. Fall back to a presence check,
+                // but count only non-nightly images so nightlies (which never justify
+                // the banner) can't trip it on their own.
+                var stableCount = 0;
+                $('#osSelect option').each(function () {
+                    if (this.value !== '' && !/nightly/i.test(this.text)) stableCount++;
+                });
+                return stableCount > 0;
             }
 
             var hasNewerOS = false;
@@ -819,7 +831,6 @@
         }
 
         function FPPUpgradeDone() {
-            $('#fppUpgradeCloseButton').prop("disabled", false);
             EnableModalDialogCloseButton("fppUpgrade");
             UpdateVersionInfo();
         }
@@ -988,7 +999,6 @@
         }
 
         function OSUpgradeDone() {
-            $("#osUpgradeCloseButton").prop("disabled", false);
             EnableModalDialogCloseButton("osUpgrade");
             UpdateVersionInfo();
         }
@@ -1010,7 +1020,6 @@
         }
 
         function OSDownloadDone() {
-            $("#osDownloadCloseButton").prop("disabled", false);
             EnableModalDialogCloseButton("osDownload");
             PopulateOSSelect();
         }
