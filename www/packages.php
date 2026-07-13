@@ -7,14 +7,14 @@
     require_once('config.php');
     require_once('common.php');
     include('common/menuHead.inc');
+    require_once('common/packages.inc.php');
 
-    $userPackagesFile = $settings['configDirectory'] . '/userpackages.json';
+    // Build the list of managed packages with their requesters. LoadUserPackages
+    // normalizes both the legacy string[] schema and the new object schema into
+    // package => [requesters].
     $userPackages = [];
-    if (file_exists($userPackagesFile)) {
-        $userPackages = json_decode(file_get_contents($userPackagesFile), true);
-        if (!is_array($userPackages)) {
-            $userPackages = [];
-        }
+    foreach (LoadUserPackages() as $pkgName => $requesters) {
+        $userPackages[] = ['name' => $pkgName, 'requesters' => array_values($requesters)];
     }
 
     writeFPPVersionJavascriptFunctions();
@@ -85,48 +85,59 @@
             });
         }
 
+        // Renders the "required by" note for a package. "user" means it was
+        // installed from this page; a plugin repoName means a plugin depends on
+        // it (in which case removing it here only drops the user's claim - it
+        // stays installed as long as a plugin still needs it).
+        function RequestersNote(requesters) {
+            if (!requesters || !requesters.length)
+                return '';
+            const labels = requesters.map(r => r === 'user' ? 'you' : r);
+            return ` <span class="text-muted" style="font-size: 0.85em;">(required by: ${labels.join(', ')})</span>`;
+        }
+
         function UpdateUserPackagesList() {
             if (!userInstalledPackages.length) {
-                $('#userPackagesList').html('<p>No user-installed packages found.</p>');
+                $('#userPackagesList').html('<p>No managed packages found.</p>');
                 return;
             }
 
-            let userPackagesListHTML = '';
+            let rows = new Array(userInstalledPackages.length);
             let pendingRequests = userInstalledPackages.length;
 
-            userInstalledPackages.forEach(pkg => {
+            userInstalledPackages.forEach((entry, idx) => {
+                const pkg = entry.name;
+                const requesters = entry.requesters || [];
+                const byUser = requesters.indexOf('user') !== -1;
+                const note = RequestersNote(requesters);
+
+                // A user can only remove packages they requested. Plugin-owned
+                // packages are managed by uninstalling the owning plugin.
+                const removeBtn = byUser
+                    ? `<button class='btn btn-sm btn-outline-danger ms-2' onClick='UninstallPackage("${pkg}")'>Uninstall</button>`
+                    : '';
+
                 $.ajax({
                     url: `/api/system/packages/info/${encodeURIComponent(pkg)}`,
                     type: 'GET',
                     dataType: 'json',
                     success: function (data) {
                         const isInstalled = data.Installed === 'Yes';
-                        userPackagesListHTML += `<li>${pkg}
-                            ${isInstalled ? `
-                                <button class='btn btn-sm btn-outline-danger' onClick='UninstallPackage("${pkg}")'>
-                                    Uninstall
-                                </button>`
-                                : `
-                                <button class='btn btn-sm btn-outline-warning' onClick='InstallPackage("${pkg}")'>
-                                    Reinstall Required
-                                </button>
-                                <button class='btn btn-sm btn-outline-danger ms-2' onClick='UninstallPackage("${pkg}")'>
-                                    Remove
-                                </button>`}
+                        rows[idx] = `<li>${pkg}${note}
+                            ${isInstalled ? removeBtn
+                                : `<button class='btn btn-sm btn-outline-warning' onClick='InstallPackage("${pkg}")'>Reinstall Required</button>${removeBtn}`}
                         </li>`;
                     },
                     error: function () {
                         console.error(`Error checking installation status for package: ${pkg}`);
-                        userPackagesListHTML += `<li>${pkg} 
-                            <button class='btn btn-sm btn-outline-warning' onClick='InstallPackage("${pkg}")'>
-                                Reinstall Required
-                            </button>
+                        rows[idx] = `<li>${pkg}${note}
+                            <button class='btn btn-sm btn-outline-warning' onClick='InstallPackage("${pkg}")'>Reinstall Required</button>${removeBtn}
                         </li>`;
                     },
                     complete: function () {
                         pendingRequests--;
                         if (pendingRequests === 0) {
-                            $('#userPackagesList').html(userPackagesListHTML);
+                            $('#userPackagesList').html(rows.join(''));
                         }
                     }
                 });

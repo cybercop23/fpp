@@ -502,6 +502,20 @@ static bool runAptGet(const std::vector<std::string>& args) {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+// Extract a package name from a userpackages.json entry. Supports both the
+// legacy schema (a bare string) and the ownership schema
+// ({"package": "name", "requestedBy": [...]} written by the PHP package
+// helpers). Returns "" when the entry carries no usable package name.
+static std::string packageNameFromJson(const Json::Value& item) {
+    if (item.isString()) {
+        return item.asString();
+    }
+    if (item.isObject() && item.isMember("package") && item["package"].isString()) {
+        return item["package"].asString();
+    }
+    return "";
+}
+
 // Returns true if there is nothing to do or every package installed; false only
 // when an apt failure occurred that is worth retrying on the next boot. The
 // DPkg::Lock::Timeout option lets apt wait for a concurrent install at boot
@@ -531,12 +545,19 @@ bool installPackagesFromJson(const std::string& filePath) {
 
     bool anyPackages = false;
     for (const auto& item : root) {
-        if (item.isString()) {
+        if (!packageNameFromJson(item).empty()) {
             anyPackages = true;
             break;
         }
     }
     if (!anyPackages) {
+        return true;
+    }
+
+    // Non-Debian platforms (Fedora, MacOS, ...) have no apt-get; there is
+    // nothing we can replay. Consume the trigger rather than retrying forever.
+    if (!FileExists("/usr/bin/apt-get")) {
+        printf("apt-get not available on this platform; skipping user package install\n");
         return true;
     }
 
@@ -559,10 +580,11 @@ bool installPackagesFromJson(const std::string& filePath) {
 
     bool allOk = true;
     for (const auto& item : root) {
-        if (item.isString()) {
-            printf("Installing: %s\n", item.asString().c_str());
-            if (!runAptGet({ "-o", "DPkg::Lock::Timeout=60", "install", "-y", item.asString() })) {
-                printf("Warning: Package installation failed for %s\n", item.asString().c_str());
+        std::string pkg = packageNameFromJson(item);
+        if (!pkg.empty()) {
+            printf("Installing: %s\n", pkg.c_str());
+            if (!runAptGet({ "-o", "DPkg::Lock::Timeout=60", "install", "-y", pkg })) {
+                printf("Warning: Package installation failed for %s\n", pkg.c_str());
                 allOk = false;
             }
         }

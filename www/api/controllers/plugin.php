@@ -1,5 +1,34 @@
 <?
 
+// Shared system-package helpers (hardened apt + per-requester ownership) used
+// when installing/removing a plugin's declared package dependencies.
+require_once __DIR__ . '/../../common/packages.inc.php';
+
+// True if a dependencies block declares at least one non-empty apt package.
+function DepsRequirePackages($deps)
+{
+	if (!is_array($deps) || !isset($deps['packages']) || !is_array($deps['packages'])) {
+		return false;
+	}
+	foreach ($deps['packages'] as $p) {
+		if (is_string($p) && $p !== '') {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Removes a partially-installed plugin directory (and any linkName symlink) so a
+// refused/failed install does not leave a half-installed plugin behind.
+function CleanupPartialPluginInstall($plugin, $linkName = null)
+{
+	global $settings, $SUDO;
+	if (is_string($linkName) && $linkName !== '') {
+		exec($SUDO . " rm -f " . escapeshellarg($settings['pluginDirectory'] . '/' . $linkName));
+	}
+	exec($SUDO . " rm -rf " . escapeshellarg($settings['pluginDirectory'] . '/' . $plugin));
+}
+
 /**
  * Get all plugins
  *
@@ -49,7 +78,7 @@ function GetInstalledPlugins()
  */
 function InstallPlugin()
 {
-	global $settings, $fppDir, $SUDO, $_REQUEST;
+	global $settings, $_REQUEST;
 	$result = array();
 
 	$pluginInfoJSON = "";
@@ -60,75 +89,401 @@ function InstallPlugin()
 	fclose($postdata);
 
 	$pluginInfo = json_decode($pluginInfoJSON, true);
+	if (!is_array($pluginInfo) || !isset($pluginInfo['repoName'])) {
+		$result['Status'] = 'Error';
+		$result['Message'] = 'Invalid pluginInfo (missing repoName)';
+		return json($result);
+	}
 
+	$stream = isset($_REQUEST['stream']) ? $_REQUEST['stream'] : null;
+	$streaming = (isset($stream) && $stream != "false");
 	$plugin = escapeshellcmd($pluginInfo['repoName']);
-	$srcURL = $pluginInfo['srcURL'];
-	$branch = escapeshellcmd($pluginInfo['branch']);
-	$sha = $pluginInfo['sha'];
-	$infoURL = $pluginInfo['infoURL'];
+
+	if (file_exists($settings['pluginDirectory'] . '/' . $plugin)) {
+		if ($streaming) {
+			DisableOutputBuffering();
+			echo "The (" . $plugin . ") plugin is already installed\n";
+			return "\nDone\n";
+		}
+		$result['Status'] = 'Error';
+		$result['Message'] = 'The (' . $plugin . ') plugin is already installed';
+		return json($result);
+	}
+
+	if ($streaming) {
+		DisableOutputBuffering();
+	}
+
+	// $visited guards against dependency cycles (A depends on B depends on A)
+	// across the recursive install below.
+	$visited = array();
+	$ok = InstallPluginFromInfo($pluginInfo, $visited, $stream, 0);
+
+	if ($streaming) {
+		return "\nDone\n";
+	}
+	$result['Status'] = $ok ? 'OK' : 'Error';
+	$result['Message'] = $ok ? '' : 'Could not properly install plugin';
+	return json($result);
+}
+
+/**
+ * Installs a single plugin from a decoded pluginInfo structure, resolving its
+ * declared dependencies (packages, scripts, plugins) BEFORE running the
+ * plugin's own fpp_install.sh. Recurses into dependency plugins with a shared
+ * $visited set (cycle guard) and a depth cap. Output is streamed to the client
+ * when $stream is truthy. Returns true on success.
+ */
+function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
+{
+	global $settings, $fppDir, $SUDO;
+
+	$streaming = (isset($stream) && $stream != "false");
+
+	if (!is_array($pluginInfo) || !isset($pluginInfo['repoName'])) {
+		echo "\nERROR: dependency plugin info missing repoName\n";
+		return false;
+	}
+	$repoName = $pluginInfo['repoName'];
+	$plugin = escapeshellcmd($repoName);
+
+	// Cycle guard.
+	if (isset($visited[$repoName])) {
+		return true;
+	}
+	$visited[$repoName] = true;
+
+	if ($depth > 8) {
+		echo "\nERROR: plugin dependency chain too deep at '$repoName'; aborting.\n";
+		return false;
+	}
+
+	// Already installed -> dependency is satisfied.
+	if (file_exists($settings['pluginDirectory'] . '/' . $plugin)) {
+		if ($depth > 0) {
+			echo "\nDependency plugin '$plugin' is already installed.\n";
+		}
+		return true;
+	}
+
+	// Refuse up front if the plugin declares required apt packages but this
+	// platform has no apt -- installing it would leave it broken. A plugin that
+	// genuinely needs packages should restrict itself with platforms[]; if the
+	// author forgot, we catch it here rather than half-installing. (Re-checked
+	// after clone against the repo's own pluginInfo.json, which is authoritative.)
+	if (DepsRequirePackages(isset($pluginInfo['dependencies']) ? $pluginInfo['dependencies'] : null) && !AptAvailable()) {
+		$pkgs = implode(', ', $pluginInfo['dependencies']['packages']);
+		$plat = isset($settings['Platform']) ? $settings['Platform'] : 'this platform';
+		echo "\nERROR: '$repoName' requires system packages ($pkgs) but $plat does not support system packages. Refusing to install.\n";
+		return false;
+	}
+
+	$srcURL = isset($pluginInfo['srcURL']) ? $pluginInfo['srcURL'] : '';
+	$branch = escapeshellcmd(isset($pluginInfo['branch']) && $pluginInfo['branch'] !== '' ? $pluginInfo['branch'] : 'master');
+	$sha = isset($pluginInfo['sha']) ? $pluginInfo['sha'] : '';
+	$infoURL = isset($pluginInfo['infoURL']) ? $pluginInfo['infoURL'] : '';
 	$useCredentials = isset($pluginInfo['useCredentials']) && $pluginInfo['useCredentials'];
 
-	// Always try to inject GitHub credentials for github.com URLs when they
-	// are configured, regardless of whether the plugin is flagged private.
-	// This handles the case where a private repo is installed via a public
-	// listing (or a pluginInfo.json that does not set "private": true).
-	// InjectGitHubCredentials only modifies github.com / raw.githubusercontent.com
-	// URLs so credentials are never leaked to unrelated hosts.
+	// Inject GitHub credentials for github URLs when configured. Only modifies
+	// github.com / raw.githubusercontent.com URLs so creds never leak elsewhere.
 	$injectedURL = InjectGitHubCredentials($srcURL);
 	if ($injectedURL !== false) {
 		$srcURL = $injectedURL;
 	} else if ($useCredentials) {
-		// Credentials were explicitly required but are not configured.
-		$result['Status'] = 'Error';
-		$result['Message'] = 'Use Credentials was selected but GitHub user name and/or Personal Access Token are not configured on the Developer settings page.';
-		return json($result);
+		echo "\nERROR: Use Credentials was selected but GitHub user name and/or Personal Access Token are not configured on the Developer settings page.\n";
+		return false;
 	}
 
-	$stream = $_REQUEST['stream'];
+	// Clone ONLY -- the plugin's own fpp_install.sh is deferred (via
+	// FPP_SKIP_INSTALL_SCRIPT) so dependencies can be resolved first.
+	$return_val = 0;
+	$envPrefix = "export FPP_SKIP_INSTALL_SCRIPT=1; export SUDO=\"" . $SUDO . "\"; export PLUGINDIR=\"" . $settings['pluginDirectory'] . "\"; ";
+	$cloneCmd = $envPrefix . "$fppDir/scripts/install_plugin $plugin \"$srcURL\" \"$branch\" \"$sha\"";
+	if ($streaming) {
+		system($cloneCmd, $return_val);
+	} else {
+		exec($cloneCmd, $o, $return_val);
+		unset($o);
+	}
+	if ($return_val != 0) {
+		echo "\nERROR: failed to clone plugin '$plugin'.\n";
+		return false;
+	}
 
-	if (!file_exists($settings['pluginDirectory'] . '/' . $plugin)) {
-		$return_val = 0;
-		if (isset($stream) && $stream != "false") {
-			DisableOutputBuffering();
-			system("$fppDir/scripts/install_plugin $plugin \"$srcURL\" \"$branch\" \"$sha\"", $return_val);
-		} else {
-			exec("export SUDO=\"" . $SUDO . "\"; export PLUGINDIR=\"" . $settings['pluginDirectory'] . "\"; $fppDir/scripts/install_plugin $plugin \"$srcURL\" \"$branch\" \"$sha\"", $output, $return_val);
-			unset($output);
+	// Determine the authoritative pluginInfo: the repo's own pluginInfo.json if
+	// it ships one, otherwise the one fetched from infoURL. Defer writing the
+	// fetched copy / creating the linkName symlink until after the package gate
+	// so a refusal leaves nothing behind.
+	$infoFile = $settings['pluginDirectory'] . '/' . $plugin . '/pluginInfo.json';
+	$fetchedInfo = null;
+	$data = null;
+	if (file_exists($infoFile)) {
+		$data = json_decode(file_get_contents($infoFile), true);
+	} else if ($infoURL !== '') {
+		$fetchedInfo = FetchURLWithGitHubCredentials($infoURL);
+		$data = json_decode($fetchedInfo, true);
+	}
+	if (!is_array($data)) {
+		$data = $pluginInfo;
+	}
+	$deps = (isset($data['dependencies']) && is_array($data['dependencies'])) ? $data['dependencies'] : null;
+
+	// Authoritative package gate: the cloned repo's own pluginInfo.json may
+	// declare packages the posted info did not. Same rule -- refuse on a
+	// platform without apt, and remove the partial clone.
+	if (DepsRequirePackages($deps) && !AptAvailable()) {
+		$pkgs = implode(', ', $deps['packages']);
+		$plat = isset($settings['Platform']) ? $settings['Platform'] : 'this platform';
+		echo "\nERROR: '$repoName' requires system packages ($pkgs) but $plat does not support system packages. Refusing to install.\n";
+		CleanupPartialPluginInstall($plugin);
+		return false;
+	}
+
+	// Install is going ahead: commit the fetched pluginInfo.json + linkName.
+	$linkName = null;
+	if ($fetchedInfo !== null) {
+		file_put_contents($infoFile, $fetchedInfo);
+		if (isset($data['linkName'])) {
+			$linkName = $data['linkName'];
+			exec("cd " . $settings['pluginDirectory'] . " && ln -s " . $plugin . " " . escapeshellarg($linkName), $o, $rv);
+			unset($o);
 		}
+	}
 
-		if ($return_val == 0) {
-			$infoFile = $settings['pluginDirectory'] . '/' . $plugin . '/pluginInfo.json';
-			if (!file_exists($infoFile)) {
-				// no pluginInfo.json in repository, install the one we
-				// installed the plugin from. FetchURLWithGitHubCredentials
-				// transparently falls back to anonymous fetch when GitHub
-				// credentials are not configured.
-				$info = FetchURLWithGitHubCredentials($infoURL);
-				file_put_contents($infoFile, $info);
+	// Resolve declared dependencies BEFORE the plugin's own install script. If a
+	// required dependency cannot be installed, refuse and clean up rather than
+	// run the plugin's install script against missing prerequisites.
+	if ($deps !== null) {
+		if (!ResolvePluginDependencies($deps, $repoName, $visited, $stream, $depth)) {
+			echo "\nERROR: refusing to complete install of '$plugin' -- a required dependency could not be installed.\n";
+			CleanupPartialPluginInstall($plugin, $linkName);
+			return false;
+		}
+	}
 
-				$data = json_decode($info, true);
+	// Finally, run the plugin's own install script. It was deferred above (via
+	// FPP_SKIP_INSTALL_SCRIPT) so dependencies are in place first; run it now the
+	// same way install_plugin / UpgradePlugin do -- fpp_install.sh with
+	// FPPDIR/SRCDIR, preferring scripts/ with the legacy repo-root fallback.
+	$pluginBase = $settings['pluginDirectory'] . '/' . $plugin;
+	$installScript = $pluginBase . '/scripts/fpp_install.sh';
+	if (!is_executable($installScript)) {
+		$installScript = $pluginBase . '/fpp_install.sh';
+	}
+	if (is_executable($installScript)) {
+		$runCmd = $SUDO . " " . $installScript . " FPPDIR=" . $fppDir . " SRCDIR=" . $fppDir . "/src";
+		if ($streaming) {
+			system($runCmd, $return_val);
+		} else {
+			exec($runCmd, $o, $return_val);
+			unset($o);
+		}
+	}
 
-				if (isset($data['linkName'])) {
-					exec("cd " . $settings['pluginDirectory'] . " && ln -s " . $plugin . " " . $data['linkName'], $output, $return_val);
-					unset($output);
+	echo "\nInstalled plugin '$plugin'.\n";
+	return true;
+}
+
+/**
+ * Resolves a plugin's dependencies block: system packages (apt, ref-counted to
+ * the owning plugin), script-repository scripts ("Category/file"), and other
+ * plugins (installed transitively). Packages are installed first, then scripts,
+ * then dependency plugins. Returns false if a *required* dependency (a declared
+ * package, or a dependency plugin) could not be installed, so the caller can
+ * refuse the whole install; script-repository entries are treated as soft.
+ */
+function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth)
+{
+	global $settings, $fppDir, $SUDO;
+	$streaming = (isset($stream) && $stream != "false");
+	$ok = true;
+
+	// --- packages (apt) ---
+	if (isset($deps['packages']) && is_array($deps['packages']) && count($deps['packages'])) {
+		echo "\n=== Installing package dependencies for $ownerRepo ===\n";
+		flush();
+		// Refresh package lists once for the whole batch.
+		AptGetUpdate();
+		foreach ($deps['packages'] as $pkg) {
+			if (is_string($pkg) && $pkg !== '') {
+				if (!InstallSystemPackage($pkg, $ownerRepo, false)) {
+					$ok = false;
 				}
 			}
-
-			if (isset($stream) && $stream != "false") {
-				return "\nDone\n";
-			}
-			$result['Status'] = 'OK';
-			$result['Message'] = '';
-		} else {
-			$result['Status'] = 'Error';
-			$result['Message'] = 'Could not properly install plugin';
 		}
-	} else {
-		$result['Status'] = 'Error';
-		$result['Message'] = 'The (' . $plugin . ') plugin is already installed';
 	}
 
-	return json($result);
+	// --- scripts (script repository "Category/file") ---
+	if (isset($deps['scripts']) && is_array($deps['scripts']) && count($deps['scripts'])) {
+		echo "\n=== Installing script dependencies for $ownerRepo ===\n";
+		flush();
+		foreach ($deps['scripts'] as $entry) {
+			if (!is_string($entry) || strpos($entry, '/') === false) {
+				echo "\nSkipping malformed script dependency '$entry' (expected 'Category/file').\n";
+				continue;
+			}
+			list($category, $file) = explode('/', $entry, 2);
+			if (!preg_match('#^[A-Za-z0-9._ -]+$#', $category) || !preg_match('#^[A-Za-z0-9._ /-]+$#', $file)) {
+				echo "\nSkipping script dependency with unsafe characters: '$entry'.\n";
+				continue;
+			}
+			echo "\nInstalling script '$entry'...\n";
+			flush();
+			$cmd = $SUDO . " $fppDir/scripts/installScript " . escapeshellarg($category) . " " . escapeshellarg($file);
+			if ($streaming) {
+				system($cmd);
+			} else {
+				exec($cmd, $o);
+				unset($o);
+			}
+		}
+	}
+
+	// --- dependency plugins (transitive) ---
+	if (isset($deps['plugins']) && is_array($deps['plugins']) && count($deps['plugins'])) {
+		echo "\n=== Installing plugin dependencies for $ownerRepo ===\n";
+		flush();
+		foreach ($deps['plugins'] as $depName) {
+			if (!is_string($depName) || $depName === '') {
+				continue;
+			}
+			if (isset($visited[$depName])) {
+				continue;
+			}
+			if (file_exists($settings['pluginDirectory'] . '/' . escapeshellcmd($depName))) {
+				echo "\nDependency plugin '$depName' is already installed.\n";
+				$visited[$depName] = true;
+				continue;
+			}
+			$depInfo = ResolvePluginInfoByName($depName);
+			if ($depInfo === null) {
+				echo "\nERROR: could not resolve dependency plugin '$depName' from pluginList.json (skipping).\n";
+				continue;
+			}
+			$ver = SelectPluginVersion($depInfo);
+			if ($ver !== null) {
+				$depInfo['branch'] = $ver['branch'];
+				$depInfo['sha'] = $ver['sha'];
+			}
+			if (!InstallPluginFromInfo($depInfo, $visited, $stream, $depth + 1)) {
+				echo "\nERROR: dependency plugin '$depName' could not be installed.\n";
+				$ok = false;
+			}
+		}
+	}
+
+	return $ok;
+}
+
+/**
+ * Resolves a plugin repoName to its pluginInfo structure by consulting the
+ * official pluginList.json in FalconChristmas/fpp-data. Only names present in
+ * that list can be installed as dependencies (arbitrary URLs are rejected).
+ * Returns the decoded pluginInfo (with infoURL set) or null.
+ */
+function ResolvePluginInfoByName($repoName)
+{
+	static $pluginList = null;
+	if ($pluginList === null) {
+		$listJSON = FetchURLWithGitHubCredentials('https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/pluginList.json');
+		$decoded = json_decode($listJSON, true);
+		$pluginList = (is_array($decoded) && isset($decoded['pluginList']) && is_array($decoded['pluginList'])) ? $decoded['pluginList'] : array();
+	}
+
+	$infoURL = null;
+	foreach ($pluginList as $entry) {
+		if (is_array($entry) && count($entry) >= 2 && $entry[0] === $repoName) {
+			$infoURL = $entry[1];
+			break;
+		}
+	}
+	if ($infoURL === null) {
+		return null;
+	}
+
+	$infoJSON = FetchURLWithGitHubCredentials($infoURL);
+	$info = json_decode($infoJSON, true);
+	if (!is_array($info)) {
+		return null;
+	}
+	$info['infoURL'] = $infoURL;
+	return $info;
+}
+
+/**
+ * Picks the branch/sha to install for a dependency plugin based on the running
+ * FPP version and platform. PHP port of the version-window selection in
+ * www/plugins.php (LoadPlugin). Falls back to the first version entry when none
+ * match. Returns array('branch'=>..., 'sha'=>...) or null.
+ */
+function SelectPluginVersion($pluginInfo)
+{
+	global $settings;
+	if (!isset($pluginInfo['versions']) || !is_array($pluginInfo['versions']) || count($pluginInfo['versions']) === 0) {
+		return null;
+	}
+	$triplet = getFPPVersionTriplet();
+	$versions = $pluginInfo['versions'];
+	$compatible = -1;
+	foreach ($versions as $i => $v) {
+		$min = isset($v['minFPPVersion']) ? $v['minFPPVersion'] : '0';
+		$max = isset($v['maxFPPVersion']) ? $v['maxFPPVersion'] : '';
+		$openMax = ($max === '0' || $max === '0.0' || $max === '');
+		$platformsOk = true;
+		if (isset($v['platforms']) && is_array($v['platforms'])) {
+			$platformsOk = isset($settings['Platform']) && in_array($settings['Platform'], $v['platforms']);
+		}
+		$minOk = (ComparePluginFPPVersions($min, $triplet) <= 0);
+		$maxOk = $openMax || (ComparePluginFPPVersions($max, $triplet) > 0);
+		if ($minOk && $maxOk && $platformsOk) {
+			$compatible = $i; // last matching entry wins, matching the JS logic
+		}
+	}
+	if ($compatible < 0) {
+		$compatible = 0; // fall back to first entry so the dependency still installs
+	}
+	$v = $versions[$compatible];
+	return array(
+		'branch' => isset($v['branch']) && $v['branch'] !== '' ? $v['branch'] : 'master',
+		'sha' => isset($v['sha']) ? $v['sha'] : ''
+	);
+}
+
+// PHP port of versionToNumber() in www/js/fpp.js -- turns a version string into
+// a comparable integer.
+function PluginVersionToNumber($version)
+{
+	$version = (string) $version;
+	if (strlen($version) > 0 && $version[0] === 'v') {
+		$version = substr($version, 1);
+	}
+	$dash = strpos($version, '-');
+	if ($dash !== false) {
+		$version = substr($version, 0, $dash);
+	}
+	$parts = explode('.', $version);
+	while (count($parts) < 3) {
+		$parts[] = '0';
+	}
+	$number = 0;
+	for ($x = 0; $x < 3; $x++) {
+		$val = intval($parts[$x]);
+		if ($val >= 9990) {
+			return $number * 10000 + 9999;
+		} else if ($val > 99) {
+			$val = 99;
+		}
+		$number = $number * 100 + $val;
+	}
+	return $number;
+}
+
+// Returns -1/0/1 comparing two FPP version strings (port of CompareFPPVersions).
+function ComparePluginFPPVersions($a, $b)
+{
+	$a = PluginVersionToNumber($a);
+	$b = PluginVersionToNumber($b);
+	return ($a <=> $b);
 }
 
 /**
@@ -213,6 +568,20 @@ function UninstallPlugin()
 
 			if (isset($data['linkName']))
 				exec("rm " . $settings['pluginDirectory'] . "/" . $data['linkName'], $output, $return_val);
+
+			// Drop this plugin's claim on any packages it declared as
+			// dependencies. A package is only apt-removed once nothing else
+			// (the user or another plugin) still requires it.
+			if (isset($data['dependencies']['packages']) && is_array($data['dependencies']['packages'])) {
+				if (isset($stream) && $stream != "false") {
+					DisableOutputBuffering();
+				}
+				foreach ($data['dependencies']['packages'] as $pkg) {
+					if (is_string($pkg) && $pkg !== '') {
+						RemoveSystemPackageRequester($pkg, $plugin);
+					}
+				}
+			}
 		}
 
 		if (isset($stream) && $stream != "false") {
