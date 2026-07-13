@@ -119,7 +119,7 @@ function PutSetting()
     $value = file_get_contents('php://input');
     $setting = params('SettingName');
 
-    if ($setting == 'GPIOFanTemperature' && isset($settings['temperatureInF']) && $settings['temperatureInF'] == 1) {
+    if (($setting == 'GPIOFanTemperature' || str_starts_with($setting, 'FanTrip_')) && isset($settings['temperatureInF']) && $settings['temperatureInF'] == 1) {
         $value = round(($value - 32) * 5 / 9);
     }
 
@@ -308,6 +308,28 @@ function PutSetting()
 
     $status = array("status" => "OK");
     return json($status);
+}
+
+/**
+ * Reset fan thermal trip settings
+ *
+ * Removes all FanTrip_* settings and restores the hardware (device tree)
+ * default trip temperatures that fppinit captured at boot.
+ *
+ * @route POST /api/settings/fanThermal/reset
+ * @response 200 Settings reset
+ * ```json
+ * {"status": "OK"}
+ * ```
+ */
+function ResetFanThermalTrips()
+{
+    global $settings, $SUDO;
+    exec($SUDO . " " . $settings['fppDir'] . "/src/fppinit resetThermal", $output, $return_val);
+    if ($return_val != 0) {
+        return json(array("status" => "Error resetting fan thermal trip points"));
+    }
+    return json(array("status" => "OK"));
 }
 
 /**

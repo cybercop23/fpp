@@ -194,6 +194,7 @@ int main(int argc, char* argv[]) {
             setupNetwork();
         }
         configureBBB();
+        applyThermalSettings(true);
         setupChannelOutputs();
         setupKiosk();
         printf("Setting file ownership\n");
@@ -281,6 +282,11 @@ int main(int argc, char* argv[]) {
         setupTimezone(); // this may not have worked in the init phase, try again
         startZRAMSwap();
         startDiskSwap();
+        // Fan/thermal drivers (e.g. pwm-fan) may be kernel modules that probe
+        // after the early "start" phase ran, so re-apply the trip settings here.
+        // Zones already snapshotted at "start" are not re-captured; one that
+        // only appeared now is still at its device tree values.
+        applyThermalSettings(true);
 
         audioThread.join();
         networkThread.join();
@@ -322,6 +328,10 @@ int main(int argc, char* argv[]) {
         announceIPAddresses();
     } else if (action == "configureBBB") {
         configureBBB();
+    } else if (action == "applyThermal") {
+        applyThermalSettings();
+    } else if (action == "resetThermal") {
+        resetThermalSettings();
     } else if (action == "installKiosk") {
         installKiosk();
     } else if (action == "setupNetwork") {

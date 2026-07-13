@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <pwd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -316,6 +317,127 @@ void configureBBB() {
         PutFileContents("/sys/class/leds/beaglebone:green:usr" + std::to_string(3 + offset) + "/trigger", "mmc1");
     }
 #endif
+}
+
+// Fan thermal trip settings.  The web UI (PrintFanThermalSettings in
+// www/common.php) creates settings named FanTrip_<zone type stripped to
+// alphanumerics>_<trip index> holding degrees C for thermal zones that have a
+// fan cooling device bound to them (the Pi5 case/active-cooler fan, cape fans
+// wired into a thermal zone via device tree).  Trip points reset to their
+// device tree defaults on every boot, so applyThermalSettings() runs during
+// boot; it is also invoked directly ("fppinit applyThermal") when one of the
+// settings is changed in the UI.
+//
+// The first pass each boot records the untouched device tree trip values into
+// a snapshot in media/tmp (cleared on every boot) BEFORE applying any
+// settings, so resetThermalSettings() ("fppinit resetThermal", the UI's
+// "Reset to Defaults" button) can restore the hardware defaults without a
+// reboot.
+static const std::string FAN_TRIP_DEFAULTS_FILE = FPP_MEDIA_DIR + "/tmp/fan_thermal_defaults.json";
+
+static std::string fanTripKey(const std::string& ztype, int trip) {
+    std::string key;
+    for (char c : ztype) {
+        if (isalnum((unsigned char) c)) {
+            key += c;
+        }
+    }
+    key += "_";
+    key += std::to_string(trip);
+    return key;
+}
+
+// Walk every "active" trip point of every thermal zone, calling
+// cb(tripTempFile, "<sanitized zone type>_<trip index>").  Passive/critical
+// trips belong to the kernel's throttle/shutdown logic and are never visited.
+static void forEachActiveTripPoint(const std::function<void(const std::string&, const std::string&)>& cb) {
+    for (int zn = 0; zn < 32; zn++) {
+        std::string base = "/sys/class/thermal/thermal_zone" + std::to_string(zn);
+        if (!FileExists(base + "/type")) {
+            break;
+        }
+        std::string ztype = GetFileContents(base + "/type");
+        TrimWhiteSpace(ztype);
+        for (int t = 0; t < 16; t++) {
+            std::string tripFile = base + "/trip_point_" + std::to_string(t) + "_temp";
+            if (!FileExists(tripFile)) {
+                break;
+            }
+            std::string tripType = GetFileContents(base + "/trip_point_" + std::to_string(t) + "_type");
+            TrimWhiteSpace(tripType);
+            if (tripType != "active") {
+                continue;
+            }
+            cb(tripFile, fanTripKey(ztype, t));
+        }
+    }
+}
+
+// captureDefaults must ONLY be set from the boot paths, where sysfs still holds
+// the untouched device tree values.  Capturing during an on-demand apply (the
+// UI changing a setting) could record an already-customized temperature as the
+// "default" if the snapshot had been lost, which would make a later reset
+// restore the user's value instead of the hardware one.
+void applyThermalSettings(bool captureDefaults) {
+    if (FileExists("/etc/fpp/container")) {
+        return;
+    }
+    Json::Value defaults;
+    if (FileExists(FAN_TRIP_DEFAULTS_FILE)) {
+        LoadJsonFromString(GetFileContents(FAN_TRIP_DEFAULTS_FILE), defaults);
+    }
+    bool defaultsChanged = false;
+    forEachActiveTripPoint([&](const std::string& tripFile, const std::string& key) {
+        if (captureDefaults && !defaults.isMember(key)) {
+            std::string cur = GetFileContents(tripFile);
+            TrimWhiteSpace(cur);
+            if (!cur.empty()) {
+                defaults[key] = atoi(cur.c_str());
+                defaultsChanged = true;
+            }
+        }
+        int temp = getRawSettingInt("FanTrip_" + key, -1);
+        if (temp > 0) {
+            printf("FPP - Setting fan trip point %s to %dC\n", key.c_str(), temp);
+            PutFileContents(tripFile, std::to_string(temp * 1000));
+        }
+    });
+    if (defaultsChanged) {
+        PutFileContents(FAN_TRIP_DEFAULTS_FILE, SaveJsonToString(defaults));
+    }
+}
+
+void resetThermalSettings() {
+    if (FileExists("/etc/fpp/container")) {
+        return;
+    }
+    // Remove all FanTrip_ settings (same rewrite approach as setRawSetting)
+    std::string content = GetFileContents(FPP_MEDIA_DIR + "/settings");
+    std::vector<std::string> lines = split(content, '\n');
+    content = "";
+    for (auto& line : lines) {
+        if (!line.empty() && !line.starts_with("FanTrip_")) {
+            content += line;
+            content += "\n";
+        }
+    }
+    PutFileContents(FPP_MEDIA_DIR + "/settings", content);
+
+    // Restore the device tree default temperatures captured at boot.  If the
+    // snapshot is somehow gone (media/tmp cleared by hand mid-run), the
+    // settings removed above still restore the defaults on the next boot, so
+    // warn rather than fail.
+    Json::Value defaults;
+    if (FileExists(FAN_TRIP_DEFAULTS_FILE) && LoadJsonFromString(GetFileContents(FAN_TRIP_DEFAULTS_FILE), defaults)) {
+        forEachActiveTripPoint([&](const std::string& tripFile, const std::string& key) {
+            if (defaults.isMember(key)) {
+                printf("FPP - Restoring fan trip point %s to %dmC\n", key.c_str(), defaults[key].asInt());
+                PutFileContents(tripFile, std::to_string(defaults[key].asInt()));
+            }
+        });
+    } else {
+        printf("FPP - No fan trip point defaults snapshot; settings cleared, defaults restore on next boot\n");
+    }
 }
 
 void setFileOwnership() {

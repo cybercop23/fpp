@@ -140,6 +140,7 @@ if (file_exists("/etc/fpp/container") || $settings["IsDesktop"]) {
 }
 
 PrintSettingGroup('system');
+PrintFanThermalSettings();
 PrintSettingGroup('BBBLeds');
 
 if ($showOSSecurity) {

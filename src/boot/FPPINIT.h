@@ -64,6 +64,9 @@ void createDirectories();
 void setupApache();
 void handleBootActions();
 void configureBBB();
+// captureDefaults=true only from boot, while sysfs still holds the device tree values
+void applyThermalSettings(bool captureDefaults = false);
+void resetThermalSettings();
 void setFileOwnership();
 bool checkUnpartitionedSpace();
 void resizeRootFS();

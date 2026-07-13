@@ -411,7 +411,14 @@ function ApplySetting($setting, $value)
             }
             break;
         default:
-            ApplyServiceSetting($setting, $value, "--now");
+            if (str_starts_with($setting, 'FanTrip_')) {
+                // Dynamic fan thermal trip settings (PrintFanThermalSettings in
+                // common.php).  fppinit owns the sysfs writes so the live apply
+                // here and the boot-time re-apply share a single implementation.
+                exec("sudo " . $settings['fppDir'] . "/src/fppinit applyThermal", $output);
+            } else {
+                ApplyServiceSetting($setting, $value, "--now");
+            }
             break;
     }
 }

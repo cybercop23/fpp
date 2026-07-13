@@ -547,6 +547,159 @@ function PrintIcon($level)
 
 }
 
+/**
+ * Scans /sys/class/thermal for thermal zones that have a fan cooling device
+ * bound to them (the Pi5 case/active-cooler fan, or a cape fan wired into a
+ * thermal zone via device tree) and returns the "active" trip points those
+ * fans are bound to.  Passive/critical trips (CPU throttle/shutdown) are
+ * never included, even in zones that also drive a fan.
+ *
+ * The per-trip setting names derived here (FanTrip_<zone type stripped to
+ * alphanumerics>_<trip index>) must match applyThermalSettings() in
+ * src/boot/FPPINIT_Config.cpp, which re-applies the saved values to sysfs at
+ * boot (trip points reset to their device tree defaults on every boot).
+ *
+ * Returns an array of zones:
+ *   [ [ 'zone' => 'thermal_zone2', 'type' => 'K16-Pro-thermal',
+ *       'label' => 'K16-Pro', 'settingBase' => 'FanTrip_K16Prothermal',
+ *       'trips' => [ 0 => 40.0, 1 => 50.0, 2 => 60.0 ] ], ... ]
+ * where trips maps trip index to the current sysfs temperature in C.
+ */
+function GetFanThermalZones()
+{
+    $zones = array();
+    foreach (glob('/sys/class/thermal/thermal_zone*') as $zdir) {
+        if (!preg_match('/thermal_zone\d+$/', $zdir)) {
+            continue;
+        }
+        $ztype = trim(@file_get_contents($zdir . '/type'));
+        if ($ztype == '') {
+            continue;
+        }
+
+        // Collect the trip point indexes that fan cooling devices are bound to
+        $fanTrips = array();
+        foreach (glob($zdir . '/cdev*_trip_point') as $ctp) {
+            $cdevType = trim(@file_get_contents(substr($ctp, 0, -strlen('_trip_point')) . '/type'));
+            if (stripos($cdevType, 'fan') === false) {
+                continue;
+            }
+            $trip = trim(@file_get_contents($ctp));
+            if (is_numeric($trip) && $trip >= 0) {
+                $fanTrips[intval($trip)] = true;
+            }
+        }
+        if (empty($fanTrips)) {
+            continue;
+        }
+
+        $trips = array();
+        ksort($fanTrips);
+        foreach (array_keys($fanTrips) as $t) {
+            $tripType = trim(@file_get_contents($zdir . '/trip_point_' . $t . '_type'));
+            if ($tripType != 'active') {
+                continue;
+            }
+            $temp = trim(@file_get_contents($zdir . '/trip_point_' . $t . '_temp'));
+            if (!is_numeric($temp)) {
+                continue;
+            }
+            $trips[$t] = intval($temp) / 1000.0;
+        }
+        if (empty($trips)) {
+            continue;
+        }
+
+        $label = preg_replace('/[-_]?thermal$/i', '', $ztype);
+        if ($label == '') {
+            $label = $ztype;
+        }
+        if (strtolower($label) == 'cpu') {
+            $label = 'CPU';
+        }
+
+        $zones[] = array(
+            'zone' => basename($zdir),
+            'type' => $ztype,
+            'label' => $label,
+            'settingBase' => 'FanTrip_' . preg_replace('/[^a-zA-Z0-9]/', '', $ztype),
+            'trips' => $trips,
+        );
+    }
+    return $zones;
+}
+
+/**
+ * Renders the dynamic fan trip temperature settings for any thermal zones
+ * with a fan bound to them.  Emits nothing when the hardware has no fan.
+ * Setting names are dynamic (per zone/trip), so these are synthesized into
+ * $settingInfos here rather than declared in settings.json.
+ */
+function PrintFanThermalSettings()
+{
+    global $settingInfos;
+
+    $zones = GetFanThermalZones();
+    if (empty($zones)) {
+        return;
+    }
+
+    LoadSettingInfos();
+
+    echo "<h2>Fan Temperatures</h2>\n";
+    echo "<div class='container-fluid settingsTable settingsGroupTable'>\n";
+    echo "<div class='row'><div class='col-md'>Temperatures at which the cooling fan turns on and speeds up.  Changes are applied immediately and re-applied on every boot.</div></div>\n";
+    foreach ($zones as $zone) {
+        if (count($zones) > 1) {
+            echo "<div class='row'><div class='col-md'><b>" . htmlspecialchars($zone['label']) . "</b></div></div>\n";
+        }
+        $numTrips = count($zone['trips']);
+        $speed = 1;
+        foreach ($zone['trips'] as $tripIndex => $currentTemp) {
+            $name = $zone['settingBase'] . '_' . $tripIndex;
+            if ($numTrips == 1) {
+                $desc = 'Fan On Temperature';
+                $tip = 'Temperature above which the ' . $zone['label'] . ' fan turns on.';
+            } else if ($speed == 1) {
+                $desc = 'Fan On (Speed 1) Temperature';
+                $tip = 'Temperature above which the ' . $zone['label'] . ' fan turns on at its lowest speed.';
+            } else {
+                $desc = 'Fan Speed ' . $speed . ' Temperature';
+                $tip = 'Temperature above which the ' . $zone['label'] . ' fan increases to speed ' . $speed . ' of ' . $numTrips . '.';
+            }
+            $settingInfos[$name] = array(
+                'name' => $name,
+                'description' => $desc,
+                'tip' => $tip,
+                'type' => 'number',
+                'default' => (int) round($currentTemp),
+                'min' => 20,
+                'max' => 95,
+                'step' => 1,
+                'suffix' => ' C',
+            );
+            PrintSetting($name);
+            $speed++;
+        }
+    }
+    echo "<div class='row'><div class='printSettingLabelCol col-md-4 col-lg-3 col-xxxl-2'></div><div class='printSettingFieldCol col-md'>";
+    echo "<input type='button' class='buttons' value='Reset to Defaults' onClick='ResetFanTripsToDefaults();'>";
+    echo "</div></div>\n";
+    echo "</div>\n";
+    echo "<script>\n";
+    echo "function ResetFanTripsToDefaults() {\n";
+    echo "    if (!confirm('Reset all fan temperatures to the hardware defaults?'))\n";
+    echo "        return;\n";
+    echo "    var result = Post('api/settings/fanThermal/reset', false, '');\n";
+    echo "    if (result.status == 'OK') {\n";
+    echo "        location.reload();\n";
+    echo "    } else {\n";
+    echo "        DialogError('Fan Temperatures', 'Failed to reset fan temperatures: ' + result.status);\n";
+    echo "    }\n";
+    echo "}\n";
+    echo "</script>\n";
+}
+
 function ShouldPrintSetting($s)
 {
     global $settings;
@@ -794,7 +947,7 @@ function PrintSetting($setting, $callback = '', $options = array(), $plugin = ''
                 $step = isset($s['step']) ? $s['step'] : 1;
                 $default = isset($s['default']) ? $s['default'] : "0";
 
-                if ($setting == 'GPIOFanTemperature' && isset($settings['temperatureInF']) && $settings['temperatureInF'] == 1) {
+                if (($setting == 'GPIOFanTemperature' || str_starts_with($setting, 'FanTrip_')) && isset($settings['temperatureInF']) && $settings['temperatureInF'] == 1) {
                     $origVal = isset($settings[$setting]) ? $settings[$setting] : $default;
                     $settings[$setting] = round(($origVal * 9 / 5) + 32);
                     $min = round(($min * 9 / 5) + 32);

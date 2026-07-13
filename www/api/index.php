@@ -238,6 +238,7 @@ dispatch_get('/schedule', 'GetSchedule');
 dispatch_post('/schedule', 'SaveSchedule');
 
 dispatch_get('/settings', 'GetSettings');
+dispatch_post('/settings/fanThermal/reset', 'ResetFanThermalTrips');
 dispatch_get('/settings/:SettingName', 'GetSetting');
 dispatch_get('/settings/:SettingName/options', 'GetOptions');
 dispatch_put('/settings/:SettingName', 'PutSetting');
