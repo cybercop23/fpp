@@ -1278,8 +1278,14 @@ int GStreamerOutput::Start(int msTime) {
     } else {
         // Audio-only pipeline (original gst_parse_launch approach)
         LogWarn(VB_MEDIAOUT, "GStreamer: Building audio-only pipeline\n");
+        // expose-all-streams=false + audio caps makes decodebin discard any
+        // video stream instead of auto-plugging a decoder for it.  Without
+        // this, playing an mp4 audio-only still spins up the bcm2835 hardware
+        // H.264 decoder for a video branch nothing consumes; tearing that down
+        // leaves vb2 buffers active and sprays kernel WARN stack dumps
+        // (videobuf2-core "driver bug: stop_streaming...") on every stop.
         std::string pipelineStr =
-            "filesrc location=\"" + fullPath + "\" ! decodebin ! audioconvert ! audioresample ! "
+            "filesrc location=\"" + fullPath + "\" ! decodebin expose-all-streams=false caps=\"audio/x-raw\" ! audioconvert ! audioresample ! "
             "audio/x-raw,rate=48000 ! "
             "tee name=t "
             "t. ! queue ! volume name=vol ! " + sinkStr + " "

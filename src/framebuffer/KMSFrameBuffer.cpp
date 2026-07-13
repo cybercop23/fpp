@@ -485,6 +485,17 @@ void KMSFrameBuffer::PageFlipHandler(int fd, unsigned int frame, unsigned int se
     KMSFrameBuffer* self = static_cast<KMSFrameBuffer*>(data);
     if (self) {
         self->m_flipPending = false;
+        // "frame" is the vblank sequence number at flip completion; track the
+        // cadence.  Runs inside drmHandleEvent under mediaOutputLock.
+        if (self->m_lastFlipSeq != 0 && frame > self->m_lastFlipSeq) {
+            uint32_t delta = frame - self->m_lastFlipSeq;
+            self->m_vblankDeltaCounts[delta > 4 ? 4 : delta]++;
+            if (self->m_prevVblankDelta != 0 && delta != self->m_prevVblankDelta) {
+                self->m_vblankCadenceBreaks++;
+            }
+            self->m_prevVblankDelta = delta;
+        }
+        self->m_lastFlipSeq = frame;
     }
 }
 
@@ -584,13 +595,15 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
             // Warn only when a new delay event has occurred since the last
             // warning (rate-limited), so each warning line timestamps actual
             // trouble rather than repeating stale totals.
-            uint64_t eventTotal = (uint64_t)m_slowSyncs + m_flipWaitTimeouts + m_flipRejects;
+            uint64_t eventTotal = (uint64_t)m_slowSyncs + m_flipWaitTimeouts + m_flipRejects + m_vblankCadenceBreaks;
             if (eventTotal != m_warnedEventTotal &&
                 (syncEnd - m_lastFlipWarnMS) > 10000) {
                 m_lastFlipWarnMS = syncEnd;
                 m_warnedEventTotal = eventTotal;
-                LogWarn(VB_CHANNELOUT, "KMSFrameBuffer %s flip-path delay (last %dms); totals since start: %u syncs >20ms (max %dms), %u flip wait timeouts, %u flip rejects\n",
-                        m_connectorName.c_str(), m_lastSlowSyncMS, m_slowSyncs, m_maxSyncMS, m_flipWaitTimeouts, m_flipRejects);
+                LogWarn(VB_CHANNELOUT, "KMSFrameBuffer %s flip-path event; totals since start: %u syncs >20ms (max %dms, last %dms), %u wait timeouts, %u flip rejects, %u vblank cadence breaks (deltas 1/2/3/4+: %u/%u/%u/%u)\n",
+                        m_connectorName.c_str(), m_slowSyncs, m_maxSyncMS, m_lastSlowSyncMS, m_flipWaitTimeouts, m_flipRejects,
+                        m_vblankCadenceBreaks,
+                        m_vblankDeltaCounts[1], m_vblankDeltaCounts[2], m_vblankDeltaCounts[3], m_vblankDeltaCounts[4]);
             }
         }
     }

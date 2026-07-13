@@ -96,6 +96,17 @@ private:
     // happened (a warning line then timestamps the event itself).
     uint64_t m_warnedEventTotal = 0;
 
+    // Vblank cadence tracking.  Each flip completion event carries the vblank
+    // sequence number; at a steady output rate the delta between consecutive
+    // flips is constant (e.g. 2 at 20fps on a 40Hz panel).  If the software
+    // frame clock beats against the panel clock, the delta oscillates (1,3,
+    // 1,3,...) around each phase crossing - visible as a brief judder on the
+    // pixels even though every software metric looks perfect.
+    uint32_t m_lastFlipSeq = 0;
+    uint32_t m_vblankDeltaCounts[5] = { 0, 0, 0, 0, 0 }; // [0]=unused, 1..3, [4]=4+
+    uint32_t m_vblankCadenceBreaks = 0;                  // delta changed vs previous delta
+    uint32_t m_prevVblankDelta = 0;
+
     CardInfo* m_cardInfo = nullptr;
 };
 
