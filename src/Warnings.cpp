@@ -153,6 +153,16 @@ void WarningHolder::RemoveWarning(const std::string& w) {
 void WarningHolder::AddWarning(int id, const std::string& w, const std::map<std::string, std::string>& data) {
     AddWarningTimeout(-1, id, w, data);
 }
+void WarningHolder::AddWarning(int id, const std::string& w, const std::string& fixUrl, const std::string& fixText) {
+    std::map<std::string, std::string> data;
+    if (!fixUrl.empty()) {
+        data["fixUrl"] = fixUrl;
+    }
+    if (!fixText.empty()) {
+        data["fixText"] = fixText;
+    }
+    AddWarningTimeout(-1, id, w, data);
+}
 
 void WarningHolder::AddWarningTimeout(int sec, int id, const std::string& w, const std::map<std::string, std::string>& data, const std::string& plugin) {
     LogDebug(VB_GENERAL, "Adding Warning: %s\n", w.c_str());

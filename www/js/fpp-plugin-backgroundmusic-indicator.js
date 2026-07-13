@@ -1,0 +1,1 @@
+/home/fpp/media/plugins/fpp-plugin-BackgroundMusic/header-indicator.js

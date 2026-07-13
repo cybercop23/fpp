@@ -5192,11 +5192,26 @@ function updateWarnings (jsonStatus) {
 		for (var i = 0; i < currentWarnings.length; i++) {
 			var warningID = currentWarnings[i]['id'];
 			var warningMessage = currentWarnings[i]['message'];
+			// Optional one-click "Fix" button: a warning may carry a fixUrl (a
+			// same-origin URL to navigate to) and fixText (the button label) in
+			// its data. Rendered next to the warning so the user can act on it
+			// directly (e.g. "Reinstall All Plugins" after an FPPOS upgrade).
+			var fixButton = '';
+			var warningData = currentWarnings[i]['data'];
+			if (warningData && warningData['fixUrl'] && warningData['fixText']) {
+				fixButton =
+					' <a class="btn btn-sm btn-outline-primary warning-fix-btn" href="' +
+					encodeURI(warningData['fixUrl']) +
+					'"><i class="fas fa-wrench"></i> ' +
+					warningData['fixText'] +
+					'</a>';
+			}
 			if (warningID == 0) {
 				//handle old style warnings with no id with legacy behavior
 				txt +=
 					'<li><i class="fas fa-solid fa-circle fa-2xs"></i>  ' +
 					currentWarnings[i]['message'] +
+					fixButton +
 					'</li>';
 			} else {
 				//find extra warning info from definitions
@@ -5252,13 +5267,16 @@ function updateWarnings (jsonStatus) {
 						currentWarnings[i]['message'] +
 						' (<i class="fas fa-link"></i> Warning ID: ' +
 						warningID +
-						')</a></span></li>';
+						')</a></span>' +
+						fixButton +
+						'</li>';
 				} else {
 					txt +=
 						'<li><i class="fas fa-' +
 						currentWarnings[i]['icon'] +
 						'"></i> ' +
 						currentWarnings[i]['message'] +
+						fixButton +
 						'</li>';
 				}
 			}

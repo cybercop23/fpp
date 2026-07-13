@@ -61,6 +61,13 @@ public:
     static void RemoveWarning(const std::string& w);
 
     static void AddWarning(int id, const std::string& w, const std::map<std::string, std::string>& data = {});
+
+    // Convenience overload for a warning that offers a one-click "Fix" button in
+    // the web UI. fixUrl is a same-origin URL the button navigates to; fixText is
+    // the button label (e.g. "Reinstall All Plugins"). Both are carried in the
+    // warning's data map (keys "fixUrl"/"fixText") and rendered by updateWarnings()
+    // in www/js/fpp.js.
+    static void AddWarning(int id, const std::string& w, const std::string& fixUrl, const std::string& fixText);
     static void AddWarningTimeout(int seconds, int id, const std::string& w, const std::map<std::string, std::string>& data = {}, const std::string& plugin = "");
     static void RemoveWarning(int id, const std::string& w, const std::string& plugin = "");
     static void RemoveAllWarnings();

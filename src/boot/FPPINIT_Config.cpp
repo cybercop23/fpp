@@ -592,8 +592,37 @@ bool installPackagesFromJson(const std::string& filePath) {
     return allOk;
 }
 
+// A plugin is considered "installed" if its directory contains a pluginInfo.json
+// manifest (same rule the web layer's GetInstalledPlugins() uses). Used to decide
+// whether the post-FPPOS-upgrade "plugins must be reinstalled" warning applies.
+static bool anyPluginsInstalled() {
+    std::string dir = FPP_MEDIA_DIR + "/plugins";
+    if (!DirectoryExists(dir)) {
+        return false;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (entry.is_directory() && FileExists(entry.path().string() + "/pluginInfo.json")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void checkInstallPackages() {
     if (FileExists("/fppos_upgraded")) {
+        // An FPPOS reflash replaces /opt/fpp (new fppd, headers, plugin API
+        // version) while /home/fpp/media -- including the plugin clones -- is
+        // preserved. Native (.so) plugins built against the old API will be
+        // rejected at dlopen, and any rootfs artifacts a plugin's fpp_install.sh
+        // dropped are gone. If plugins are present, set a persisted flag so fppd
+        // can raise a (non-dismissible) warning prompting the user to Reinstall
+        // All. The Plugin Manager clears the flag once a reinstall succeeds. Set
+        // independent of the apt result below; a retry next boot just rewrites the
+        // same value.
+        if (anyPluginsInstalled()) {
+            setRawSetting("pluginReinstallNeededAfterOS", "1");
+        }
+
         printf("Installing User Packages\n");
         // Only consume the upgrade marker once the packages actually installed.
         // If the install can't complete (e.g. no network yet at boot), leave

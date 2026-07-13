@@ -50,6 +50,10 @@
                 dataType: 'json',
                 success: function (data) {
                     LoadPlugins(data.pluginList);
+                    // Deep-link from the post-FPPOS-upgrade warning's Fix button
+                    // (plugins.php?action=reinstallAll): now that installedPlugins
+                    // and pluginInfos are loaded, pop the Reinstall All confirm.
+                    MaybeAutoOpenReinstallAll();
                 },
                 error: function () {
                     alert('Error, failed to get pluginList.json');
@@ -356,6 +360,13 @@
                     installedPlugins = data;
                     var failed = reinstallAttempted.filter(function (r) { return data.indexOf(r) < 0; });
                     var ok = reinstallAttempted.length - failed.length;
+                    // A clean reinstall clears the post-FPPOS-upgrade flag; fppd
+                    // is watching the settings file and will drop the associated
+                    // "plugins must be reinstalled" warning. Leave it set if any
+                    // plugin failed so the prompt persists for a retry.
+                    if (failed.length === 0) {
+                        SetSetting('pluginReinstallNeededAfterOS', '', 0, 0, true);
+                    }
                     SetProgressDialogStatus('pluginsProgressPopup',
                         failed.length ? ('Reinstall All — ' + failed.length + ' failed, ' + ok + ' of ' + reinstallAttempted.length + ' ok')
                                       : ('Reinstall All — complete (' + ok + ' of ' + reinstallAttempted.length + ')'));
@@ -405,6 +416,23 @@
                     }
                 }
             });
+        }
+
+        // The post-FPPOS-upgrade warning's Fix button links here with
+        // ?action=reinstallAll; pop the Reinstall All confirmation automatically.
+        // Gated on the pluginReinstallNeededAfterOS setting (still set only while a
+        // reinstall is actually needed): a successful Reinstall All clears it, so
+        // the location.reload() the progress dialog performs on close will NOT
+        // re-open the confirmation. Also guarded to at most once per page load.
+        var autoReinstallHandled = false;
+        function MaybeAutoOpenReinstallAll() {
+            if (autoReinstallHandled)
+                return;
+            var params = new URLSearchParams(window.location.search);
+            if (params.get('action') === 'reinstallAll' && settings['pluginReinstallNeededAfterOS']) {
+                autoReinstallHandled = true;
+                ShowReinstallAllPluginsPopup();
+            }
         }
 
         function FindPluginInfo(plugin) {

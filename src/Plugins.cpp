@@ -375,7 +375,33 @@ void PluginManager::loadUserPlugins() {
         LogWarn(VB_PLUGIN, "Couldn't open the directory %s: (%d): %s\n", FPP_DIR_PLUGIN("").c_str(), errno, FPPstrerror(errno));
     }
 
+    // After an FPPOS reflash the boot code sets pluginReinstallNeededAfterOS if
+    // plugins were present; surface the reinstall prompt, and keep it in sync if
+    // the flag is cleared (by a successful Reinstall All) while fppd is running.
+    static bool reinstallListenerRegistered = false;
+    if (!reinstallListenerRegistered) {
+        reinstallListenerRegistered = true;
+        registerSettingsListener("PluginManager", "pluginReinstallNeededAfterOS",
+                                 [this](const std::string&) { checkPluginReinstallWarning(); });
+    }
+    checkPluginReinstallWarning();
+
     return;
+}
+
+// Warning id shared with the www/warnings-definitions.json "Plugin_Warnings"
+// entry (drives the icon/grouping); the Fix button itself is rendered from the
+// fixUrl/fixText carried in the warning data.
+static constexpr int PLUGIN_REINSTALL_WARNING_ID = 57;
+static const std::string PLUGIN_REINSTALL_WARNING_MSG = "FPPOS upgraded, plugins must be reinstalled";
+
+void PluginManager::checkPluginReinstallWarning() {
+    if (getSetting("pluginReinstallNeededAfterOS") != "") {
+        WarningHolder::AddWarning(PLUGIN_REINSTALL_WARNING_ID, PLUGIN_REINSTALL_WARNING_MSG,
+                                  "plugins.php?action=reinstallAll", "Reinstall All Plugins");
+    } else {
+        WarningHolder::RemoveWarning(PLUGIN_REINSTALL_WARNING_ID, PLUGIN_REINSTALL_WARNING_MSG);
+    }
 }
 
 PluginManager::~PluginManager() {

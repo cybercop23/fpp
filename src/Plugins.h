@@ -49,6 +49,11 @@ public:
     static PluginManager INSTANCE;
 
 private:
+    // Raise or clear the "FPPOS upgraded, plugins must be reinstalled" warning
+    // based on the pluginReinstallNeededAfterOS setting (set at boot after an
+    // FPPOS reflash, cleared by the Plugin Manager once a reinstall succeeds).
+    void checkPluginReinstallWarning();
+
     FPPPlugins::Plugin* loadSHLIBPlugin(const std::string& shlibName);
     FPPPlugins::Plugin* loadUserPlugin(const std::string& name);
     void addPlugin(FPPPlugins::Plugin* plugin);

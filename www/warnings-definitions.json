@@ -414,6 +414,13 @@
             "HelpTxt": "",
             "HelpPageType": "md",
             "WarningGroup": "Output_Warnings"
+        },
+        {
+            "id": 57,
+            "Title": "FPPOS upgraded, plugins must be reinstalled",
+            "HelpTxt": "",
+            "HelpPageType": "",
+            "WarningGroup": "Plugin_Warnings"
         }
     ]
 }
