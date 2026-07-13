@@ -186,6 +186,57 @@
             });
         }
 
+        var uninstallAllQueue = [];
+        function UninstallAllPlugins() {
+            uninstallAllQueue = installedPlugins.slice();
+            if (uninstallAllQueue.length === 0) {
+                $.jGrowl('No plugins installed', { themeState: 'detract' });
+                return;
+            }
+            DisplayProgressDialog("pluginsProgressPopup", "Uninstall All Plugins");
+            UninstallNextPlugin();
+        }
+
+        function UninstallNextPlugin() {
+            if (uninstallAllQueue.length === 0) {
+                ProgressDialogDone('pluginsProgressPopupText');
+                return;
+            }
+            var plugin = uninstallAllQueue.shift();
+            var outputArea = document.getElementById('pluginsProgressPopupText');
+            if (outputArea) {
+                outputArea.innerHTML += '<br><b>Uninstalling ' + plugin + '...</b><br>';
+            }
+            var url = 'api/plugin/' + plugin + '?stream=true';
+            // Chain to the next plugin whether this one succeeds or fails so a
+            // single failure does not stop the rest of the batch.
+            StreamURL(url, 'pluginsProgressPopupText', 'UninstallNextPlugin', 'UninstallNextPlugin', 'DELETE');
+        }
+
+        function ShowUninstallAllPluginsPopup() {
+            if (installedPlugins.length === 0) {
+                $.jGrowl('No plugins installed', { themeState: 'detract' });
+                return;
+            }
+            DoModalDialog({
+                id: "uninstallAllPluginsDialog",
+                class: "modal-lg",
+                title: "Warning: Uninstalling All Plugins",
+                body: "Please confirm you wish to uninstall all " + installedPlugins.length + " installed plugin(s). This cannot be undone.",
+                backdrop: true,
+                keyboard: true,
+                buttons: {
+                    "Uninstall All": function () {
+                        CloseModalDialog("uninstallAllPluginsDialog");
+                        UninstallAllPlugins();
+                    },
+                    Abort: function () {
+                        CloseModalDialog("uninstallAllPluginsDialog");
+                    }
+                }
+            });
+        }
+
         function FindPluginInfo(plugin) {
             for (var i = 0; i < pluginInfos.length; i++) {
                 if (pluginInfos[i].repoName == plugin)
@@ -562,6 +613,12 @@
 
         }
         $(document).ready(function () {
+            // Uninstall All is a bulk destructive action, so only expose it in
+            // advanced UI mode or higher (same threshold used for the Template
+            // and Incompatible plugin sections).
+            if (settings["uiLevel"] > 2) {
+                $('#uninstallAllBtn').removeClass('d-none');
+            }
             GetInstalledPlugins();
 
         });
@@ -602,11 +659,18 @@
                         <div id='installedPlugins' class="fppPluginSection">
                             <div class='pluginsHeader'>
                                 <h2>Installed Plugins</h2>
-                                <button id="checkAllUpdatesBtn" class="buttons btn-outline-success"
-                                    onClick='CheckAllPluginsForUpdates();'
-                                    title="Check all installed plugins for updates">
-                                    <i class='fas fa-sync-alt'></i> Check All for Updates
-                                </button>
+                                <div class="d-flex gap-2 align-items-center">
+                                    <button id="checkAllUpdatesBtn" class="buttons btn-outline-success"
+                                        onClick='CheckAllPluginsForUpdates();'
+                                        title="Check all installed plugins for updates">
+                                        <i class='fas fa-sync-alt'></i> Check All for Updates
+                                    </button>
+                                    <button id="uninstallAllBtn" class="buttons btn-outline-danger d-none"
+                                        onClick='ShowUninstallAllPluginsPopup();'
+                                        title="Uninstall all installed plugins">
+                                        <i class='fas fa-trash-alt'></i> Uninstall All
+                                    </button>
+                                </div>
                             </div>
                         </div>
                         <div id='pluginTable' class="fppPluginSection">
