@@ -298,7 +298,7 @@ function SetupLocalMQTTBroker($value)
             if ($password == '') {
                 $password = 'fpp';
             }
-            exec("sudo mosquitto_passwd -b -c /etc/mosquitto/passwd fpp $password", $output, $return_val);
+            exec("sudo mosquitto_passwd -b -c /etc/mosquitto/passwd fpp " . escapeshellarg($password), $output, $return_val);
             if ($return_val != 0) {
                 error_log("Error creating mosquitto password file: " . implode("\n", $output));
                 return;
@@ -403,6 +403,10 @@ function ApplySetting($setting, $value)
             break;
         case 'MQTTPassword':
             if (GetSettingValue('Service_MQTT_localbroker') == '1') {
+                // The global $settings array still holds the request-start value;
+                // refresh it so SetupLocalMQTTBroker() provisions the broker with
+                // the password just saved rather than the previous one.
+                $settings['MQTTPassword'] = $value;
                 SetupLocalMQTTBroker('1');
             }
             break;
