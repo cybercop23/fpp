@@ -77,7 +77,30 @@ void mosq_disc_callback(struct mosquitto* mosq, void* userdata, int level) {
     // mosquitto_reconnect(mosq);
 }
 
-void mosq_connect_callback(struct mosquitto* mosq, void* userdata, int level) {
+// A broker that refuses the connection (bad credentials, not authorised, etc.)
+// makes libmosquitto retry forever, invoking the connect callback with a
+// non-zero result each attempt; count refusals so they can be logged without
+// flooding at the retry rate.
+static int mqttConnectRefusals = 0;
+static long long mqttLastRefusalLogMS = 0;
+
+void mosq_connect_callback(struct mosquitto* mosq, void* userdata, int rc) {
+    if (rc != 0) {
+        mqttConnectRefusals++;
+        long long now = GetTimeMS();
+        if ((mqttConnectRefusals == 1) || ((now - mqttLastRefusalLogMS) >= 60000)) {
+            mqttLastRefusalLogMS = now;
+            LogErr(VB_CONTROL, "MQTT broker refused connection: %s (%d attempts so far)\n",
+                   mosquitto_connack_string(rc), mqttConnectRefusals);
+        }
+        return;
+    }
+    if (mqttConnectRefusals) {
+        LogWarn(VB_CONTROL, "MQTT broker accepted connection after %d refused attempts\n",
+                mqttConnectRefusals);
+        mqttConnectRefusals = 0;
+        mqttLastRefusalLogMS = 0;
+    }
     if (userdata) {
         ((MosquittoClient*)userdata)->HandleConnect();
     }
@@ -183,6 +206,11 @@ int MosquittoClient::Init(const std::string& username, const std::string& passwo
     mosquitto_log_callback_set(m_mosq, mosq_log_callback);
     mosquitto_disconnect_callback_set(m_mosq, mosq_disc_callback);
     mosquitto_connect_callback_set(m_mosq, mosq_connect_callback);
+
+    // Back off failed reconnects exponentially (1s doubling up to 60s) rather
+    // than libmosquitto's default fixed 1s retry, so an unreachable or
+    // refusing broker isn't hammered once per second indefinitely.
+    mosquitto_reconnect_delay_set(m_mosq, 1, 60, true);
 
     if (username != "") {
         mosquitto_username_pw_set(m_mosq, username.c_str(), password.c_str());
@@ -428,7 +456,14 @@ void MosquittoClient::HandleConnect() {
 
 void MosquittoClient::HandleDisconnect() {
     long long tm = GetTimeMS();
-    LogWarn(VB_CONTROL, "Mosquitto Disconnected. Will try reconnect %ld\n", tm);
+    if (!m_isConnected) {
+        // This fires after every refused reconnect attempt; the refusal is
+        // already logged (rate-limited) in mosq_connect_callback and the
+        // "MQTT Disconnected" warning is still active, so stay quiet here.
+        LogDebug(VB_CONTROL, "Mosquitto Disconnected (was not connected) %lld\n", tm);
+        return;
+    }
+    LogWarn(VB_CONTROL, "Mosquitto Disconnected. Will try reconnect %lld\n", tm);
     m_isConnected = false;
     Timers::INSTANCE.addTimer("MosquittoDisconnect", tm + 10000, [this, tm]() {
         if (!m_isConnected) {
