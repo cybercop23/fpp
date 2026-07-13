@@ -203,9 +203,12 @@
                 return;
             }
             var plugin = uninstallAllQueue.shift();
+            // The progress popup body is a <textarea>, which cannot render HTML, so
+            // status must be plain text appended to .value (matching StreamURL).
             var outputArea = document.getElementById('pluginsProgressPopupText');
             if (outputArea) {
-                outputArea.innerHTML += '<br><b>Uninstalling ' + plugin + '...</b><br>';
+                outputArea.value += '\n===== Uninstalling ' + plugin + ' =====\n';
+                outputArea.scrollTop = outputArea.scrollHeight;
             }
             var url = 'api/plugin/' + plugin + '?stream=true';
             // Chain to the next plugin whether this one succeeds or fails so a
@@ -237,6 +240,173 @@
             });
         }
 
+        // Reinstall All: uninstall every installed plugin, then reinstall each one
+        // by one. Runs entirely client-side against the per-plugin API endpoints,
+        // mirroring the Uninstall All queue pattern above but in two phases.
+        var reinstallUninstallQueue = [];
+        var reinstallInstallQueue = [];
+        var reinstallAttempted = [];   // repo names we intend to reinstall
+        var reinstallSkipped = [];     // installed plugins with no cached info
+        var reinstallTotal = 0;
+        var reinstallUninstallDone = 0;
+        var reinstallInstallDone = 0;
+        // The progress popup body is a <textarea> (see DisplayProgressDialog), which
+        // cannot render HTML, so all of our own status lines must be plain text
+        // appended to .value -- matching how StreamURL writes the streamed command
+        // output. Auto-scroll to keep the latest line visible.
+        function ReinstallLog(text) {
+            var outputArea = document.getElementById('pluginsProgressPopupText');
+            if (!outputArea)
+                return;
+            outputArea.value += text;
+            outputArea.scrollTop = outputArea.scrollHeight;
+        }
+        function ReinstallAllPlugins() {
+            if (installedPlugins.length === 0) {
+                $.jGrowl('No plugins installed', { themeState: 'detract' });
+                return;
+            }
+
+            // Phase 0: capture the install POST body for every plugin BEFORE
+            // removing anything, since uninstalling drops entries from
+            // installedPlugins / the DOM. Only plugins we can rebuild an install
+            // body for are queued; anything without cached info is left untouched
+            // and reported as skipped rather than uninstalled-without-reinstall.
+            reinstallInstallQueue = [];
+            reinstallAttempted = [];
+            reinstallSkipped = [];
+            reinstallUninstallDone = 0;
+            reinstallInstallDone = 0;
+            installedPlugins.forEach(function (repo) {
+                var i = FindPluginInfo(repo);
+                if (i < 0) {
+                    reinstallSkipped.push(repo); // no cached info -> can't rebuild the install body
+                    return;
+                }
+                var info = JSON.parse(JSON.stringify(pluginInfos[i])); // copy, don't mutate cache
+                var sel = SelectPluginVersionIndices(info);
+                var idx = sel.compatible >= 0 ? sel.compatible : (sel.untested >= 0 ? sel.untested : 0);
+                var v = info.versions[idx];
+                info['branch'] = (v.branch && v.branch !== '') ? v.branch : 'master';
+                info['sha'] = v.sha || '';
+                if (pluginInfoURLs[repo])
+                    info['infoURL'] = pluginInfoURLs[repo]; // else backend uses the repo's own pluginInfo.json
+                info['useCredentials'] = (info.private || pluginInfoUseCredentials[repo]) ? 1 : 0;
+                reinstallInstallQueue.push(info);
+                reinstallAttempted.push(repo);
+            });
+
+            if (reinstallAttempted.length === 0) {
+                $.jGrowl('No reinstallable plugins found (plugin info unavailable)', { themeState: 'detract' });
+                return;
+            }
+
+            reinstallUninstallQueue = reinstallAttempted.slice();
+            reinstallTotal = reinstallAttempted.length;
+            DisplayProgressDialog("pluginsProgressPopup", "Reinstall All Plugins");
+            if (reinstallSkipped.length) {
+                ReinstallLog('\nSkipping ' + reinstallSkipped.length +
+                    ' plugin(s) with no available plugin info (left installed): ' +
+                    reinstallSkipped.join(', ') + '\n');
+            }
+            ReinstallUninstallNext();
+        }
+
+        function ReinstallUninstallNext() {
+            if (reinstallUninstallQueue.length === 0) {
+                ReinstallInstallNext(); // move on to the reinstall phase
+                return;
+            }
+            var plugin = reinstallUninstallQueue.shift();
+            reinstallUninstallDone++;
+            SetProgressDialogStatus('pluginsProgressPopup',
+                'Reinstall All — uninstalling ' + reinstallUninstallDone + ' of ' + reinstallTotal);
+            ReinstallLog('\n===== Uninstalling ' + plugin + ' (' +
+                reinstallUninstallDone + ' of ' + reinstallTotal + ') =====\n');
+            var url = 'api/plugin/' + plugin + '?stream=true';
+            // Continue on both success and failure so one failure does not strand
+            // the batch.
+            StreamURL(url, 'pluginsProgressPopupText', 'ReinstallUninstallNext', 'ReinstallUninstallNext', 'DELETE');
+        }
+
+        function ReinstallInstallNext() {
+            if (reinstallInstallQueue.length === 0) {
+                ReinstallFinish();
+                return;
+            }
+            reinstallInstallDone++;
+            var info = reinstallInstallQueue.shift();
+            SetProgressDialogStatus('pluginsProgressPopup',
+                'Reinstall All — installing ' + reinstallInstallDone + ' of ' + reinstallTotal);
+            ReinstallLog('\n===== Installing ' + info.repoName + ' (' +
+                reinstallInstallDone + ' of ' + reinstallTotal + ') =====\n');
+            var postData = JSON.stringify(info);
+            StreamURL('api/plugin?stream=true', 'pluginsProgressPopupText', 'ReinstallInstallNext', 'ReinstallInstallNext', 'POST', postData, 'application/json');
+        }
+
+        // After the reinstall phase, verify what actually ended up installed by
+        // re-querying the authoritative list rather than trying to parse streamed
+        // output (the install endpoint streams "Done" even on a logical failure).
+        // Any plugin we attempted but that is now missing is reported as failed.
+        function ReinstallFinish() {
+            $.ajax({
+                url: 'api/plugin',
+                dataType: 'json',
+                success: function (data) {
+                    installedPlugins = data;
+                    var failed = reinstallAttempted.filter(function (r) { return data.indexOf(r) < 0; });
+                    var ok = reinstallAttempted.length - failed.length;
+                    SetProgressDialogStatus('pluginsProgressPopup',
+                        failed.length ? ('Reinstall All — ' + failed.length + ' failed, ' + ok + ' of ' + reinstallAttempted.length + ' ok')
+                                      : ('Reinstall All — complete (' + ok + ' of ' + reinstallAttempted.length + ')'));
+                    ReinstallLog('\n===== Reinstall complete: ' + ok + ' of ' +
+                        reinstallAttempted.length + ' plugin(s) reinstalled successfully =====\n');
+                    if (failed.length) {
+                        ReinstallLog('Failed to reinstall ' + failed.length +
+                            ' plugin(s): ' + failed.join(', ') + '\n');
+                    }
+                    if (reinstallSkipped.length) {
+                        ReinstallLog('Skipped (no plugin info, left installed): ' +
+                            reinstallSkipped.join(', ') + '\n');
+                    }
+                    ReinstallLog('Reload the page to refresh the plugin list.\n');
+                    if (failed.length)
+                        $.jGrowl(failed.length + ' plugin(s) failed to reinstall', { themeState: 'danger' });
+                    else
+                        $.jGrowl('All ' + ok + ' plugin(s) reinstalled successfully', { themeState: 'success' });
+                    ProgressDialogDone('pluginsProgressPopupText');
+                },
+                error: function () {
+                    ReinstallLog('\nReinstall finished, but could not verify the installed plugin list. Reload the page to check.\n');
+                    ProgressDialogDone('pluginsProgressPopupText');
+                }
+            });
+        }
+
+        function ShowReinstallAllPluginsPopup() {
+            if (installedPlugins.length === 0) {
+                $.jGrowl('No plugins installed', { themeState: 'detract' });
+                return;
+            }
+            DoModalDialog({
+                id: "reinstallAllPluginsDialog",
+                class: "modal-lg",
+                title: "Warning: Reinstalling All Plugins",
+                body: "This will uninstall and then reinstall all " + installedPlugins.length + " installed plugin(s), one at a time. This may take a while.",
+                backdrop: true,
+                keyboard: true,
+                buttons: {
+                    "Reinstall All": function () {
+                        CloseModalDialog("reinstallAllPluginsDialog");
+                        ReinstallAllPlugins();
+                    },
+                    Abort: function () {
+                        CloseModalDialog("reinstallAllPluginsDialog");
+                    }
+                }
+            });
+        }
+
         function FindPluginInfo(plugin) {
             for (var i = 0; i < pluginInfos.length; i++) {
                 if (pluginInfos[i].repoName == plugin)
@@ -244,6 +414,38 @@
             }
 
             return -1;
+        }
+
+        // Determine which version entry applies to this FPP version/platform.
+        // Returns { compatible, untested } indices (or -1). Shared by LoadPlugin
+        // (rendering) and ReinstallAllPlugins (picking a version to reinstall) so
+        // the selection logic lives in one place. NOTE: this mutates a version's
+        // maxFPPVersion to flag untested entries for the compatibility display,
+        // matching the original inline behaviour in LoadPlugin.
+        function SelectPluginVersionIndices(data) {
+            var compatibleVersion = -1;
+            var untestedVersion = -1;
+            for (var i = 0; i < data.versions.length; i++) {
+                if ((data.versions[i].maxFPPVersion == "0") || (data.versions[i].maxFPPVersion == "0.0") || (data.versions[i].maxFPPVersion == "")) {
+                    // maxVersion is the .999 of the min version Major version due to symantic versioning
+                    var nv = data.versions[i].minFPPVersion;
+                    nv = nv.split('.')[0];
+                    if (nv != getFPPMajorVersion()) {
+                        nv = (getFPPMajorVersion() - 1) + ".999";
+                        data.versions[i].maxFPPVersion = nv;
+                        untestedVersion = i;
+                    }
+                }
+
+                if ((CompareFPPVersions(data.versions[i].minFPPVersion, getFPPVersionTriplet()) <= 0) &&
+                    ((data.versions[i].maxFPPVersion == "0") || (data.versions[i].maxFPPVersion == "0.0") ||
+                        (CompareFPPVersions(data.versions[i].maxFPPVersion, getFPPVersionTriplet()) > 0)) &&
+                    ((!data.versions[i].hasOwnProperty('platforms')) ||
+                        (data.versions[i].platforms.includes(settings['Platform'])))) {
+                    compatibleVersion = i;
+                }
+            }
+            return { compatible: compatibleVersion, untested: untestedVersion };
         }
 
         function InsertPluginTableItem(tableName, key, html) {
@@ -286,30 +488,9 @@
             }
 
             var installed = PluginIsInstalled(data.repoName);
-            var compatibleVersion = -1;
-            var untestedVersion = -1;
-            for (var i = 0; i < data.versions.length; i++) {
-                if ((data.versions[i].maxFPPVersion == "0") || (data.versions[i].maxFPPVersion == "0.0") || (data.versions[i].maxFPPVersion == "")) {
-                    // maxVersion is the .999 of the min version Major version due to symantic versioning
-                    var nv = data.versions[i].minFPPVersion;
-                    nv = nv.split('.')[0];
-                    if (nv != getFPPMajorVersion()) {
-                        nv = (getFPPMajorVersion() - 1) + ".999";
-                        data.versions[i].maxFPPVersion = nv;
-                        untestedVersion = i;
-                    } else if (nv == getFPPMajorVersion()) {
-                        maxFPPVersion = -1;
-                    }
-                }
-
-                if ((CompareFPPVersions(data.versions[i].minFPPVersion, getFPPVersionTriplet()) <= 0) &&
-                    ((data.versions[i].maxFPPVersion == "0") || (data.versions[i].maxFPPVersion == "0.0") ||
-                        (CompareFPPVersions(data.versions[i].maxFPPVersion, getFPPVersionTriplet()) > 0)) &&
-                    ((!data.versions[i].hasOwnProperty('platforms')) ||
-                        (data.versions[i].platforms.includes(settings['Platform'])))) {
-                    compatibleVersion = i;
-                }
-            }
+            var versionSel = SelectPluginVersionIndices(data);
+            var compatibleVersion = versionSel.compatible;
+            var untestedVersion = versionSel.untested;
             var compatibleVersionClass = (compatibleVersion == -1) ? " has-previous-compatible-version" : '';
             html += '<div id="row-' + data.repoName + '" class="fppPluginEntry' + compatibleVersionClass + '"><div class="backdrop fppPluginEntryBackdrop"><div class="row">';
             html += '<div class="col-lg-3"><h3 class="pluginTitle">' + data.name + '</h3>';
@@ -613,11 +794,11 @@
 
         }
         $(document).ready(function () {
-            // Uninstall All is a bulk destructive action, so only expose it in
-            // advanced UI mode or higher (same threshold used for the Template
-            // and Incompatible plugin sections).
-            if (settings["uiLevel"] > 2) {
+            // Uninstall All and Reinstall All are bulk destructive actions, so only
+            // expose them in Advanced UI mode or higher.
+            if (settings["uiLevel"] > 0) {
                 $('#uninstallAllBtn').removeClass('d-none');
+                $('#reinstallAllBtn').removeClass('d-none');
             }
             GetInstalledPlugins();
 
@@ -664,6 +845,11 @@
                                         onClick='CheckAllPluginsForUpdates();'
                                         title="Check all installed plugins for updates">
                                         <i class='fas fa-sync-alt'></i> Check All for Updates
+                                    </button>
+                                    <button id="reinstallAllBtn" class="buttons btn-outline-warning d-none"
+                                        onClick='ShowReinstallAllPluginsPopup();'
+                                        title="Uninstall and reinstall all installed plugins">
+                                        <i class='fas fa-redo-alt'></i> Reinstall All
                                     </button>
                                     <button id="uninstallAllBtn" class="buttons btn-outline-danger d-none"
                                         onClick='ShowUninstallAllPluginsPopup();'

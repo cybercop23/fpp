@@ -483,6 +483,14 @@ function EnableModalDialogCloseButton (id) {
 function ProgressDialogDone (textId) {
 	EnableModalDialogCloseButton(('' + textId).replace(/Text$/, ''));
 }
+// Update the header/title of a progress dialog (the `id` passed to
+// DisplayProgressDialog) with a concise, always-visible status line while the
+// dialog's textarea keeps scrolling the verbose log. Safe to call before the
+// dialog exists (no-op). Useful for long-running operations -- reinstall all
+// plugins, FPP/OS upgrades, package installs, etc.
+function SetProgressDialogStatus (id, status) {
+	$('#' + id + ' .modal-title').text(status);
+}
 function DoModalDialog (options) {
 	var dlg = $('#' + options.id);
 	if (dlg.length == 0) {

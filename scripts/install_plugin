@@ -58,7 +58,8 @@ done
 # runs, so it clones here and runs the plugin's fpp_install.sh itself
 # afterwards. Otherwise run the install script inline as before.
 if [ "x${FPP_SKIP_INSTALL_SCRIPT}" = "x1" ]; then
-    echo "Skipping fpp_install.sh for $1 (dependencies will be resolved, then it runs)"
+    # Caller runs the plugin's fpp_install.sh itself after resolving dependencies.
+    :
 elif [ -x "${PLUGINDIR}/$1/scripts/fpp_install.sh" ]
 then
     echo "Running fpp_install.sh script for $1"
