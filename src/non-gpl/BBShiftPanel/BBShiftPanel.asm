@@ -312,6 +312,30 @@ DEBUGTOGGLE .macro pin
 //
 // availBytes caches how far ahead the producer is so the producer counter
 // is only re-read from shared RAM when the cached window is exhausted.
+#ifdef PRU0_PREFETCH
+// The 16-output two-PRU firmware can delegate shared-RAM reads to the OE
+// PRU.  PRU0 fetches the next four-pixel block while this PRU shifts the
+// current one, then publishes [sequence, 48 bytes] through scratchpad bank
+// 11.  Bank 10 is the acknowledgement; acknowledge immediately after XIN so
+// PRU0 can overwrite bank 11 while the data is safely held in r2-r13.
+//
+// This is deliberately unavailable to SINGLEPRU and PWM builds: their other
+// PRU is respectively absent or owns the GCLK timing program.
+#define prefetchSeq r14
+LOAD_DATA .macro
+    .newblock
+    QBA   FIRSTCHECK?
+WAITPREFETCH?:
+    // count the spins so the ring-wait statistics stay meaningful
+    ADD   stallCount, stallCount, 1
+FIRSTCHECK?:
+    XIN   11, &r1, 52
+    QBNE  WAITPREFETCH?, r1, prefetchSeq
+    XOUT  10, &prefetchSeq, 4
+    ADD   prefetchSeq, prefetchSeq, 1
+    LDI   dataOutReg, &outputData
+    .endm
+#else
 LOAD_DATA .macro
     .newblock
     QBLE  HAVEDATA?, availBytes, 48
@@ -333,6 +357,7 @@ HAVEDATA?:
 NOWRAP?:
     LDI   dataOutReg, &outputData
     .endm
+#endif
 
 
 CLEARBITS .macro
@@ -414,9 +439,16 @@ RINGCFGWAIT:
     QBEQ    RINGCFGWAIT, availBytes, 0
     MOV     ringReadPtr, ringBase
     ADD     ringCtrl, ringBase, availBytes
+#ifndef PRU0_PREFETCH
     LDI     consumedCnt, 0
     LDI     availBytes, 0
     SBBO    &consumedCnt, ringCtrl, 4, 4
+#endif
+
+#ifdef PRU0_PREFETCH
+    // PRU0 starts its monotonic scratchpad sequence at one.
+    LDI     prefetchSeq, 1
+#endif
 
     // the addressing config is written before the ring config, so it is
     // valid once the ring handshake completes
