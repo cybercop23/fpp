@@ -1122,6 +1122,8 @@
             // Populate backup wireless settings if available
             if (data.BACKUPSSID) {
                 contentDiv.find('#backupeth_ssid_' + safeName).val(data.BACKUPSSID);
+                // A saved backup SSID means the PSK field is in use - reveal it.
+                contentDiv.find('#backuppskRow_' + safeName).show();
             }
             if (data.BACKUPPSK) {
                 contentDiv.find('#backupeth_psk_' + safeName).val(data.BACKUPPSK);
@@ -1271,6 +1273,49 @@
                     // Re-check gateway availability and DNS adequacy
                     checkGatewayAvailability();
                     CheckDNS();
+                }
+            });
+
+            // Reveal the PSK field as soon as the user types a manual SSID.
+            // Selecting a scanned network (selectWifiNetworkForInterface) or
+            // loading a saved config sets the value via .val() and manages the
+            // PSK/WEP rows itself, neither of which fires this 'input' handler,
+            // so this only affects hand-typed / hidden-network SSIDs. Show the
+            // PSK row whenever there is an SSID, unless the WEP key row is the
+            // one currently in use. An empty PSK is still valid (open network).
+            contentDiv.find('#eth_ssid_' + safeName).on('input', function () {
+                var hasSsid = $(this).val().trim() !== "";
+                var wepVisible = contentDiv.find('#keyRow_' + safeName).is(':visible');
+                if (hasSsid && !wepVisible) {
+                    contentDiv.find('#pskRow_' + safeName).show();
+                } else if (!hasSsid) {
+                    contentDiv.find('#pskRow_' + safeName).hide();
+                }
+            });
+
+            // Hidden networks don't broadcast their SSID and are effectively
+            // always typed by hand, so make sure the PSK field is available.
+            contentDiv.find('#eth_hidden_' + safeName).on('change', function () {
+                if ($(this).is(':checked') &&
+                    !contentDiv.find('#keyRow_' + safeName).is(':visible')) {
+                    contentDiv.find('#pskRow_' + safeName).show();
+                }
+            });
+
+            // Same reveal-on-type behavior for the backup network (advanced
+            // level only). The backup section has no scan table or WEP row, so
+            // it is always typed by hand - show its PSK field once an SSID is
+            // entered, and hide it again when the SSID is cleared.
+            contentDiv.find('#backupeth_ssid_' + safeName).on('input', function () {
+                if ($(this).val().trim() !== "") {
+                    contentDiv.find('#backuppskRow_' + safeName).show();
+                } else {
+                    contentDiv.find('#backuppskRow_' + safeName).hide();
+                }
+            });
+            contentDiv.find('#backupeth_hidden_' + safeName).on('change', function () {
+                if ($(this).is(':checked')) {
+                    contentDiv.find('#backuppskRow_' + safeName).show();
                 }
             });
 
@@ -1807,7 +1852,7 @@
                                                             alt="Help icon for backup WPA3 setting"></span>
                                                 </div>
                                             </div>
-                                            <div class="row" id="backuppskRow">
+                                            <div class="row" id="backuppskRow" style="display: none;">
                                                 <div class="printSettingLabelCol col-md-4 col-lg-3 col-xxxl-2">
                                                     <div class="description">
                                                         <i class="fas fa-fw fa-graduation-cap fa-nbsp ui-level-1"
