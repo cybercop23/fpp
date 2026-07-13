@@ -567,12 +567,16 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
                 if (nowUS > m_lastFlipTimeUS && (nowUS - m_lastFlipTimeUS) < 60000000ULL) {
                     // (guard also skips nudging if the driver reported
                     // non-monotonic timestamps - elapsed would be implausible)
+                    // Zone width must exceed worst-case scheduling jitter or a
+                    // submission can hop the boundary from outside the zone
+                    // (seen on Pi3: ~3ms first-frame jitter leaked a crossing
+                    // through a 2ms zone).
                     uint64_t phaseUS = (nowUS - m_lastFlipTimeUS) % periodUS;
                     uint64_t sleepUS = 0;
-                    if (phaseUS > periodUS - 2000) {
-                        sleepUS = (periodUS - phaseUS) + 3000;
-                    } else if (phaseUS < 1200) {
-                        sleepUS = 3000 - phaseUS;
+                    if (phaseUS > periodUS - 3500) {
+                        sleepUS = (periodUS - phaseUS) + 4000;
+                    } else if (phaseUS < 2000) {
+                        sleepUS = 4000 - phaseUS;
                     }
                     if (sleepUS > 0) {
                         m_phaseNudges++;
