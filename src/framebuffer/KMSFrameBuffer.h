@@ -106,6 +106,10 @@ private:
     uint32_t m_vblankDeltaCounts[5] = { 0, 0, 0, 0, 0 }; // [0]=unused, 1..3, [4]=4+
     uint32_t m_vblankCadenceBreaks = 0;                  // delta changed vs previous delta
     uint32_t m_prevVblankDelta = 0;
+    // Vblank timestamp (monotonic us) of the last completed flip, used to
+    // phase-align flip submission away from vblank boundaries.
+    uint64_t m_lastFlipTimeUS = 0;
+    uint32_t m_phaseNudges = 0;
 
     CardInfo* m_cardInfo = nullptr;
 };

@@ -496,6 +496,7 @@ void KMSFrameBuffer::PageFlipHandler(int fd, unsigned int frame, unsigned int se
             self->m_prevVblankDelta = delta;
         }
         self->m_lastFlipSeq = frame;
+        self->m_lastFlipTimeUS = (uint64_t)sec * 1000000ULL + usec;
     }
 }
 
@@ -546,6 +547,38 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
                 int vr = m_mode.vrefresh > 0 ? m_mode.vrefresh : 60;
                 int timeoutMs = (1000 / vr) + 20; // one refresh interval + slack
                 WaitForPendingFlip(timeoutMs);
+            }
+
+            // Phase hysteresis: fppd's software frame clock and the panel's
+            // vblank clock are never exactly the same rate, so the submission
+            // time slowly drifts across the vblank grid.  When it straddles a
+            // boundary, scheduling jitter makes alternate frames catch/miss
+            // the vblank and frames display for e.g. 25ms/75ms instead of a
+            // steady 50ms - a visible judder burst that lasts until the drift
+            // clears the boundary (confirmed via the vblank-delta counters:
+            // 1,3,1,3 bursts exactly at observed stutters).  If this flip
+            // would be submitted within ~2ms of a boundary, delay it a few ms
+            // so the phase slip happens once, cleanly, per beat cycle.
+            if (m_lastFlipTimeUS != 0 && m_mode.vrefresh > 0) {
+                struct timespec tsm;
+                clock_gettime(CLOCK_MONOTONIC, &tsm);
+                uint64_t nowUS = (uint64_t)tsm.tv_sec * 1000000ULL + tsm.tv_nsec / 1000;
+                uint64_t periodUS = 1000000ULL / m_mode.vrefresh;
+                if (nowUS > m_lastFlipTimeUS && (nowUS - m_lastFlipTimeUS) < 60000000ULL) {
+                    // (guard also skips nudging if the driver reported
+                    // non-monotonic timestamps - elapsed would be implausible)
+                    uint64_t phaseUS = (nowUS - m_lastFlipTimeUS) % periodUS;
+                    uint64_t sleepUS = 0;
+                    if (phaseUS > periodUS - 2000) {
+                        sleepUS = (periodUS - phaseUS) + 3000;
+                    } else if (phaseUS < 1200) {
+                        sleepUS = 3000 - phaseUS;
+                    }
+                    if (sleepUS > 0) {
+                        m_phaseNudges++;
+                        std::this_thread::sleep_for(std::chrono::microseconds(sleepUS));
+                    }
+                }
             }
 
             bool wasEnabled = m_displayEnabled;
@@ -600,10 +633,11 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
                 (syncEnd - m_lastFlipWarnMS) > 10000) {
                 m_lastFlipWarnMS = syncEnd;
                 m_warnedEventTotal = eventTotal;
-                LogWarn(VB_CHANNELOUT, "KMSFrameBuffer %s flip-path event; totals since start: %u syncs >20ms (max %dms, last %dms), %u wait timeouts, %u flip rejects, %u vblank cadence breaks (deltas 1/2/3/4+: %u/%u/%u/%u)\n",
+                LogWarn(VB_CHANNELOUT, "KMSFrameBuffer %s flip-path event; totals since start: %u syncs >20ms (max %dms, last %dms), %u wait timeouts, %u flip rejects, %u vblank cadence breaks (deltas 1/2/3/4+: %u/%u/%u/%u), %u phase nudges\n",
                         m_connectorName.c_str(), m_slowSyncs, m_maxSyncMS, m_lastSlowSyncMS, m_flipWaitTimeouts, m_flipRejects,
                         m_vblankCadenceBreaks,
-                        m_vblankDeltaCounts[1], m_vblankDeltaCounts[2], m_vblankDeltaCounts[3], m_vblankDeltaCounts[4]);
+                        m_vblankDeltaCounts[1], m_vblankDeltaCounts[2], m_vblankDeltaCounts[3], m_vblankDeltaCounts[4],
+                        m_phaseNudges);
             }
         }
     }
