@@ -77,6 +77,7 @@ www/.config.php
 www/.htpasswd
 www/fppdefines.php
 www/fppversion.php
+www/js/fpp-plugin-*
 www/media_root.txt
 www/warnings.json
 www/warnings_full.json
