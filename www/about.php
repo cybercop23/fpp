@@ -1008,8 +1008,24 @@
                 '?\nThis can take a long time. It is also strongly recommended to run FPP backup first.')) {
 
                 DisplayProgressDialog('osUpgrade', 'FPP OS Upgrade');
-                StreamURL('upgradeOS.php?wrapped=1&os=' + os + keepOptFPP, 'osUpgradeText', 'OSUpgradeDone', 'OSUpgradeDone');
+                SetProgressDialogStatus('osUpgrade', 'FPP OS Upgrade — Starting…');
+                StreamURL('upgradeOS.php?wrapped=1&os=' + os + keepOptFPP, 'osUpgradeText', 'OSUpgradeDone', 'OSUpgradeDone', 'GET', null, null, true, false, 'OSUpgradeProgress'); // trailing arg: generic stage-status hook
             }
+        }
+
+        // Like FPPUpgradeProgress (FPP-software upgrade): the OS upgrade is a
+        // single long stream with no item count, so instead of an "X of N" bar we
+        // surface which stage is running -- most useful during the multi-minute
+        // filesystem copy, when the log otherwise goes quiet. Stages are declared
+        // by the scripts via logStage() and parsed generically by
+        // ParseLastStageMarker(); this callback just binds the latest stage to
+        // this dialog's status line. SetProgressDialogStatus replaces the
+        // .modal-title, so we keep the "FPP OS Upgrade — " prefix to preserve the
+        // dialog's identity.
+        function OSUpgradeProgress(response) {
+            var stage = ParseLastStageMarker(response);
+            if (stage != '')
+                SetProgressDialogStatus('osUpgrade', 'FPP OS Upgrade — ' + stage);
         }
 
         function OSUpgradeDone() {

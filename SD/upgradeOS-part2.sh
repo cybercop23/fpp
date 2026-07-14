@@ -5,6 +5,7 @@
 
 cd /
 
+logStage "Updating boot filesystem"
 echo "Running rsync to update boot file system:"
 case "${FPPPLATFORM}" in
     "Raspberry Pi"|"BeagleBone 64")
@@ -100,6 +101,7 @@ if [ "${KIOSKMODE}" = "1" ]; then
 fi
 
 #copy everything other than fstab and the persistent net names
+logStage "Updating root filesystem (longest step, please wait)"
 echo "Running rsync to update / (root) file system:"
 stdbuf --output=L --error=L rsync --outbuf=N -aAXxv bin etc lib opt root sbin usr var /mnt --delete-during --exclude=var/lib/php/sessions --exclude=etc/fstab --exclude=etc/systemd/network/10-*.network --exclude=etc/systemd/network/*-fpp-* --exclude=root/.ssh ${SKIPFPP}
 echo
@@ -159,13 +161,15 @@ then
 fi
 
 if [ "${FPPPLATFORM}" = "Raspberry Pi" ]; then
+    logStage "Updating boot loader"
     echo "Updating Raspberry Pi boot loader:"
-    /bin/rpi-eeprom-update -a    
+    /bin/rpi-eeprom-update -a
 fi
 
 if [ "${FPPPLATFORM}" = "BeagleBone 64" ]; then
     if [ -f "/dev/mmcblk0p1" ]; then
         # need to install the bootloader to the eMMC that goes with this version of the os
+        logStage "Updating boot loader"
         echo "Updating Beagle boot loader:"
         /opt/u-boot/bb-u-boot-pocketbeagle2/install-emmc.sh
         echo

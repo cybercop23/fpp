@@ -1,5 +1,17 @@
 #!/bin/bash
 
+# logStage "<message>": emit a "===== <message> =====" section header. Mirrors
+# the helper in scripts/common (which upgradeOS-part2.sh sources) and drives the
+# streaming FPP OS Upgrade dialog's status line via ParseLastStageMarker() in
+# www/js/fpp.js. Defined locally rather than sourcing scripts/common because this
+# script is copied to and run from /home/fpp/media/tmp, where common's $0-based
+# path detection would misresolve FPPDIR.
+logStage() {
+    echo "===== $1 ====="
+}
+
+logStage "Verifying image"
+
 FPPOS=`/usr/bin/basename $1`
 GITHUBSIZE=`curl -fsSL http://127.0.0.1/api/git/releases/sizes | grep ${FPPOS} | awk -F, '{print $2}'`
 OURSIZE=`/usr/bin/stat -c %s $1`
@@ -57,7 +69,7 @@ echo "BootActions = \"settings\"" >> /home/fpp/media/settings
 #but the caps (getcap) might be different
 rm -f /bin/ping
 
-echo "----------"
+logStage "Preparing filesystems"
 echo "Mounting filesystems for copy"
 mount -o bind / /mnt/mnt
 mount -o bind ${FPPBOOTDIR} /mnt/mnt${FPPBOOTDIR}
@@ -87,6 +99,7 @@ fi
 echo "----------"
 echo "Control returned from upgradeOS-part2.sh script, resuming upgradeOS-part1.sh"
 
+logStage "Finalizing"
 echo "Copy done, unmounting filesystems"
 sync
 umount /mnt/proc

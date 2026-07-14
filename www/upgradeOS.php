@@ -38,6 +38,17 @@ require_once "common.php";
 
 DisableOutputBuffering();
 
+// Emit a "===== <message> =====" stage header, matching the shell helper
+// logStage() in scripts/common (and the same helper in manualUpdate.php), so the
+// streaming FPP OS Upgrade dialog can drive its status line from PHP-side phases
+// too. The upgradeOS-part1/part2 scripts emit their own stages during the long
+// filesystem copy. Reads as a section header in the log and doubles as the
+// machine-parsed progress marker (see ParseLastStageMarker() in www/js/fpp.js).
+function logStage($msg)
+{
+    echo "===== $msg =====\n";
+}
+
 function downloadImage($localFile): bool
 {
     echo "==========================================================================\n";
@@ -107,6 +118,7 @@ if (preg_match('/^https?:/', $_GET['os'])) {
         array_unshift($urls, "http://" . $upgradeSource . "/api/file/uploads/" . $baseFile);
     }
 
+    logStage("Downloading OS image");
     $rc = 1;
     foreach ($urls as $idx => $url) {
         if (count($urls) > 1) {
@@ -158,9 +170,8 @@ if (!file_exists($full_fppos_path)) {
     $applyUpdate = false;
 }
 
-if ($applyUpdate) {    
-    echo "==========================================================================\n";
-    echo "Upgrading OS:\n";
+if ($applyUpdate) {
+    logStage("Applying OS image");
 
     # Ensure /proc/sysrq-trigger is writable by fpp for reboot later.  Do it now whilst libraries are all good
     system($SUDO . " chmod a+w /proc/sysrq-trigger");
@@ -196,12 +207,12 @@ if (!$wrapped) {
     </html>
     <?
 } else if ($applyUpdate && ($return_code == 0)) {
-    echo "==========================================================================\n";
+    logStage("Rebooting");
     echo "Rebooting.....Close this window and refresh the screen. It might take a minute or so for FPP to reboot\n";
 } else if (!$applyUpdate) {
     echo "==========================================================================\n";
 } else {
-    echo "==========================================================================\n";
+    logStage("Upgrade Failed");
     echo "FPP UPGRADE FAILED\n";
     echo "==========================================================================\n";
 }
