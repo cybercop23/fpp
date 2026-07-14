@@ -996,6 +996,12 @@ html .ui-button.ui-state-disabled:active {
 	display: block !important;
 }
 
+/* Body scrolling is locked while a modal is open, so the Top button is useless
+   there and would sit on top of the modal's close button. */
+body.modal-open #scrollTopButton {
+	display: none !important;
+}
+
 .navbar-toggler {
 	padding: 0.25rem 0.75rem;
 	font-size: 1.25rem;
