@@ -564,10 +564,15 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
             // reach a boundary from there, and the clock drift shows up as
             // this sleep slowly varying.  When the sleep wraps, the
             // unavoidable one-vblank phase slip happens once, cleanly, per
-            // beat cycle instead of oscillating.  Only engage when the
-            // previous flip retired more than a refresh period ago (frame
-            // rate below refresh rate = slack exists); at full refresh rate
-            // WaitForPendingFlip above already vblank-locks the loop.
+            // beat cycle instead of oscillating.  Align unconditionally:
+            // gating this on "slack since the last completion" feeds back on
+            // itself (an aligned flip completes later in the cycle, the gate
+            // then skips the next frame, which lands early - producing a
+            // permanent 1,3,1,3 oscillation; confirmed in testing).  The
+            // completion timestamps are vblank-quantized, so aligning every
+            // frame pins submissions to the true grid midpoint and is stable
+            // at any frame rate at or below the refresh rate.
+            long long alignSleepUS = 0;
             if (m_lastFlipTimeUS != 0 && m_mode.vrefresh > 0) {
                 struct timespec tsm;
                 clock_gettime(CLOCK_MONOTONIC, &tsm);
@@ -576,14 +581,14 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
                 // The 60s cap also skips alignment if the driver reported
                 // non-monotonic timestamps - elapsed would be implausible.
                 if (nowUS > m_lastFlipTimeUS &&
-                    (nowUS - m_lastFlipTimeUS) < 60000000ULL &&
-                    (nowUS - m_lastFlipTimeUS) > periodUS) {
+                    (nowUS - m_lastFlipTimeUS) < 60000000ULL) {
                     uint64_t phaseUS = (nowUS - m_lastFlipTimeUS) % periodUS;
                     uint64_t sleepUS = (periodUS / 2 + periodUS - phaseUS) % periodUS;
                     // Already within 2ms past mid-interval: close enough,
                     // don't sleep a nearly full period chasing the target.
                     if (sleepUS > 0 && sleepUS < periodUS - 2000) {
                         m_phaseNudges++;
+                        alignSleepUS = sleepUS;
                         std::this_thread::sleep_for(std::chrono::microseconds(sleepUS));
                     }
                 }
@@ -625,7 +630,9 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
             // be correlated with (or ruled out of) the KMS flip path without
             // needing debug logging.
             long long syncEnd = GetTimeMS();
-            int tookMS = (int)(syncEnd - syncStart);
+            // The phase-alignment sleep is intentional; don't count it as a
+            // flip-path delay.
+            int tookMS = (int)(syncEnd - syncStart) - (int)(alignSleepUS / 1000);
             if (tookMS > 20) {
                 m_slowSyncs++;
                 m_lastSlowSyncMS = tookMS;
