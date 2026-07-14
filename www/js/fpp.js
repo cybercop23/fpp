@@ -8000,10 +8000,11 @@ function ReloadArgContentList (tblCommand, x, baseUrl) {
 	}
 }
 function OnMultisyncHostsChanged (hosts, tblCommand) {
-	// ReloadArgContentList()/ReloadContentList() query a single remote, so use
-	// the first selected host as the base for populating arg content lists.
-	var baseURL = String($(hosts).val() || '').split(',')[0].trim();
-	if (baseURL != undefined && baseURL != '') {
+	// ReloadContentList() accepts the full comma-separated host list: it queries
+	// every selected remote and annotates each value with how many hosts expose
+	// it, so forward all checked hosts rather than only the first.
+	var baseURL = String($(hosts).val() || '').trim();
+	if (baseURL != '') {
 		for (var x = 1; x < 20; x++) {
 			ReloadArgContentList(tblCommand, x, baseURL);
 		}
