@@ -17,6 +17,56 @@ if (file_exists($capeInputsFile)) {
     }
 }
 
+// A cape with a physical EEPROM has every pin hard-wired to an output buffer, so all of the
+// pins it lists have to stay reserved even for ports the user left empty.  A virtual EEPROM
+// describes a hand-wired setup (e.g. a DPI Pixels hat where only a few of the 24 ports are
+// wired up), so only the pins for ports that actually have pixels configured are reserved
+// and the rest remain available as GPIO inputs.  This mirrors which pins fppd claims, see
+// src/non-gpl/DPIPixels/DPIPixels.cpp.
+$capeIsVirtual = false;
+$capeInfoFile = $mediaDirectory . '/tmp/cape-info.json';
+if (file_exists($capeInfoFile)) {
+    $capeInfoJson = json_decode(file_get_contents($capeInfoFile), true);
+    if (isset($capeInfoJson['eepromLocation'])) {
+        $capeIsVirtual = strpos($capeInfoJson['eepromLocation'], 'sys/bus/i2c') === false;
+    }
+}
+
+// For a virtual EEPROM, work out which ports of which cape string config are actually in use.
+// $activeCapePorts maps the enabled channel output's subType to the port numbers holding pixels.
+$activeCapePorts = array();
+if ($capeIsVirtual) {
+    $pixelStringsFile = $mediaDirectory . '/config/co-pixelStrings.json';
+    if (file_exists($pixelStringsFile)) {
+        $pixelStringsJson = json_decode(file_get_contents($pixelStringsFile), true);
+        if (isset($pixelStringsJson['channelOutputs']) && is_array($pixelStringsJson['channelOutputs'])) {
+            foreach ($pixelStringsJson['channelOutputs'] as $channelOutput) {
+                if (empty($channelOutput['enabled']) || !isset($channelOutput['subType']) ||
+                    !isset($channelOutput['outputs']) || !is_array($channelOutput['outputs'])) {
+                    continue;
+                }
+                $ports = array();
+                foreach ($channelOutput['outputs'] as $index => $port) {
+                    $portNumber = isset($port['portNumber']) ? $port['portNumber'] : $index;
+                    // A port may hold several virtual strings, and a port feeding smart
+                    // receivers holds a set of virtual strings per receiver (B through F).
+                    foreach ($port as $key => $value) {
+                        if (strpos($key, 'virtualStrings') !== 0 || !is_array($value)) {
+                            continue;
+                        }
+                        foreach ($value as $virtualString) {
+                            if (!empty($virtualString['pixelCount'])) {
+                                $ports[$portNumber] = true;
+                            }
+                        }
+                    }
+                }
+                $activeCapePorts[$channelOutput['subType']] = $ports;
+            }
+        }
+    }
+}
+
 // Check for cape channel output configuration to block those GPIO pins as well
 $stringsDir = $mediaDirectory . '/tmp/strings/';
 if (is_dir($stringsDir)) {
@@ -26,10 +76,22 @@ if (is_dir($stringsDir)) {
             $stringFilePath = $stringsDir . $file;
             $stringData = file_get_contents($stringFilePath);
             $stringJson = json_decode($stringData, true);
+
+            // On a virtual EEPROM, ignore string configs for a driver that isn't the one
+            // configured (a cape often ships one per driver) and reserve only the used ports.
+            $usedPorts = null;
+            if ($capeIsVirtual) {
+                $capeName = isset($stringJson['name']) ? $stringJson['name'] : substr($file, 0, -5);
+                if (!isset($activeCapePorts[$capeName])) {
+                    continue;
+                }
+                $usedPorts = $activeCapePorts[$capeName];
+            }
+
             if (isset($stringJson['outputs']) && is_array($stringJson['outputs'])) {
                 $portNumber = 1;
                 foreach ($stringJson['outputs'] as $output) {
-                    if (isset($output['pin'])) {
+                    if (isset($output['pin']) && (($usedPorts === null) || isset($usedPorts[$portNumber - 1]))) {
                         $pin = $output['pin'];
                         $driverType = isset($stringJson['driver']) ? $stringJson['driver'] : 'Channel Output';
                         $portInfo = $driverType . ' (Port ' . $portNumber . ')';

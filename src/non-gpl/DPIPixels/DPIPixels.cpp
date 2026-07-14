@@ -191,6 +191,14 @@ int DPIPixelsOutput::Init(Json::Value config) {
 
     config["base"] = root;
 
+    // A cape with a physical EEPROM has every pin hard-wired to an output buffer, so all of
+    // its pins are muxed for DPI even when a port is left empty, otherwise the buffer input
+    // would float.  A virtual EEPROM describes a hand-wired setup where the unused ports may
+    // not be connected to anything, so only the pins for ports with channels configured are
+    // claimed, leaving the rest available for other uses such as GPIO inputs.
+    const Json::Value& capeInfo = CapeUtils::INSTANCE.getCapeInfo();
+    bool virtualEEPROM = capeInfo["eepromLocation"].asString().find("sys/bus/i2c") == std::string::npos;
+
     for (int i = 0; i < (MAX_DPI_PIXEL_LATCHES * 24); i++) {
         bitPos[i] = -1; // unused pin, no output assigned
         outputToStringMap[i] = -1;
@@ -198,6 +206,7 @@ int DPIPixelsOutput::Init(Json::Value config) {
     }
 
     std::vector<std::string> outputPinMap;
+    std::vector<int> outputChannelCounts;
     std::string outputList;
     int firstStringInBank[MAX_DPI_PIXEL_LATCHES];
 
@@ -221,6 +230,8 @@ int DPIPixelsOutput::Init(Json::Value config) {
         if (protocol == "")
             protocol = s["protocol"].asString();
 
+        outputChannelCounts.push_back(newString->m_outputChannels);
+
         if (root["outputs"][i].isMember("pin")) {
             std::string pinName = root["outputs"][i]["pin"].asString();
 
@@ -230,9 +241,7 @@ int DPIPixelsOutput::Init(Json::Value config) {
                 stringToOutputMap[i] = bitPos[i];
                 stringLengths[bitPos[i]] = newString->m_outputChannels;
 
-                LogExcess(VB_CHANNELOUT, "   Will enable Pin %s for DPI output\n", pinName.c_str());
                 outputPinMap.push_back(pinName);
-                m_configuredDPIPins.push_back(pinName);
             } else {
                 outputPinMap.push_back("");
             }
@@ -287,6 +296,21 @@ int DPIPixelsOutput::Init(Json::Value config) {
         }
         pixelStrings.push_back(newString);
     }
+
+    for (int i = 0; i < outputPinMap.size(); i++) {
+        const std::string& pinName = outputPinMap[i];
+        if (pinName.empty())
+            continue;
+        if (virtualEEPROM && (outputChannelCounts[i] == 0))
+            continue;
+        // Outputs sharing a pin via latches can each map back to the same pin
+        if (std::find(m_configuredDPIPins.begin(), m_configuredDPIPins.end(), pinName) != m_configuredDPIPins.end())
+            continue;
+
+        LogExcess(VB_CHANNELOUT, "   Will enable Pin %s for DPI output\n", pinName.c_str());
+        m_configuredDPIPins.push_back(pinName);
+    }
+
     if (licensedOutputs && root.isMember("latches")) {
         usingLatches = true;
 
