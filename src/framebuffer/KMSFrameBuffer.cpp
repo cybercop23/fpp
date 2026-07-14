@@ -549,36 +549,40 @@ void KMSFrameBuffer::SyncDisplay(bool pageChanged) {
                 WaitForPendingFlip(timeoutMs);
             }
 
-            // Phase hysteresis: fppd's software frame clock and the panel's
+            // Phase alignment: fppd's software frame clock and the panel's
             // vblank clock are never exactly the same rate, so the submission
             // time slowly drifts across the vblank grid.  When it straddles a
             // boundary, scheduling jitter makes alternate frames catch/miss
             // the vblank and frames display for e.g. 25ms/75ms instead of a
-            // steady 50ms - a visible judder burst that lasts until the drift
-            // clears the boundary (confirmed via the vblank-delta counters:
-            // 1,3,1,3 bursts exactly at observed stutters).  If this flip
-            // would be submitted within ~2ms of a boundary, delay it a few ms
-            // so the phase slip happens once, cleanly, per beat cycle.
+            // steady 50ms - a visible judder burst until the drift clears the
+            // boundary (confirmed via the vblank-delta counters: 1,3,1,3
+            // bursts exactly at observed stutters).  A "nudge only near the
+            // boundary" zone just moves the discontinuity to the zone edge
+            // (confirmed in testing: crossings leaked at the edge while the
+            // phase transited the zone), so instead align EVERY submission to
+            // the middle of the vblank interval - scheduling jitter can never
+            // reach a boundary from there, and the clock drift shows up as
+            // this sleep slowly varying.  When the sleep wraps, the
+            // unavoidable one-vblank phase slip happens once, cleanly, per
+            // beat cycle instead of oscillating.  Only engage when the
+            // previous flip retired more than a refresh period ago (frame
+            // rate below refresh rate = slack exists); at full refresh rate
+            // WaitForPendingFlip above already vblank-locks the loop.
             if (m_lastFlipTimeUS != 0 && m_mode.vrefresh > 0) {
                 struct timespec tsm;
                 clock_gettime(CLOCK_MONOTONIC, &tsm);
                 uint64_t nowUS = (uint64_t)tsm.tv_sec * 1000000ULL + tsm.tv_nsec / 1000;
                 uint64_t periodUS = 1000000ULL / m_mode.vrefresh;
-                if (nowUS > m_lastFlipTimeUS && (nowUS - m_lastFlipTimeUS) < 60000000ULL) {
-                    // (guard also skips nudging if the driver reported
-                    // non-monotonic timestamps - elapsed would be implausible)
-                    // Zone width must exceed worst-case scheduling jitter or a
-                    // submission can hop the boundary from outside the zone
-                    // (seen on Pi3: ~3ms first-frame jitter leaked a crossing
-                    // through a 2ms zone).
+                // The 60s cap also skips alignment if the driver reported
+                // non-monotonic timestamps - elapsed would be implausible.
+                if (nowUS > m_lastFlipTimeUS &&
+                    (nowUS - m_lastFlipTimeUS) < 60000000ULL &&
+                    (nowUS - m_lastFlipTimeUS) > periodUS) {
                     uint64_t phaseUS = (nowUS - m_lastFlipTimeUS) % periodUS;
-                    uint64_t sleepUS = 0;
-                    if (phaseUS > periodUS - 3500) {
-                        sleepUS = (periodUS - phaseUS) + 4000;
-                    } else if (phaseUS < 2000) {
-                        sleepUS = 4000 - phaseUS;
-                    }
-                    if (sleepUS > 0) {
+                    uint64_t sleepUS = (periodUS / 2 + periodUS - phaseUS) % periodUS;
+                    // Already within 2ms past mid-interval: close enough,
+                    // don't sleep a nearly full period chasing the target.
+                    if (sleepUS > 0 && sleepUS < periodUS - 2000) {
                         m_phaseNudges++;
                         std::this_thread::sleep_for(std::chrono::microseconds(sleepUS));
                     }
