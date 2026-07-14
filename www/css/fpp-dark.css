@@ -512,3 +512,20 @@
 
 /* Table sort headers — bg handled by unified thead rule in fpp.css + --fpp-thead-bg
    token (dark value set at top of this file). Per-id dark tweaks go here if ever needed. */
+
+/* ------------------------------------------------------------- */
+/* Modals — in dark mode the modal bg and the dimmed page behind  */
+/* it are nearly the same value, so the modal loses its edges.    */
+/* A light hairline border plus a deeper shadow restores it.      */
+/* ------------------------------------------------------------- */
+
+[data-bs-theme="dark"] .modal-content {
+    border: 1px solid var(--fpp-border-dark);
+    box-shadow: 0 0.5rem 1.75rem rgba(0, 0, 0, 0.6);
+}
+
+/* The default backdrop opacity leaves the page behind competing with the
+   modal; darken it so the outlined modal reads as the foreground layer. */
+[data-bs-theme="dark"] .modal-backdrop.show {
+    opacity: 0.7;
+}
