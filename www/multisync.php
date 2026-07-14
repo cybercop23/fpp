@@ -666,23 +666,31 @@
         }
 
         function ipFromRowID(id) {
-            ip = $('#' + id).attr('data-ip');
-
+            var ip = $('#' + id).attr('data-ip');
+            // The <tr> is rebuilt on every status poll; if the attribute isn't
+            // present at the moment a stream callback fires, fall back to the
+            // authoritative value kept in the Bootstrap Table row model.
+            if (typeof ip === 'undefined' || ip === '') {
+                var row = $('#fppSystemsTable').bootstrapTable('getRowByUniqueId', id);
+                if (row && row._dataIp) {
+                    ip = row._dataIp;
+                }
+            }
             return ip;
         }
         function ipOrHostnameFromRowID(id) {
-            var ip;
+            var row = $('#fppSystemsTable').bootstrapTable('getRowByUniqueId', id);
             if (fppConfig.serverName !== fppConfig.serverAddr) {
                 // Hitting the FPP instance via hostname, not IP; use hostnames
-                // for remotes as well or CORS will trigger.
-                ip = $('#' + id + "_hostname").html();
-                if (ip == "") {
-                    ip = $('#' + id).attr('data-ip');
+                // for remotes as well or CORS will trigger. Read the hostname
+                // from the row model rather than scraping a DOM span — the span
+                // is keyed by IP while the row id is keyed by UUID, so a DOM
+                // lookup by row id never matches and yields undefined.
+                if (row && row._hostname && row._hostname !== '') {
+                    return row._hostname;
                 }
-            } else {
-                ip = $('#' + id).attr('data-ip');
             }
-            return ip;
+            return ipFromRowID(id);
         }
 
         // ============================================================
@@ -1792,6 +1800,7 @@
                     _id:           rowID,
                     _dataIp:       data[i].address,
                     _dataIplist:   data[i].address,
+                    _hostname:     hostname,
                     _isFPP:        isFPP(data[i].typeId),
                     _typeIdHex:    typeIdHex,
                     _platformInit: data[i].type,
