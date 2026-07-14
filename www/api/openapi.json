@@ -4641,6 +4641,30 @@
         }
       }
     },
+    "/api/overlays/model/{model}/preview": {
+      "parameters": [
+        {
+          "name": "model",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "overlays"
+        ],
+        "summary": "overlays/model/{model}/preview",
+        "description": "Get the per-pixel virtual-display coordinates for a model, for a lightweight layout preview. Sourced from config/virtualdisplaymap (the xLights-exported layout) and returned on demand so the UI never has to inline this data (which can be hundreds of thousands of points per model) for every model at once.",
+        "responses": {
+          "200": {
+            "description": "Object with a `pixels` array of [x, y, channel] triples."
+          }
+        }
+      }
+    },
     "/api/overlays/model/{model}/save": {
       "parameters": [
         {

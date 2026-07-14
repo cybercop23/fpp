@@ -19,6 +19,7 @@
 #include <dirent.h>
 
 #include <fcntl.h>
+#include <fstream> // virtualdisplaymap parse for model preview endpoint
 #include <unistd.h> // write -- needed directly for NOPCH builds
 
 #include <Magick++.h>
@@ -596,6 +597,16 @@ HttpResponsePtr PixelOverlayManager::render_HEAD(const HttpRequestPtr& req) {
  */
 
 /**
+ * Get the per-pixel virtual-display coordinates for a model, for a lightweight
+ * layout preview. Sourced from config/virtualdisplaymap (the xLights-exported
+ * layout) and returned on demand so the UI never has to inline this data (which
+ * can be hundreds of thousands of points per model) for every model at once.
+ *
+ * @route GET /api/overlays/model/{model}/preview
+ * @response 200 Object with a `pixels` array of [x, y, channel] triples.
+ */
+
+/**
  * Clear (blank) an overlay model's pixel buffer.
  *
  * @route GET /api/overlays/model/{model}/clear
@@ -623,6 +634,65 @@ HttpResponsePtr PixelOverlayManager::render_HEAD(const HttpRequestPtr& req) {
  * @route GET /api/overlays/running
  * @response 200 Active overlay effects.
  */
+// Normalize an overlay model name for matching (mirrors the UI's
+// normalizeModelName()): lowercase, strip everything but [a-z0-9]. Overlay
+// model names use underscores (e.g. "Arch_1_-_Bottom") while the
+// virtualdisplaymap uses the original xLights names (e.g. "Arch 1 - Bottom"),
+// so preview lookups must compare on the normalized form.
+static std::string normalizeOverlayModelName(const std::string& name) {
+    std::string out;
+    out.reserve(name.size());
+    for (char c : name) {
+        if (c >= 'A' && c <= 'Z') {
+            c = c - 'A' + 'a';
+        }
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+// Collect the per-pixel [x, y, channel] preview coordinates for one model from
+// config/virtualdisplaymap, appending them to pixels. Matches the model section
+// on exact or normalized name. Parsing on demand (only when a preview is
+// requested) keeps this potentially very large data out of the page.
+static void collectModelPreviewPixels(const std::string& modelName, Json::Value& pixels) {
+    const std::string want = modelName;
+    const std::string wantNorm = normalizeOverlayModelName(modelName);
+    std::ifstream in(FPP_DIR_CONFIG("/virtualdisplaymap"));
+    if (!in.is_open()) {
+        return;
+    }
+    std::string line;
+    bool inModel = false;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line[0] == '#') {
+            // Model header line looks like: # Model: 'Some Name'
+            if (line.find("Model:") != std::string::npos) {
+                std::size_t q1 = line.find('\'');
+                std::size_t q2 = (q1 == std::string::npos) ? std::string::npos : line.find('\'', q1 + 1);
+                if (q1 != std::string::npos && q2 != std::string::npos && q2 > q1) {
+                    std::string name = line.substr(q1 + 1, q2 - q1 - 1);
+                    inModel = (name == want) || (normalizeOverlayModelName(name) == wantNorm);
+                }
+            }
+            continue;
+        }
+        if (!inModel || line.empty()) {
+            continue;
+        }
+        int x = 0, y = 0, z = 0;
+        if (sscanf(line.c_str(), "%d,%d,%d", &x, &y, &z) >= 3) {
+            Json::Value px(Json::arrayValue);
+            px.append(x);
+            px.append(y);
+            px.append(z);
+            pixels.append(px);
+        }
+    }
+}
+
 HttpResponsePtr PixelOverlayManager::render_GET(const HttpRequestPtr& req) {
     auto parts = getPathPieces(req->path());
     std::string p1 = parts[0];
@@ -735,6 +805,10 @@ HttpResponsePtr PixelOverlayManager::render_GET(const HttpRequestPtr& req) {
                 } else if (p4 == "clear") {
                     m->clear();
                     return makeStringResponse("{ \"Status\": \"OK\", \"Message\": \"\"}", 200);
+                } else if (p4 == "preview") {
+                    Json::Value pixels(Json::arrayValue);
+                    collectModelPreviewPixels(m->getName(), pixels);
+                    result["pixels"] = pixels;
                 } else {
                     m->toJson(result);
                     result["isActive"] = (int)m->getState().getState();

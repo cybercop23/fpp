@@ -56,43 +56,6 @@ if (($settings['Platform'] == "Linux") && (file_exists('/usr/include/X11/Xlib.h'
 
         ?>
 
-        var modelPreviewData = {};
-        var modelPreviewDataNormalized = {};
-        <?
-        $mapFile = $settings['configDirectory'] . '/virtualdisplaymap';
-        if (file_exists($mapFile)) {
-            $f = fopen($mapFile, 'r');
-            if ($f) {
-                $currentModel = null;
-                $previewPixels = [];
-                while (!feof($f)) {
-                    $line = fgets($f);
-                    $line = trim($line);
-                    if ($line == '')
-                        continue;
-                    if (preg_match("/^#\s*Model:\s*'([^']+)'/", $line, $matches)) {
-                        if ($currentModel !== null) {
-                            echo "modelPreviewData[" . json_encode($currentModel) . "] = " . json_encode($previewPixels) . ";\n";
-                        }
-                        $currentModel = $matches[1];
-                        $previewPixels = [];
-                        continue;
-                    }
-                    if (preg_match('/^#/', $line))
-                        continue;
-                    $parts = explode(',', $line);
-                    if (count($parts) >= 3 && $currentModel !== null) {
-                        $previewPixels[] = [(int) $parts[0], (int) $parts[1], isset($parts[2]) ? (int) $parts[2] : 0];
-                    }
-                }
-                if ($currentModel !== null) {
-                    echo "modelPreviewData[" . json_encode($currentModel) . "] = " . json_encode($previewPixels) . ";\n";
-                }
-                fclose($f);
-            }
-        }
-        ?>
-
         var xlightsSubModels = {};
         <?
         // Lightweight per-parent submodel list (names/dims only, no grids) from
@@ -214,16 +177,18 @@ if (($settings['Platform'] == "Linux") && (file_exists('/usr/include/X11/Xlib.h'
             $('#modelGroupsSection').show();
         }
 
-        function getModelPreviewPixels(modelName) {
-            if (modelPreviewData.hasOwnProperty(modelName)) {
-                return modelPreviewData[modelName];
-            }
-            return modelPreviewDataNormalized[normalizeModelName(modelName)] || null;
+        // Fetch a model's per-pixel preview coordinates ([[x,y,z],...]) on
+        // demand from the overlay API.  The coordinates come from the
+        // virtualdisplaymap and can be hundreds of thousands of points per
+        // model, so they are never inlined into the page — see issue #2731.
+        // cb receives the pixel array (or null on error/none).
+        function fetchModelPreviewPixels(modelName, cb) {
+            $.getJSON("api/overlays/model/" + encodeURIComponent(modelName) + "/preview", function (resp) {
+                cb(resp && resp.pixels && resp.pixels.length ? resp.pixels : null);
+            }).fail(function () {
+                cb(null);
+            });
         }
-
-        Object.keys(modelPreviewData).forEach(function (key) {
-            modelPreviewDataNormalized[normalizeModelName(key)] = modelPreviewData[key];
-        });
 
         function GetOrientationInput(currentValue, attr) {
 
@@ -371,8 +336,7 @@ if (($settings['Platform'] == "Linux") && (file_exists('/usr/include/X11/Xlib.h'
                             xlchecked = " checked";
                         }
                         postr += "<td><input class='xlights' type='checkbox'" + xlchecked + " disabled>";
-                        var previewPixels = getModelPreviewPixels(model.Name);
-                        if (model.xLights && previewPixels && previewPixels.length > 0) {
+                        if (model.xLights) {
                             postr += " <i class='fas fa-eye' style='cursor:pointer; color:#5bc0de;' title='Preview model layout' onclick='showModelPreview(" + JSON.stringify(model.Name) + ")'></i>";
                         }
                         var subModels = getSubModels(model.Name);
@@ -495,15 +459,10 @@ if (($settings['Platform'] == "Linux") && (file_exists('/usr/include/X11/Xlib.h'
         }
 
         // Preview a submodel by highlighting its nodes over the parent's preview
-        // pixels.  The submodel's grid (parent node numbers) is fetched on demand
-        // from the API so the page stays light; the parent's per-pixel coords
-        // come from the already-loaded virtualdisplaymap.
+        // pixels.  Both the submodel's grid (parent node numbers) and the
+        // parent's per-pixel coords are fetched on demand from the overlay API
+        // so the page stays light (showModelPreview loads the parent pixels).
         function showSubModelPreview(parentName, subModelName) {
-            var parentPixels = getModelPreviewPixels(parentName);
-            if (!parentPixels || parentPixels.length == 0) {
-                alert('No preview data available for parent model: ' + parentName);
-                return;
-            }
             $.get("api/overlays/model/" + encodeURIComponent(subModelName), function (sm) {
                 if (!sm || !sm.Grid) {
                     alert('No grid data returned for submodel "' + subModelName + '".\n\n'
@@ -790,13 +749,19 @@ if (($settings['Platform'] == "Linux") && (file_exists('/usr/include/X11/Xlib.h'
         // drawn highlighted and the rest dimmed, so a submodel can be shown in
         // the context of its parent.  subModelName (optional) adjusts the title.
         function showModelPreview(modelName, highlightNodes, subModelName) {
+            // Pixel coordinates are loaded on demand (not inlined into the page).
+            fetchModelPreviewPixels(modelName, function (pixels) {
+                if (!pixels || pixels.length === 0) {
+                    alert('No preview data available for model: ' + modelName);
+                    return;
+                }
+                renderModelPreview(modelName, pixels, highlightNodes, subModelName);
+            });
+        }
+
+        function renderModelPreview(modelName, pixels, highlightNodes, subModelName) {
             $('#modelPreviewModal').remove();
 
-            var pixels = getModelPreviewPixels(modelName);
-            if (!pixels || pixels.length === 0) {
-                alert('No preview data available for model: ' + modelName);
-                return;
-            }
             var hasHighlight = highlightNodes && typeof highlightNodes === 'object';
 
             var minX = Infinity, maxX = -Infinity;
