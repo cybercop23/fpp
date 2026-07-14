@@ -83,35 +83,27 @@ function network_wifi_strength()
  * }
  * ```
  */
-function network_wifi_scan()
+/**
+ * Parse `iw dev <iface> scan` output into an array of network descriptors.
+ * Each BSS begins a new entry; only entries that yielded at least an SSID or
+ * BSSID are kept so a leading/empty block is never returned.
+ */
+function network_parse_iw_scan($output)
 {
     $networks = array();
     $current = array();
-    $interface = params('interface');
 
-    # Validate interface.   -- Important because of SUDO
-    $interfaces = json_decode(network_list_interfaces(), true);
-    $found = false;
-
-    foreach ($interfaces as $row) {
-        if ($row["ifname"] == $interface) {
-            $found = true;
+    $flush = function () use (&$networks, &$current) {
+        if (isset($current['SSID']) || isset($current['bssid'])) {
+            array_push($networks, $current);
         }
-    }
-
-    if (!$found) {
-        return json(array("status" => "Invalid Interface", "networks" => array()));
-    }
-
-    exec("sudo /sbin/ip link set $interface up", $output);
-    $output = array();
-    $cmd = "sudo /sbin/iw dev $interface scan";
-    exec($cmd, $output);
+        $current = array();
+    };
 
     foreach ($output as $row) {
-        if (str_starts_with($row, "BSS")) {
-            array_push($networks, $current);
-            $current = array();
+        if (preg_match('/^BSS ([0-9a-fA-F:]{17})/', $row, $matches)) {
+            $flush();
+            $current['bssid'] = strtoupper($matches[1]);
         } else if (preg_match('/freq: (.*)/', $row, $matches)) {
             $current['freq'] = intval($matches[1]);
         } else if (preg_match('/last seen: (.*)/', $row, $matches)) {
@@ -141,8 +133,97 @@ function network_wifi_scan()
             $current['cipher'] = trim($matches[1]);
         }
     }
-    if (count($current) > 0) {
-        array_push($networks, $current);
+    $flush();
+
+    return $networks;
+}
+
+/**
+ * Parse legacy `iwlist <iface> scan` (WEXT) output into the same descriptor
+ * shape as network_parse_iw_scan(). Used as a fallback for out-of-tree
+ * drivers whose nl80211 scan support is missing or broken.
+ */
+function network_parse_iwlist_scan($output)
+{
+    $networks = array();
+    $current = array();
+
+    $flush = function () use (&$networks, &$current) {
+        if (isset($current['SSID']) || isset($current['bssid'])) {
+            array_push($networks, $current);
+        }
+        $current = array();
+    };
+
+    foreach ($output as $row) {
+        if (preg_match('/Cell \d+ - Address: ([0-9a-fA-F:]{17})/', $row, $matches)) {
+            $flush();
+            $current['bssid'] = strtoupper($matches[1]);
+        } else if (preg_match('/Frequency:([\d.]+) GHz/', $row, $matches)) {
+            // iwlist reports GHz; normalise to MHz to match the `iw` path.
+            $current['freq'] = intval(round(floatval($matches[1]) * 1000));
+        } else if (preg_match('/ESSID:"(.*)"/', $row, $matches)) {
+            $current['SSID'] = $matches[1];
+        } else if (preg_match('/Signal level=(-?\d+) dBm/', $row, $matches)) {
+            $current['signal'] = $matches[1] . '.00 dBm';
+        } else if (preg_match('/Encryption key:on/', $row)) {
+            $current['encrypted'] = true;
+        } else if (preg_match('/IE:.*WPA2/', $row)) {
+            $current['encrypted'] = true;
+            $current['security'] = isset($current['security']) ? $current['security'] . ' WPA2' : 'WPA2';
+        } else if (preg_match('/IE:.*WPA Version/', $row)) {
+            $current['encrypted'] = true;
+            $current['security'] = isset($current['security']) ? $current['security'] . ' WPA' : 'WPA';
+        } else if (preg_match('/Authentication Suites.*PSK/', $row)) {
+            $current['auth'] = 'PSK';
+        } else if (preg_match('/Authentication Suites.*802\.1x/', $row)) {
+            $current['auth'] = 'Enterprise';
+        } else if (preg_match('/Group Cipher : (.*)/', $row, $matches)) {
+            $current['cipher'] = trim($matches[1]);
+        }
+    }
+    $flush();
+
+    return $networks;
+}
+
+function network_wifi_scan()
+{
+    $networks = array();
+    $current = array();
+    $interface = params('interface');
+
+    # Validate interface.   -- Important because of SUDO
+    $interfaces = json_decode(network_list_interfaces(), true);
+    $found = false;
+
+    foreach ($interfaces as $row) {
+        if ($row["ifname"] == $interface) {
+            $found = true;
+        }
+    }
+
+    if (!$found) {
+        return json(array("status" => "Invalid Interface", "networks" => array()));
+    }
+
+    exec("sudo /sbin/ip link set $interface up", $output);
+
+    // Preferred path: nl80211 via `iw`. Works on modern in-kernel drivers
+    // and Wi-Fi 7 hardware where the old wireless extensions are gone.
+    $output = array();
+    exec("sudo /sbin/iw dev $interface scan", $output);
+    $networks = network_parse_iw_scan($output);
+
+    // Fallback: some out-of-tree Realtek USB drivers (e.g. RTL8812BU /
+    // RTL8822BU on the 88x2bu driver) advertise no working nl80211 scan
+    // support, so `iw` returns an empty list even with APs in range. Those
+    // drivers still scan fine over the legacy WEXT `iwlist` path, so retry
+    // there before giving up and reporting "No networks found".
+    if (count($networks) == 0) {
+        $output = array();
+        exec("sudo /sbin/iwlist $interface scan 2>/dev/null", $output);
+        $networks = network_parse_iwlist_scan($output);
     }
 
     return json(array("status" => "OK", "networks" => $networks));
