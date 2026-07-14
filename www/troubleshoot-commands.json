@@ -636,7 +636,7 @@
                 "all"
             ],
             "commands": {
-                "PHPInfo": {
+                "CLIPHPInfo": {
                     "title": "PHP Info",
                     "description": "Displays the results of the phpinfo command",
                     "cmd": "php -i",
@@ -702,7 +702,7 @@
                         "all"
                     ]
                 },
-                "PHPInfo": {
+                "WebPHPInfo": {
                     "title": "PHP Info",
                     "description": "Results from php_info() function",
                     "cmd": "curl -s http://localhost/localonly/cleanedphpinfo.php",
