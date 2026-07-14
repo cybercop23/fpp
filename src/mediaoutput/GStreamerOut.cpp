@@ -1712,6 +1712,75 @@ int GStreamerOutput::Stop(void) {
         // on_param_changed never blocks, and the pipeline NULL below can
         // proceed normally.
 
+        // For pipelines with no DRM/KMS involvement (audio-only), the rest of
+        // the teardown - the 250ms silence flush and the pipeline state
+        // change to NULL - has no ordering dependency on anything the next
+        // track needs: PipeWire mixes concurrent streams, and the next
+        // pipeline uses its own stream node.  Run that slow tail on a
+        // detached thread so a track transition (or a looping playlist wrap)
+        // doesn't spend ~0.5s of lights-frozen time on it.  Pipelines that
+        // touch DRM (kmssink, direct connectors, reserved planes, shared DRM
+        // fds) keep the fully synchronous path below: their kernel resources
+        // must be released before the next pipeline may claim them.
+        bool asyncTeardownEligible = !m_hasVideoStream && !m_kmssink &&
+                                     m_directConnectorIds.empty() &&
+                                     !m_videoPipeWireRouting &&
+                                     m_allocatedPlanes.empty() &&
+                                     m_acquiredDrmCards.empty();
+        if (asyncTeardownEligible) {
+            // These are what Close() would run inside its m_pipeline guard;
+            // that guard will be skipped because we null the members here.
+            FlushPipeWireDelayBuffers();
+#ifdef HAS_AES67_GSTREAMER
+            if (AES67Manager::INSTANCE.IsActive()) {
+                AES67Manager::INSTANCE.FlushSendPipelines();
+            }
+#endif
+            Stopping();
+
+            // The detached thread takes over this object's refs; it must not
+            // touch `this` (the object is typically destroyed right after).
+            std::thread([pipeline = m_pipeline, volume = m_volume, bus = m_bus,
+                         appsink = m_appsink, videoAppsink = m_videoAppsink]() {
+                SetThreadName("FPP-GstTeardown");
+                if (volume) {
+                    // Silence flush: push zeros through the PipeWire chain so
+                    // stale buffer contents can't replay as a click when the
+                    // next track starts (see comment on the synchronous path).
+                    g_object_set(volume, "volume", 0.0, NULL);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                }
+                if (!SetPipelineToNullSupervised(pipeline, PIPELINE_TEARDOWN_TIMEOUT_MS)) {
+                    // Reaper keeps its own refs to a wedged pipeline; drop
+                    // ours below either way (mirrors Close()'s behavior).
+                    RecordWedgeEventAndMaybeRestart("async pipeline teardown wedged, abandoning pipeline");
+                }
+                if (appsink)
+                    gst_object_unref(appsink);
+                if (videoAppsink)
+                    gst_object_unref(videoAppsink);
+                if (volume)
+                    gst_object_unref(volume);
+                if (bus)
+                    gst_object_unref(bus);
+                gst_object_unref(pipeline);
+            }).detach();
+
+            m_pipeline = nullptr;
+            m_volume = nullptr;
+            m_bus = nullptr;
+            m_appsink = nullptr;
+            m_videoAppsink = nullptr;
+
+            m_playing = false;
+            if (m_mediaOutputStatus) {
+                m_mediaOutputStatus->status = MEDIAOUTPUTSTATUS_IDLE;
+            }
+            Stopped();
+            m_teardownComplete = true;
+            return 1;
+        }
+
         // Flush silence through the PipeWire graph before tearing down.
         // When the pipeline stops, PipeWire combine-stream and filter-chain
         // nodes go IDLE with whatever audio was last in their buffers.  If a
