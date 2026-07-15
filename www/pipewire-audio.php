@@ -361,7 +361,7 @@
 </head>
 
 <body<?php if ($modalMode)
-    echo ' style="margin:0;padding:1rem;"'; ?>>
+    echo ' class="modal-mode" style="margin:0;padding:1rem;"'; ?>>
     <?php if (!$modalMode) { ?>
         <div id="bodyWrapper">
             <?php

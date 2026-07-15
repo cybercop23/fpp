@@ -108,7 +108,8 @@
     </style>
 </head>
 
-<body>
+<body<?php if ($modalMode)
+    echo ' class="modal-mode"'; ?>>
     <div id="bodyWrapper">
         <?php
         if (!$modalMode) {
