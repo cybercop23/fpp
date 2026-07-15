@@ -277,6 +277,27 @@ static void handleCrash(int s, siginfo_t* si, void* ctx) {
         return;
     }
     inCrashHandler = true;
+    if (s != SIGQUIT && s != SIGUSR1) {
+        // Wedge-proofing: nearly everything below is async-signal-UNSAFE —
+        // fork()/gdb, LogErr (malloc), system()/curl.  When the fatal signal
+        // fired while this thread held a libc lock (a heap-corruption SIGABRT
+        // inside free() always does), any of it can self-deadlock; the process
+        // then hangs forever, systemd keeps seeing it as running, and
+        // Restart=always never fires.  Arm a watchdog with SIGALRM restored to
+        // its default (terminate) disposition — both calls are
+        // async-signal-safe — so a wedged handler still dies and gets
+        // restarted.  Normal paths finish in exit(-1) long before it fires;
+        // the timeout is generous because the crash-report zip + curl upload
+        // legitimately take time.  Left armed across exit(-1) on purpose:
+        // atexit/global destructors can hit the same held locks.
+        constexpr unsigned int kCrashHandlerWatchdogSec = 120;
+        struct sigaction almAct;
+        memset(&almAct, 0, sizeof(almAct));
+        almAct.sa_handler = SIG_DFL;
+        sigemptyset(&almAct.sa_mask);
+        sigaction(SIGALRM, &almAct, nullptr);
+        alarm(kCrashHandlerWatchdogSec);
+    }
     int crashLog = getSettingInt("ShareCrashData", 3);
 #ifndef PLATFORM_OSX
     LogErr(VB_ALL, "Crash handler called in thread %u:  signal=%d (SIG%s: %s) addr=%p si_code=%d\n",
@@ -412,6 +433,8 @@ static void handleCrash(int s, siginfo_t* si, void* ctx) {
             sigemptyset(&sa.sa_mask);
             sa.sa_flags = 0;
             sigaction(SIGBUS, &sa, NULL);
+            // The process survives this path — disarm the crash watchdog.
+            alarm(0);
             pthread_exit(NULL);
             return; // unreachable, but satisfies compiler
         }
