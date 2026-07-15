@@ -71,6 +71,12 @@ void StreamSlotManager::ClearSlot(int slot) {
     m_slots[slot - 1].mediaFilename.clear();
     m_slots[slot - 1].isBackground = false;
     m_slots[slot - 1].status.status = MEDIAOUTPUTSTATUS_IDLE;
+    // #2713: release the KMS connector gate (mediaOutputStatus.output) when the
+    // stream tears down.  Otherwise it stays set to the video's connector (e.g.
+    // "DSI-1") after playback ends and the KMSFrameBuffer overlay path stays
+    // gated off, so images never scan out until fppd is restarted.  Use
+    // GetStatus(slot) so slot 1's global mediaOutputStatus is the object cleared.
+    GetStatus(slot)->output = "";
     LogInfo(VB_MEDIAOUT, "StreamSlotManager: slot %d cleared\n", slot);
 }
 
