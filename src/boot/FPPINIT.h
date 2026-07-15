@@ -67,6 +67,9 @@ void configureBBB();
 // captureDefaults=true only from boot, while sysfs still holds the device tree values
 void applyThermalSettings(bool captureDefaults = false);
 void resetThermalSettings();
+// Force each fan on and read its tachometer, recording which fans actually
+// report RPM so fppd can suppress the display for absent/dead fans. Boot only.
+void probeFanPresence();
 void setFileOwnership();
 bool checkUnpartitionedSpace();
 void resizeRootFS();

@@ -334,6 +334,7 @@ void configureBBB() {
 // "Reset to Defaults" button) can restore the hardware defaults without a
 // reboot.
 static const std::string FAN_TRIP_DEFAULTS_FILE = FPP_MEDIA_DIR + "/tmp/fan_thermal_defaults.json";
+static const std::string FAN_PROBE_FILE = FPP_MEDIA_DIR + "/tmp/fan_probe.json";
 
 static std::string fanTripKey(const std::string& ztype, int trip) {
     std::string key;
@@ -437,6 +438,109 @@ void resetThermalSettings() {
         });
     } else {
         printf("FPP - No fan trip point defaults snapshot; settings cleared, defaults restore on next boot\n");
+    }
+}
+
+// A pwm-fan hwmon node always exposes fanN_input (the tachometer) even when no
+// fan -- or a dead fan -- is wired to it: it simply reads 0 RPM.  That is
+// indistinguishable from a healthy fan the thermal governor has merely turned
+// off, so the reading is worse than useless (it looks like a stalled fan).  To
+// tell "off" from "absent/dead", force each fan on and read its tachometer.
+//
+// Lowering a trip point does NOT reliably wake the (poll-disabled) thermal
+// governor on the Pi5/K16Pro kernels, and driving the cooling-device cur_state
+// ramps only gradually, so drive the hwmon PWM directly (pwm1_enable=1 +
+// pwm1=max).  A healthy fan spins up to thousands of RPM within ~150ms; an
+// absent/dead one stays 0.  The pre-probe PWM state is restored afterwards (the
+// governor reasserts control on the next thermal event).
+//
+// The result is written to media/tmp/fan_probe.json (wiped every boot), keyed by
+// "<hwmon name>:<fan index>", so Sensors::DetectFanSensors() in fppd can suppress
+// the RPM display for a fan whose tachometer can neither be controlled nor read.
+// This runs during the boot "start" phase, before fppd caches its sensor list.
+void probeFanPresence() {
+    if (FileExists("/etc/fpp/container")) {
+        return;
+    }
+    Json::Value result;
+    for (int h = 0; h < 32; h++) {
+        std::string hwmon = "/sys/class/hwmon/hwmon" + std::to_string(h);
+        if (!DirectoryExists(hwmon)) {
+            break;
+        }
+        std::vector<int> fans;
+        for (int f = 1; f <= 8; f++) {
+            if (FileExists(hwmon + "/fan" + std::to_string(f) + "_input")) {
+                fans.push_back(f);
+            }
+        }
+        if (fans.empty()) {
+            continue;
+        }
+        std::string name = GetFileContents(hwmon + "/name");
+        TrimWhiteSpace(name);
+        if (name.empty()) {
+            name = "hwmon" + std::to_string(h);
+        }
+
+        // Force the fan on via the hwmon PWM interface, remembering the current
+        // state so it can be restored.  pwm1 drives every fan on a pwm-fan node.
+        std::string pwmFile = hwmon + "/pwm1";
+        std::string enFile = hwmon + "/pwm1_enable";
+        bool forced = FileExists(pwmFile);
+        std::string origPwm, origEn;
+        if (forced) {
+            origPwm = GetFileContents(pwmFile);
+            TrimWhiteSpace(origPwm);
+            if (FileExists(enFile)) {
+                origEn = GetFileContents(enFile);
+                TrimWhiteSpace(origEn);
+                PutFileContents(enFile, "1");
+            }
+            PutFileContents(pwmFile, "255");
+        }
+
+        // Sample each tachometer until it reads non-zero (healthy fans spin up
+        // within ~150ms); cap at ~0.7s so an absent/dead fan can't stall boot.
+        std::vector<int> rpm(fans.size(), 0);
+        for (int s = 0; s < 7; s++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            bool anyZero = false;
+            for (size_t fi = 0; fi < fans.size(); fi++) {
+                if (rpm[fi] == 0) {
+                    std::string r = GetFileContents(hwmon + "/fan" + std::to_string(fans[fi]) + "_input");
+                    TrimWhiteSpace(r);
+                    rpm[fi] = atoi(r.c_str());
+                    if (rpm[fi] == 0) {
+                        anyZero = true;
+                    }
+                }
+            }
+            if (!anyZero) {
+                break;
+            }
+        }
+
+        // Restore the pre-probe PWM state.
+        if (forced) {
+            PutFileContents(pwmFile, origPwm);
+            if (!origEn.empty()) {
+                PutFileContents(enFile, origEn);
+            }
+        }
+
+        for (size_t fi = 0; fi < fans.size(); fi++) {
+            std::string key = name + ":" + std::to_string(fans[fi]);
+            Json::Value e;
+            e["rpm"] = rpm[fi];
+            e["present"] = rpm[fi] > 0;
+            result[key] = e;
+            printf("FPP - Fan probe %s: %d RPM (%s)\n", key.c_str(), rpm[fi],
+                   rpm[fi] > 0 ? "present" : "no tach signal, RPM display suppressed");
+        }
+    }
+    if (result.size() > 0) {
+        PutFileContents(FAN_PROBE_FILE, SaveJsonToString(result));
     }
 }
 

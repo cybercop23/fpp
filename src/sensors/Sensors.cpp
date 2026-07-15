@@ -547,6 +547,16 @@ void Sensors::DetectHWSensors() {
     DetectFanSensors();
 }
 void Sensors::DetectFanSensors() {
+    // A pwm-fan hwmon node exposes fanN_input even when no working fan is wired
+    // to it -- it just reads 0, which looks like a stalled fan. fppinit's
+    // boot-time probe (probeFanPresence in FPPINIT_Config.cpp) forces each fan on
+    // and records whether its tachometer actually reported RPM into
+    // media/tmp/fan_probe.json, keyed by "<hwmon name>:<fan index>". Skip the RPM
+    // sensor for any fan that probed as absent -- there is nothing useful to
+    // show. A missing file or entry means "unknown", so we register as before.
+    Json::Value fanProbe;
+    LoadJsonFromFile(FPP_DIR_MEDIA("/tmp/fan_probe.json"), fanProbe);
+
     for (int h = 0; h < 32; h++) {
         char hwmonPath[256];
         snprintf(hwmonPath, sizeof(hwmonPath), "/sys/class/hwmon/hwmon%d", h);
@@ -622,6 +632,13 @@ void Sensors::DetectFanSensors() {
                     label += " " + std::to_string(fan);
                 v["label"] = label + ": ";
                 v["postfix"] = " RPM";
+
+                std::string probeKey = deviceName + ":" + std::to_string(fan);
+                if (fanProbe.isMember(probeKey) && !fanProbe[probeKey]["present"].asBool()) {
+                    LogInfo(VB_GENERAL, "Fan '%s' (%s) reported no tachometer signal when forced on at boot; suppressing RPM display\n",
+                            label.c_str(), probeKey.c_str());
+                    continue;
+                }
                 sensors.push_back(new FanSensor(v));
             }
         }

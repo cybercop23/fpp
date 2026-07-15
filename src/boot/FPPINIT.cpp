@@ -195,6 +195,9 @@ int main(int argc, char* argv[]) {
         }
         configureBBB();
         applyThermalSettings(true);
+        // Probe each fan's tachometer (forces it on briefly) so fppd can hide
+        // the RPM for a fan it can't detect. Must run before fppd starts.
+        probeFanPresence();
         setupChannelOutputs();
         setupKiosk();
         printf("Setting file ownership\n");
