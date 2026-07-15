@@ -643,6 +643,80 @@ function QueryAlsaCardBestRate($cardId, $allowedRates, $fallbackRate)
 }
 
 /////////////////////////////////////////////////////////////////////////////
+// Detect the maximum playback channel count an ALSA card supports, without
+// opening the device.  Reading only the live-negotiated count from
+// /proc hw_params just echoes however PipeWire happened to open the card
+// (usually 2) and reads "closed" when idle, so it can never discover that a
+// card is really multi-channel (issue #2620).
+// Mirrors the boot-time detection in src/boot/FPPINIT_Audio.cpp.
+function DetectAlsaCardMaxChannels($cardNum, $aplayLine, $isUsbCard)
+{
+    $channels = 2; // Default stereo
+
+    // Live negotiated params — only meaningful while the device is open,
+    // and only ever raises the count (a stereo negotiation on an 8ch card
+    // must not mask capability info from the sources below).
+    exec("cat /proc/asound/card$cardNum/pcm0p/sub0/hw_params 2>/dev/null", $hwOutput, $hwRet);
+    if (!$hwRet && !empty($hwOutput)) {
+        foreach ($hwOutput as $hwLine) {
+            if (preg_match('/^channels:\s*(\d+)/', trim($hwLine), $chMatch)) {
+                $channels = max($channels, intval($chMatch[1]));
+            }
+        }
+    }
+    unset($hwOutput);
+
+    // USB cards: /proc/asound/cardN/stream0 lists every playback altset with
+    // its exact channel count — full capability without opening the card.
+    if ($isUsbCard) {
+        $stream0 = @file_get_contents("/proc/asound/card$cardNum/stream0");
+        if (!empty($stream0)) {
+            $capturePos = strpos($stream0, "\nCapture:");
+            $playSection = ($capturePos !== false) ? substr($stream0, 0, $capturePos) : $stream0;
+            if (preg_match_all('/\bChannels:\s+(\d+)/', $playSection, $chMatches)) {
+                foreach ($chMatches[1] as $ch) {
+                    $channels = max($channels, intval($ch));
+                }
+            }
+        }
+    }
+
+    // HDA codecs (HDMI etc.) publish max channels in /proc codec info.
+    exec("cat /proc/asound/card$cardNum/codec* 2>/dev/null | grep -i 'max channels' | head -1", $codecOutput);
+    if (!empty($codecOutput) && preg_match('/(\d+)/', $codecOutput[0], $chMatch)) {
+        $channels = max($channels, intval($chMatch[1]));
+    }
+    unset($codecOutput);
+
+    // Known multi-channel I2S cards whose drivers only advertise a continuous
+    // channel range and expose none of the capability info above.
+    $channels = max($channels, PipeWireCardChannelQuirk($aplayLine));
+
+    return min($channels, 8); // cap at 7.1
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Quirk table for multi-channel I2S cards whose drivers advertise only a
+// continuous channel range (e.g. "[2 8]"), which the conservative non-USB
+// heuristics clamp to stereo (issue #2620).  $cardDesc is any descriptive
+// text for the card (aplay -l line, /proc/asound/cards entry, card name).
+// Returns the minimum channel count the card must be configured with, or 0.
+// Keep in sync with quirkMinChannelsForCard() in src/boot/FPPINIT_Audio.cpp.
+function PipeWireCardChannelQuirk($cardDesc)
+{
+    $quirks = array(
+        'hifiberry_dac8x' => 8, // HiFiBerry DAC8x / Raspiaudio 8xOUT: 4x stereo DACs on one I2S bus
+    );
+    $descLc = strtolower($cardDesc);
+    foreach ($quirks as $needle => $qch) {
+        if (strpos($descLc, $needle) !== false) {
+            return $qch;
+        }
+    }
+    return 0;
+}
+
+/////////////////////////////////////////////////////////////////////////////
 // GET /api/pipewire/audio/cards
 // Returns available ALSA cards with channel info for group membership UI.
 // Uses stable ALSA card IDs (from /proc/asound/) as primary identifiers
@@ -759,6 +833,7 @@ function GetPipeWireAudioCards()
     // get one by-id entry pointing to one of them, leaving the other unresolvable).
     $pwSinkByAlsaCardNum = array(); // alsa card number (int) => PW sink node name
     $pwSinkByAlsaId = array(); // ALSA card ID string => PW sink node name (for fpp_alsa_* sinks)
+    $pwChannelsByNodeName = array(); // PW sink node name => configured channel count
     $pwDumpOutput = shell_exec($SUDO . ' ' . $pwEnv . ' pw-dump 2>/dev/null');
     if ($pwDumpOutput) {
         $pwObjects = json_decode($pwDumpOutput, true);
@@ -773,6 +848,9 @@ function GetPipeWireAudioCards()
                 $pwName = isset($pwProps['node.name']) ? $pwProps['node.name'] : '';
                 if ($pwName === '')
                     continue;
+                if (isset($pwProps['audio.channels'])) {
+                    $pwChannelsByNodeName[$pwName] = intval($pwProps['audio.channels']);
+                }
                 // Strategy 1: WirePlumber-created sinks have alsa.card property
                 $pwAlsaCard = isset($pwProps['alsa.card']) ? strval($pwProps['alsa.card']) : '';
                 if ($pwAlsaCard !== '') {
@@ -830,7 +908,6 @@ function GetPipeWireAudioCards()
                     $seenCards[$cardId] = true;
 
                     // Get channel info for this card
-                    $channels = 2; // Default stereo
                     $channelInfo = array();
                     exec($SUDO . " amixer -c $cardNum scontrols 2>/dev/null | cut -f2 -d\"'\"", $mixerOutput, $mixerRet);
                     if (!$mixerRet && !empty($mixerOutput)) {
@@ -840,28 +917,8 @@ function GetPipeWireAudioCards()
                     }
                     unset($mixerOutput);
 
-                    // Try to detect channel count from hw params
-                    exec("cat /proc/asound/card$cardNum/pcm0p/sub0/hw_params 2>/dev/null", $hwOutput, $hwRet);
-                    if (!$hwRet && !empty($hwOutput)) {
-                        foreach ($hwOutput as $hwLine) {
-                            if (preg_match('/^channels:\s*(\d+)/', trim($hwLine), $chMatch)) {
-                                $channels = intval($chMatch[1]);
-                            }
-                        }
-                    }
-                    unset($hwOutput);
-
-                    // Also check codec info for max channels
-                    exec("cat /proc/asound/card$cardNum/codec* 2>/dev/null | grep -i 'max channels' | head -1", $codecOutput);
-                    if (!empty($codecOutput)) {
-                        if (preg_match('/(\d+)/', $codecOutput[0], $chMatch)) {
-                            $maxCh = intval($chMatch[1]);
-                            if ($maxCh > $channels) {
-                                $channels = $maxCh;
-                            }
-                        }
-                    }
-                    unset($codecOutput);
+                    $isUsbCard = strpos($line, 'USB Audio') !== false;
+                    $channels = DetectAlsaCardMaxChannels($cardNum, $line, $isUsbCard);
 
                     // Stable identifiers
                     $controlKey = 'controlC' . $cardNum;
@@ -914,6 +971,14 @@ function GetPipeWireAudioCards()
                                 $pwNodeName = 'alsa_output.' . $pwCardIdentifier . '.' . $profiles[0];
                             }
                         }
+                    }
+
+                    // The resolved PipeWire sink knows how many channels the
+                    // adapter was configured with (boot-time detection in
+                    // FPPINIT_Audio.cpp) — trust it when it exceeds what we
+                    // detected here without opening the device.
+                    if (!empty($pwNodeName) && isset($pwChannelsByNodeName[$pwNodeName])) {
+                        $channels = max($channels, min($pwChannelsByNodeName[$pwNodeName], 8));
                     }
 
                     $cards[] = array(
@@ -3893,6 +3958,15 @@ function GeneratePipeWireGroupsConfig($groups, $returnCardMap = false)
                                 }
                             }
                         }
+                        // Known multi-channel I2S cards override the stereo
+                        // range clamp above (issue #2620).  Match against the
+                        // card's /proc/asound/cards entry, which carries the
+                        // driver name (the card ID alone does not).
+                        $procCards = @file_get_contents('/proc/asound/cards');
+                        if (!empty($procCards)
+                            && preg_match('/^\s*' . intval($cardNum) . '\s+\[[^\]]*\]:\s*(.*)$/m', $procCards, $pcM)) {
+                            $unresolvedMaxCh = min(8, max($unresolvedMaxCh, PipeWireCardChannelQuirk($pcM[1])));
+                        }
                         // Detect best audio format: S32 > S24 > S16
                         $unresolvedFmt = 'S16LE';
                         if (preg_match('/FORMAT[^:]*:\s+(.+)/i', $testOutput, $fmtM)) {
@@ -4352,14 +4426,57 @@ function GeneratePipeWireGroupsConfig($groups, $returnCardMap = false)
                 $memberNodeName = $cardNodeMap[$cardId];
             }
 
-            // Channel mapping for this member within the group
+            // Channel mapping for this member within the group.
+            //
+            // combine-stream pairs combine.audio.position[i] with
+            // audio.position[i] positionally, matching the former against the
+            // group's channel labels.  Two failure modes must be filtered out
+            // here (issue #2620):
+            //   - "" (the UI's "-- None --"): an empty token silently vanishes
+            //     when PipeWire parses the array, shifting every later
+            //     channel's mapping by one.
+            //   - a label not present in the group's layout (stale mapping
+            //     after the group's channel count was reduced): combine-stream
+            //     falls back to SAME-INDEX routing, scrambling the mapping
+            //     instead of muting the channel.
+            // Dropping the pair from BOTH arrays leaves that card channel with
+            // no stream channel bearing its label, which plays silence.
             $memberChannels = isset($member['channels']) ? intval($member['channels']) : 2;
             $memberPos = isset($channelPositions[$memberChannels]) ? $channelPositions[$memberChannels] : "[ FL FR ]";
+            $memberPosList = isset($channelPositionArrays[$memberChannels]) ? $channelPositionArrays[$memberChannels] : $channelPositionArrays[2];
+            $groupPosList = isset($channelPositionArrays[$groupChannels]) ? $channelPositionArrays[$groupChannels] : $channelPositionArrays[2];
 
-            // If channel mapping is specified, use it
-            if (isset($member['channelMapping']) && !empty($member['channelMapping'])) {
-                $combinePos = "[ " . implode(" ", $member['channelMapping']['groupChannels']) . " ]";
-                $streamPos = "[ " . implode(" ", $member['channelMapping']['cardChannels']) . " ]";
+            $mappingProvided = isset($member['channelMapping']) && !empty($member['channelMapping'])
+                && isset($member['channelMapping']['cardChannels'])
+                && isset($member['channelMapping']['groupChannels']);
+            if ($mappingProvided) {
+                $mapCard = $member['channelMapping']['cardChannels'];
+                $mapGroup = $member['channelMapping']['groupChannels'];
+            } else {
+                // Identity mapping — same filter applies so member channels
+                // without a matching group label go silent rather than being
+                // index-scrambled (e.g. an 8ch card in a stereo group).
+                $mapCard = $memberPosList;
+                $mapGroup = $memberPosList;
+            }
+            $validCard = array();
+            $validGroup = array();
+            $pairCount = min(count($mapCard), count($mapGroup));
+            for ($pi = 0; $pi < $pairCount; $pi++) {
+                $gLabel = trim(strval($mapGroup[$pi]));
+                if ($gLabel === '' || !in_array($gLabel, $groupPosList))
+                    continue;
+                $validCard[] = trim(strval($mapCard[$pi]));
+                $validGroup[] = $gLabel;
+            }
+            if (!empty($validCard)) {
+                $combinePos = "[ " . implode(" ", $validGroup) . " ]";
+                $streamPos = "[ " . implode(" ", $validCard) . " ]";
+            } elseif ($mappingProvided) {
+                // Every channel mapped to None — the member is intentionally
+                // silent; don't create a stream for it at all.
+                $conf .= "        # Member $memberNodeName skipped — all channels mapped to None\n";
+                continue;
             } else {
                 $combinePos = $memberPos;
                 $streamPos = $memberPos;

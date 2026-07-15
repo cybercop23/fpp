@@ -911,8 +911,8 @@
                     var sel = (groupPositions[p] === mappedTo) ? ' selected' : '';
                     html += '<option value="' + groupPositions[p] + '"' + sel + '>' + groupPositions[p] + '</option>';
                 }
-                // Also offer AUX positions for advanced setups
-                html += '<option value="">-- None --</option>';
+                // Silence this card channel (dropped from the generated mapping)
+                html += '<option value=""' + (mappedTo === '' ? ' selected' : '') + '>-- None --</option>';
                 html += '</select>';
                 html += '</div>';
             }
@@ -1146,7 +1146,28 @@
         }
 
         function UpdateGroupChannels(index, channels) {
-            audioGroups.groups[index].channels = channels;
+            var group = audioGroups.groups[index];
+            group.channels = channels;
+            // Sanitize member mappings: entries pointing at group positions
+            // that no longer exist would silently fall back to same-index
+            // routing in PipeWire's combine-stream, scrambling the mapping.
+            var groupPositions = CHANNEL_POSITIONS[channels] || CHANNEL_POSITIONS[2];
+            for (var m = 0; m < group.members.length; m++) {
+                var mapping = group.members[m].channelMapping;
+                if (!mapping || !mapping.cardChannels || !mapping.groupChannels) continue;
+                for (var c = 0; c < mapping.groupChannels.length; c++) {
+                    var g = mapping.groupChannels[c];
+                    if (g !== '' && groupPositions.indexOf(g) < 0) {
+                        // Prefer keeping the card channel's own position if the
+                        // new layout has it, otherwise wrap into the layout —
+                        // same rule as BuildDefaultChannelMapping().
+                        var cardCh = mapping.cardChannels[c];
+                        mapping.groupChannels[c] = (groupPositions.indexOf(cardCh) >= 0)
+                            ? cardCh
+                            : groupPositions[c % groupPositions.length];
+                    }
+                }
+            }
             // Re-render to update channel mapping dropdowns
             RenderGroups();
         }
@@ -1186,11 +1207,21 @@
             var member = audioGroups.groups[groupIndex].members[memberIndex];
             member.cardId = cardId;
 
-            // Find card info and auto-set channels
+            // Find card info and auto-set channels to the card's capability
+            // (snapped down to the nearest offered option) so multi-channel
+            // cards drive all their outputs without manual reconfiguration.
             for (var i = 0; i < availableCards.length; i++) {
                 if (availableCards[i].cardId === cardId) {
                     member.cardName = availableCards[i].cardName;
-                    member.channels = Math.min(availableCards[i].channels, 2); // Default to stereo
+                    var cap = availableCards[i].channels || 2;
+                    var opts = [8, 6, 4, 2, 1];
+                    member.channels = 2;
+                    for (var o = 0; o < opts.length; o++) {
+                        if (opts[o] <= cap) {
+                            member.channels = opts[o];
+                            break;
+                        }
+                    }
                     break;
                 }
             }

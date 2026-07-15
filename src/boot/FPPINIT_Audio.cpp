@@ -161,6 +161,27 @@ static std::string normalizeCardIdForNode(const std::string& cardId) {
     return n;
 }
 
+// Known multi-channel I2S cards whose drivers advertise a continuous channel
+// range (e.g. "CHANNELS: [2 8]") that the non-USB range heuristic below would
+// clamp to stereo, and whose live /proc hw_params may show a stale 2-channel
+// negotiation left over from a previous config.  Returns the minimum channel
+// count the card must be configured with, or 0 when no quirk applies.  Matched
+// against the card's full `aplay -l` line (issue #2620).
+// Mirrored in DetectAlsaCardMaxChannels() in www/api/controllers/pipewire.php.
+static int quirkMinChannelsForCard(const std::string& aplayLine) {
+    static const std::pair<const char*, int> quirks[] = {
+        { "hifiberry_dac8x", 8 }, // HiFiBerry DAC8x / Raspiaudio 8xOUT: 4x stereo DACs on one I2S bus
+    };
+    std::string lineLc = aplayLine;
+    std::transform(lineLc.begin(), lineLc.end(), lineLc.begin(), ::tolower);
+    for (const auto& [needle, ch] : quirks) {
+        if (lineLc.find(needle) != std::string::npos) {
+            return ch;
+        }
+    }
+    return 0;
+}
+
 // Return the single-group member cardId recorded in a Simple-mode groups JSON,
 // or "" if the file is absent/empty/unparseable or has no member. Simple mode
 // always has exactly one group with one member (the selected output card).
@@ -690,6 +711,27 @@ void setupAudio() {
         existingAdapterCids.insert((*it)[1].str());
     }
     bool sinkConfStillValid = !existingSinkConf.empty() && existingAdapterCids == adapterCandidateCids;
+    // A conf written before a card's channel-count quirk existed (or while the
+    // card was held open at a stale stereo negotiation) can cover all cards yet
+    // still pin a known multi-channel card to too few channels.  Verify each
+    // quirk card's adapter declares at least the quirk count; otherwise reprobe.
+    if (usePipeWireBackend && sinkConfStillValid) {
+        for (const auto& [key, cardName] : cards) {
+            int quirkCh = cardLines.count(key) ? quirkMinChannelsForCard(cardLines[key]) : 0;
+            if (quirkCh <= 0) continue;
+            std::string cId = getAlsaCardId(std::stoi(key.substr(5)));
+            if (cId.empty()) cId = cardName;
+            std::regex chRe("node\\.name = \"fpp_alsa_" + normalizeCardIdForNode(cId) +
+                            "\"[\\s\\S]*?audio\\.channels = (\\d+)");
+            std::smatch chM;
+            if (std::regex_search(existingSinkConf, chM, chRe) && std::stoi(chM[1].str()) < quirkCh) {
+                printf("FPP - PipeWire: %s adapter has %s channels but card needs %d; regenerating\n",
+                       cId.c_str(), chM[1].str().c_str(), quirkCh);
+                sinkConfStillValid = false;
+                break;
+            }
+        }
+    }
     if (usePipeWireBackend && sinkConfStillValid) {
         printf("FPP - PipeWire: ALSA sink adapters already match present cards; skipping probe\n");
         // bootAdapterCids must still reflect the conf's adapters for the
@@ -842,6 +884,18 @@ void setupAudio() {
                         int ch = std::stoi((*it)[1].str());
                         if (ch > maxChannels) maxChannels = ch;
                     }
+                }
+            }
+            // Quirk override: known multi-channel I2S cards report a continuous
+            // range and would be clamped to stereo above; a busy card can also
+            // synthesise a stale 2ch value from /proc.  Either way the quirk
+            // count wins (issue #2620: HiFiBerry DAC8x stuck at 2 channels).
+            if (cardLines.count(key)) {
+                int quirkCh = quirkMinChannelsForCard(cardLines[key]);
+                if (quirkCh > maxChannels) {
+                    printf("FPP - PipeWire: card %d (%s) quirk raises channels %d -> %d\n",
+                           cardNum, cId.c_str(), maxChannels, quirkCh);
+                    maxChannels = quirkCh;
                 }
             }
             if (maxChannels > 8) maxChannels = 8; // cap at 7.1
@@ -1163,6 +1217,43 @@ void setupAudio() {
     // session-bus cascade, so skipping it on an unchanged boot (always the case
     // on a no-soundcard board) saves ~10-15s on a single-core SBC.
     if (usePipeWireBackend && !runningInDocker) {
+        // Keep the FPP PipeWire systemd units current.  install_pipewire.sh
+        // copies them once at install time and nothing ever refreshed them
+        // afterwards, so unit fixes (e.g. the RestartSec/StartLimitIntervalSec
+        // backoff that stops PipeWire from permanently giving up when a USB
+        // sound card enumerates a few seconds late) never reached
+        // already-installed systems.  Only refresh units that are already
+        // installed -- a missing unit means install_pipewire.sh hasn't run yet.
+        bool unitsChanged = false;
+        for (const char* svc : { "fpp-pipewire.service", "fpp-wireplumber.service", "fpp-pipewire-pulse.service" }) {
+            std::string unitSrc = std::string("/opt/fpp/etc/systemd/") + svc;
+            std::string unitDst = std::string("/lib/systemd/system/") + svc;
+            if (FileExists(unitSrc) && FileExists(unitDst) && GetFileContents(unitSrc) != GetFileContents(unitDst)) {
+                printf("FPP - Updating systemd unit %s\n", svc);
+                CopyFileContents(unitSrc, unitDst);
+                unitsChanged = true;
+            }
+        }
+        if (unitsChanged) {
+            exec("/usr/bin/systemctl daemon-reload");
+        }
+
+        // The WirePlumber linking hook (blocks rogue default-target fallback
+        // links for fpp_* nodes) is needed in ALL PipeWire modes, but was only
+        // installed by the Simple-mode C++ path or a groups Apply from the UI.
+        // A groups-mode box that never re-applied since the hook shipped runs
+        // without it: a member stream whose target is missing (e.g. an fx
+        // chain for a disconnected HDMI output) gets fallback-linked to the
+        // default sink, double-opening that device and stalling the whole
+        // graph mid-playback.  Install it here and restart the stack when it
+        // was newly installed (WirePlumber only reads hooks at startup).
+        bool linkingHookPresent = FileExists("/usr/share/wireplumber/scripts/linking/fpp-block-combine-fallback.lua")
+                               && FileExists("/etc/wireplumber/wireplumber.conf.d/60-fpp-block-combine-fallback.conf");
+        if (!linkingHookPresent && ensureWirePlumberLinkingHook()) {
+            printf("FPP - Installed WirePlumber FPP linking hook\n");
+            audioConfigChanged = true;
+        }
+
         // Validate/regenerate the audio group config from the JSON, and use its
         // exit code (2 == it changed/created the .conf) to decide whether a
         // restart is needed. Run it whenever there's a groups config -- NOT gated
@@ -1212,7 +1303,23 @@ void setupAudio() {
             }
         }
 
-        if (!audioConfigChanged) {
+        // The skip-restart optimisation below assumes PipeWire is already
+        // running (started at boot with the persisted configs).  Verify that
+        // assumption: with a pre-backoff unit file, a USB sound card that
+        // enumerates a few seconds late makes PipeWire exhaust its start-limit
+        // burst and give up early in boot (adapter creation is fatal on a
+        // missing ALSA device), leaving the whole stack down.  Skipping the
+        // restart then silences all audio even though every config matches.
+        std::string pwState = execAndReturn("/usr/bin/systemctl is-active fpp-pipewire.service");
+        TrimWhiteSpace(pwState);
+        bool pipewireRunning = (pwState == "active");
+        bool pipewireRestarted = false;
+        if (!pipewireRunning) {
+            printf("FPP - PipeWire service is '%s'; recovering audio stack\n", pwState.c_str());
+            // Clear any start-limit lockout so the restart below can succeed.
+            exec("/usr/bin/systemctl reset-failed fpp-pipewire.service fpp-wireplumber.service fpp-pipewire-pulse.service 2>/dev/null");
+        }
+        if (!audioConfigChanged && pipewireRunning) {
             // Config matches what PipeWire loaded at boot -- restarting would
             // change nothing (and the volume-restore below only exists to undo a
             // restart's reset of WirePlumber state, so it's unneeded too).
@@ -1222,9 +1329,11 @@ void setupAudio() {
             // to load it, but there are no USB cards to enumerate and no
             // card-number shifts to resolve, so skip the enumerate/regen dance.
             exec("/usr/bin/systemctl restart fpp-pipewire.service fpp-wireplumber.service fpp-pipewire-pulse.service");
+            pipewireRestarted = true;
             printf("FPP - No real sound card present; skipping PipeWire device enumeration/regeneration\n");
         } else {
             exec("/usr/bin/systemctl restart fpp-pipewire.service fpp-wireplumber.service fpp-pipewire-pulse.service");
+            pipewireRestarted = true;
         }
 
         // Wait for WirePlumber to enumerate ALSA devices before regenerating
@@ -1236,7 +1345,7 @@ void setupAudio() {
         // fpp_alsa_* adapter loaded from 95/97 conf), so there are no card→sink
         // mappings to re-resolve via pw-dump and no need to fork the PHP
         // regenerate/restore-volume scripts. The single restart above is enough.
-        if (audioConfigChanged && hasGroupsConfig && !noRealSoundcard && !cppGeneratedSimpleConfig) {
+        if ((audioConfigChanged || pipewireRestarted) && hasGroupsConfig && !noRealSoundcard && !cppGeneratedSimpleConfig) {
             printf("FPP - Waiting for WirePlumber to enumerate devices...\n");
             std::this_thread::sleep_for(std::chrono::seconds(3));
 
