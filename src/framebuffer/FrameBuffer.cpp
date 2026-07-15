@@ -222,7 +222,16 @@ FrameBuffer* FrameBuffer::createFrameBuffer(const Json::Value& config) {
         isSmallModel = (width < 1280 || height < 720);
     }
     
-    bool tryKMS = isDPI || device.empty() || !isSmallModel;
+    // #2713: named DRM connectors (DSI/HDMI/DPI/DisplayPort) can only be driven
+    // correctly via KMS (it scales any model size onto the panel and page-flips,
+    // so it scans out reliably). IOCTL fbdev cannot present a buffer smaller than
+    // the panel mode and does not reliably scan out on vc4, so never route a
+    // connector-named device to IOCTL.
+    bool isConnector = isDPI ||
+                       device.find("DSI") != std::string::npos ||
+                       device.find("HDMI") != std::string::npos ||
+                       device.find("DisplayPort") != std::string::npos;
+    bool tryKMS = isConnector || device.empty() || !isSmallModel;
     
     if (tryKMS) {
         fb = new KMSFrameBuffer();
