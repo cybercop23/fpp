@@ -384,6 +384,29 @@ int ChannelTester::SetupTest(const std::string configStr) {
     return SetupTest(config);
 }
 int ChannelTester::SetupTest(const Json::Value& config) {
+    // The config reaches here straight from the API and the command socket, so
+    // it can be any shape at all.  The test patterns read it with jsoncpp
+    // accessors, which throw on a type mismatch (a color sent as "#202020"
+    // rather than an int, say), and the command dispatch above has no handler
+    // for that, so a single malformed request used to abort fppd.
+    try {
+        return SetupTestInternal(config);
+    } catch (const Json::Exception& e) {
+        LogErr(VB_CHANNELOUT, "Ignoring malformed Test Pattern config: %s\n", e.what());
+        // A pattern that threw part way through Init() must not be left
+        // behind: Testing() only checks that the pointer is set, so it would
+        // be handed to OverlayTestData with its channel data unallocated.
+        // This mirrors the cleanup the Init() failure path below does.
+        std::unique_lock<std::mutex> lock(m_testLock);
+        if (m_testPattern) {
+            delete m_testPattern;
+            m_testPattern = nullptr;
+        }
+        return 0;
+    }
+}
+
+int ChannelTester::SetupTestInternal(const Json::Value& config) {
     // unique_lock (not lock_guard) because this function unlocks and
     // re-locks mid-function below while waiting for the channel output
     // loop to clear test data.

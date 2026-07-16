@@ -41,6 +41,10 @@ public:
     static ChannelTester INSTANCE;
 
 private:
+    // does the work; SetupTest() wraps it to contain the jsoncpp exceptions a
+    // malformed config can raise
+    int SetupTestInternal(const Json::Value& config);
+
     TestPatternBase* m_testPattern;
     std::mutex m_testLock;
     std::string m_configStr;

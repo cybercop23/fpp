@@ -42,12 +42,16 @@ function testMode_Get()
  */
 function testMode_Set()
 {
-	global $args;
     $json = strval(file_get_contents('php://input'));
-    $input = json_decode($json, true);
 
-	SendCommand(sprintf("SetTestMode,%s", $json));
-    return json(json_decode(array("status" => "OK")));
+    // the body is forwarded to fppd as-is, so make sure it is at least a JSON
+    // object before handing it over
+    if (!is_array(json_decode($json, true))) {
+        return json(array("status" => "ERROR: Invalid JSON body"));
+    }
+
+    SendCommand(sprintf("SetTestMode,%s", $json));
+    return json(array("status" => "OK"));
 }
 
 ?>
