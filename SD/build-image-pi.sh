@@ -51,7 +51,7 @@ SKIP_ZIP="${SKIP_ZIP:-0}"                    # 1 => leave raw .img only, no zip
 USE_LOCAL_SRC="${USE_LOCAL_SRC:-0}"          # 1 => seed /opt/fpp from local tree
 FPP_SRC_DIR="${FPP_SRC_DIR:-$(readlink -f "$(dirname "$(readlink -f "$0")")/..")}"
 # Default OFF (don't skip) - need the latest fixes for various GPU/media issues
-SKIP_KERNEL_UPDATE="${SKIP_KERNEL_UPDATE:0}"    # 1 => skip rpi-update next
+SKIP_KERNEL_UPDATE="${SKIP_KERNEL_UPDATE:-0}"    # 1 => skip rpi-update next
 
 usage() {
     cat <<EOF
