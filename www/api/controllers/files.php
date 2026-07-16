@@ -821,6 +821,11 @@ function ZipLogs($zip)
     exec($cmd, $output, $return_val);
     unset($output);
 
+    // Gather system health check output
+    $cmd = escapeshellarg($settings['fppDir'] . "/scripts/healthCheck") . " > " . escapeshellarg($settings['mediaDirectory'] . "/logs/healthCheck.log") . " 2>&1";
+    exec($cmd, $output, $return_val);
+    unset($output);
+
     foreach (scandir($logDirectory) as $file) {
         if ($file == "." || $file == ".." || in_array($file, $ignore_files)) {
             continue;
@@ -835,14 +840,6 @@ function ZipLogs($zip)
     if (is_readable("/var/log/syslog")) {
         $zip->addFile("/var/log/syslog", "logs/syslog.log");
     }
-
-    exec("cat /proc/asound/cards", $output, $return_val);
-    if ($return_val != 0) {
-        error_log("Unable to read alsa cards");
-    } else {
-        $zip->addFromString("logs/asound/cards", implode("\n", $output) . "\n");
-    }
-    unset($output);
 
     exec("/usr/bin/git --work-tree=" . gitBaseDirectory() . "/ status", $output, $return_val);
     if ($return_val != 0) {
