@@ -158,10 +158,14 @@ LIBS_fpp_so += \
 ifneq ($(wildcard /usr/include/gstreamer-1.0/gst/gst.h),)
 CFLAGS += $(shell pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 gstreamer-net-1.0)
 LIBS_fpp_so += $(shell pkg-config --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-net-1.0)
-ifneq ($(wildcard /usr/include/libdrm/drm.h),)
+endif
+
+# DRM/KMS. fpp.cpp and framebuffer/KMSFrameBuffer.h enable the KMS code on
+# __has_include(<xf86drm.h>), so the flags have to key off that same header --
+# xf86drm.h itself pulls in <drm.h>, which only resolves with libdrm's -I.
+ifneq ($(wildcard /usr/include/xf86drm.h),)
 CFLAGS += $(shell pkg-config --cflags libdrm)
 LIBS_fpp_so += -ldrm
-endif
 endif
 
 

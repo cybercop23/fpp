@@ -5,10 +5,6 @@ LIBS_fpp_co_dpi_pixels_so=-L. -lfpp -ljsoncpp -lfpp_capeutils -Wl,-rpath=$(SRCDI
 
 CXXFLAGS_non-gpl/DPIPixels/DPIPixels.o += -Wno-address-of-packed-member
 
-ifneq ($(wildcard /usr/include/libdrm/drm.h),)
-CXXFLAGS_non-gpl/DPIPixels/DPIPixels.o += -I/usr/include/libdrm
-endif
-
 TARGETS += libfpp-co-DPIPixels.$(SHLIB_EXT)
 OBJECTS_ALL+=$(OBJECTS_fpp_co_dpi_pixels_so)
 
