@@ -25,6 +25,7 @@
 
 #include "../Warnings.h"
 #include "../common.h"
+#include "../settings.h"
 
 #include "ADS7828.h"
 #include "IIOSensorSource.h"

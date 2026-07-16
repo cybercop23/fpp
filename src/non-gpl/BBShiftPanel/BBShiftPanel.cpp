@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 
 // FPP includes
 #include "../../Sequence.h"
