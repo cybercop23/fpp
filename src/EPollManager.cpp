@@ -203,6 +203,23 @@ void EPollManager::updateFileDescriptorEvents(int fd, uint32_t events) {
 #endif
 }
 
+bool EPollManager::invokeCallback(int fd) {
+    // epoll_wait hands back a batch of events.  A callback earlier in the batch can
+    // remove descriptors for later events in the same batch (Bridge_Initialize tearing
+    // down its sockets when the output ranges change, avahi freeing a watch, ...), so
+    // by the time we get here the entry may be gone.  Those events are stale and the
+    // descriptor is no longer being watched, so drop them.
+    auto it = callbacks.find(fd);
+    if (it == callbacks.end() || !it->second) {
+        return false;
+    }
+    // Copy the callback out of the map before invoking it.  A callback is allowed to
+    // remove its own descriptor (fpp_watch_free() does exactly that), which would
+    // otherwise destroy the std::function while it is still executing.
+    std::function<bool(int)> callback = it->second;
+    return callback(fd);
+}
+
 EPollManager::WaitResult EPollManager::waitForEvents(int mstimeout) {
     // Implementation for waiting for events and calling the appropriate callbacks
     constexpr int MAX_EVENTS = 40;
@@ -232,7 +249,7 @@ EPollManager::WaitResult EPollManager::waitForEvents(int mstimeout) {
                 }
                 continue;
             }
-            retVal |= callbacks[events[x].ident](events[x].ident);
+            retVal |= invokeCallback(events[x].ident);
 #else
             if (events[x].data.fd == timerFd) {
                 uint64_t expirations;
@@ -242,7 +259,7 @@ EPollManager::WaitResult EPollManager::waitForEvents(int mstimeout) {
                 }
                 continue;
             }
-            retVal |= callbacks[events[x].data.fd](events[x].data.fd);
+            retVal |= invokeCallback(events[x].data.fd);
 #endif
         }
     } else {

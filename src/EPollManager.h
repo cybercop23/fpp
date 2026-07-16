@@ -74,6 +74,9 @@ public:
 
     void shutdown();
 private:
+    // Invoke the callback registered for fd, if it is still registered
+    bool invokeCallback(int fd);
+
     int epollf = -1;
     int timerFd = -1;
     std::function<void()> timerCallback;
