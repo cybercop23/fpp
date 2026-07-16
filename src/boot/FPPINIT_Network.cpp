@@ -417,60 +417,26 @@ void setupNetwork(bool fullReload) {
         reloadApache = true;
     }
 
-    // Configure ntpsec to ignore DHCP NTP servers unless explicitly enabled
-    std::string ntpsecDefaults = "/etc/default/ntpsec";
+    // FPP's NTP daemon is chrony. Large-offset stepping (ntpd's "-g") is handled
+    // by the "makestep" directive in /etc/chrony/chrony.conf, so there is nothing
+    // to inject per-boot. Here we only reconcile DHCP-provided NTP servers with
+    // the UseNTPFromDHCP setting: the networkd-dispatcher chrony hook drops any
+    // DHCP servers into /run/chrony-dhcp (consumed via "sourcedir" in
+    // chrony.conf) when the setting is enabled. When it's disabled, make sure
+    // none linger from a previous configuration. chrony is started after
+    // fpp_postnetwork, so clearing the dir now is enough -- no reload needed.
     std::string useNTPFromDHCP;
     getRawSetting("UseNTPFromDHCP", useNTPFromDHCP);
-    std::string ignoreDHCP = (useNTPFromDHCP == "1") ? "" : "yes";
-
-    std::string ntpsecConfig = GetFileContents(ntpsecDefaults);
-    if (!ntpsecConfig.empty()) {
-        // Update the IGNORE_DHCP setting in /etc/default/ntpsec
-        std::string newConfig = ntpsecConfig;
-        bool needsRestart = false;
-
-        size_t pos = newConfig.find("IGNORE_DHCP=");
-        if (pos != std::string::npos) {
-            size_t lineEnd = newConfig.find('\n', pos);
-            std::string oldLine = newConfig.substr(pos, lineEnd - pos);
-            std::string newLine = "IGNORE_DHCP=\"" + ignoreDHCP + "\"";
-            newConfig.replace(pos, oldLine.length(), newLine);
-            needsRestart = (newConfig != ntpsecConfig);
-        }
-
-        // Ensure -g flag is set in NTPD_OPTS to allow large time corrections on boot
-        // This is critical for systems without RTC that may boot with wildly incorrect times
-        pos = newConfig.find("NTPD_OPTS=");
-        if (pos != std::string::npos) {
-            size_t lineEnd = newConfig.find('\n', pos);
-            std::string optsLine = newConfig.substr(pos, lineEnd - pos);
-            // Check if -g flag is already present
-            if (optsLine.find("-g") == std::string::npos) {
-                // Add -g flag after NTPD_OPTS="
-                size_t quotePos = optsLine.find('"');
-                if (quotePos != std::string::npos) {
-                    std::string newOptsLine = optsLine.substr(0, quotePos + 1) + "-g " + optsLine.substr(quotePos + 1);
-                    newConfig.replace(pos, optsLine.length(), newOptsLine);
-                    needsRestart = true;
-                }
-            }
-        }
-
-        if (needsRestart) {
-            PutFileContents(ntpsecDefaults, newConfig);
-            // Remove any DHCP-generated NTP config to force reload
-            if (ignoreDHCP == "yes" && FileExists("/run/ntpsec/ntp.conf.dhcp")) {
-                unlink("/run/ntpsec/ntp.conf.dhcp");
-            }
-            execbg("/usr/bin/systemctl reload-or-restart ntpsec.service &");
-        }
+    if (useNTPFromDHCP != "1") {
+        exec("/usr/bin/rm -f /run/chrony-dhcp/*.sources 2>/dev/null");
     }
 
-    // Auto-detect default gateway as a fallback NTP server so that ntpsec has
+    // Auto-detect default gateway as a fallback NTP server so that chrony has
     // a reachable peer when internet pool servers are blocked (e.g. behind
-    // double NAT). LAN traffic to the gateway does not cross any NAT boundary.
-    // ntpsec gracefully ignores non-responsive servers, so this is safe even
-    // if the gateway does not run NTP.
+    // double NAT / a gateway that drops NTP replies -- see issue #2736). LAN
+    // traffic to the gateway does not cross any NAT boundary. chrony gracefully
+    // ignores non-responsive servers, so this is safe even if the gateway does
+    // not run NTP.
     {
         std::string gw = execAndReturn(
             "/usr/bin/ip route show default 2>/dev/null | /usr/bin/awk '{print $3}'");
@@ -478,12 +444,12 @@ void setupNetwork(bool fullReload) {
         if (!gw.empty()) {
             struct sockaddr_in sa;
             if (inet_pton(AF_INET, gw.c_str(), &(sa.sin_addr)) == 1) {
-                std::string ntpConf = GetFileContents("/etc/ntpsec/ntp.conf");
-                if (ntpConf.find("server " + gw) == std::string::npos) {
-                    ntpConf += "\n# Auto-detected default gateway fallback\nserver "
+                std::string chronyConf = GetFileContents("/etc/chrony/chrony.conf");
+                if (chronyConf.find("server " + gw) == std::string::npos) {
+                    chronyConf += "\n# Auto-detected default gateway fallback\nserver "
                             + gw + " minpoll 10 maxpoll 12 iburst\n";
-                    PutFileContents("/etc/ntpsec/ntp.conf", ntpConf);
-                    execbg("/usr/bin/systemctl reload-or-restart ntpsec.service &");
+                    PutFileContents("/etc/chrony/chrony.conf", chronyConf);
+                    execbg("/usr/bin/systemctl reload-or-restart chrony.service &");
                     printf("FPP - Added default gateway %s as fallback NTP server\n",
                            gw.c_str());
                 }
@@ -744,11 +710,13 @@ void handleBootDelay() {
 }
 
 // Minimal SNTP (RFC 4330) client: query an NTP server over UDP and step the
-// system clock to its transmit timestamp (second precision). ntpsec on Debian
-// 13 ships no one-shot client (ntpdig was dropped) and "ntpd -gq" takes ~20s to
-// produce a step; this sets the clock in ~1s so boot never blocks on it. The
-// ntpsec daemon refines to sub-millisecond afterwards. Must run as root
-// (clock_settime needs CAP_SYS_TIME). Returns true if the clock was set.
+// system clock to its transmit timestamp (second precision). This one-shot set
+// runs during boot so we never block ~20s waiting for the chrony daemon to step
+// the clock; chrony refines it to sub-millisecond afterwards. Note the socket is
+// left unbound, so the query sources from a random ephemeral port -- which (like
+// chrony itself) dodges routers/ISP gateways that drop NTP replies to source
+// port 123. Must run as root (clock_settime needs CAP_SYS_TIME). Returns true if
+// the clock was set.
 static bool quickSntpSet(const std::string& host, int timeoutSecs) {
     struct addrinfo hints {};
     hints.ai_family = AF_INET;
@@ -786,7 +754,7 @@ static bool quickSntpSet(const std::string& host, int timeoutSecs) {
 // Ensure the clock is sane before fppd starts - called AFTER waitForInterfacesUp
 // so we know network is available. On RTC-less boards the clock boots stale (at
 // the image build date), which would make schedules and logs wrong. Rather than
-// block boot for ~20s waiting for the ntpsec daemon to step the clock, do a
+// block boot for ~20s waiting for the chrony daemon to step the clock, do a
 // quick one-shot SNTP set now and continue; the daemon refines it afterwards.
 void handleTimeSyncWait() {
     int i = getRawSettingInt("bootDelay", -1);
@@ -821,10 +789,10 @@ void handleTimeSyncWait() {
 
     // Clock is stale (no RTC). Do a fast SNTP set against the configured server
     // and move on -- do NOT block on full NTP convergence. Use the first
-    // pool/server from ntp.conf so a site-local time server is honoured; fall
+    // pool/server from chrony.conf so a site-local time server is honoured; fall
     // back to FPP's pool.
     std::string ntpHost = execAndReturn(
-        "/usr/bin/awk '/^(pool|server)[[:space:]]/ { print $2; exit }' /etc/ntpsec/ntp.conf 2>/dev/null");
+        "/usr/bin/awk '/^(pool|server)[[:space:]]/ { print $2; exit }' /etc/chrony/chrony.conf 2>/dev/null");
     TrimWhiteSpace(ntpHost);
     if (ntpHost.empty()) {
         ntpHost = "falconplayer.pool.ntp.org";
@@ -842,9 +810,9 @@ void handleTimeSyncWait() {
         localtime_r(&currentTime, &tmNow);
         char buffer[26];
         strftime(buffer, 26, "%Y-%m-%d %H:%M:%S", &tmNow);
-        printf("FPP - Clock set via SNTP to %s; ntpsec will refine it in the background\n", buffer);
+        printf("FPP - Clock set via SNTP to %s; chrony will refine it in the background\n", buffer);
     } else {
-        printf("FPP - Quick SNTP set failed (no time server reachable yet); continuing, ntpsec will sync when available\n");
+        printf("FPP - Quick SNTP set failed (no time server reachable yet); continuing, chrony will sync when available\n");
     }
     unlink(delayFile.c_str());
     unlink(skipFile.c_str());

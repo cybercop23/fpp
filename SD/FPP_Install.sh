@@ -67,7 +67,7 @@ FPPBRANCH=${FPPBRANCH:-"master"}
 # user-supplied --os-version so the .img / .fppos filenames match what's
 # baked into the image itself).
 FPPIMAGEVER=${FPPIMAGEVER:-"2026-04"}
-FPPCFGVER="106"
+FPPCFGVER="116"
 FPPPLATFORM="UNKNOWN"
 FPPDIR=/opt/fpp
 FPPUSER=fpp
@@ -700,7 +700,7 @@ EOF
         if [ "${OSVER}" == "debian_12" ]; then
             PACKAGE_LIST="$PACKAGE_LIST python3-distutils"
         fi
-        PACKAGE_LIST="$PACKAGE_LIST ntpsec pipewire"
+        PACKAGE_LIST="$PACKAGE_LIST chrony pipewire"
         
         if $skip_apt_install; then
             echo "skipping apt install because skip_apt_install == $skip_apt_install"
@@ -1441,13 +1441,14 @@ cat > /etc/systemd/system/exim4-base.service.d/fpp-defer.conf <<'EOF'
 After=fpp_postnetwork.service
 EOF
 
-# ntpsec: fppinit's postNetwork now does a fast one-shot SNTP clock set, so the
-# ntpsec daemon isn't needed during the boot critical path -- it only refines
-# the clock afterwards. Start it after fpp_postnetwork so it's out of the
-# fppinit/networkd contention window on single-core SBCs.
-echo "FPP - Deferring ntpsec until after the clock is set in postNetwork"
-mkdir -p /etc/systemd/system/ntpsec.service.d
-cat > /etc/systemd/system/ntpsec.service.d/fpp-defer.conf <<'EOF'
+# chrony: fppinit's postNetwork now does a fast one-shot SNTP clock set, so the
+# chrony daemon isn't needed during the boot critical path -- it only refines
+# the clock afterwards (and serves time to the rest of the fleet). Start it
+# after fpp_postnetwork so it's out of the fppinit/networkd contention window on
+# single-core SBCs.
+echo "FPP - Deferring chrony until after the clock is set in postNetwork"
+mkdir -p /etc/systemd/system/chrony.service.d
+cat > /etc/systemd/system/chrony.service.d/fpp-defer.conf <<'EOF'
 [Unit]
 After=fpp_postnetwork.service
 EOF
@@ -1769,9 +1770,9 @@ EOF
 }
 
 finalize_image_pre_build() {
-    echo "FPP - Adding missing exim4 & ntpsec log directory"
-    mkdir -p /var/log/ntpsec
-    chown ntpsec:ntpsec /var/log/ntpsec
+    echo "FPP - Adding missing exim4 & chrony log directory"
+    mkdir -p /var/log/chrony
+    chown _chrony:_chrony /var/log/chrony 2>/dev/null || true
     mkdir -p /var/log/exim4
     chown Debian-exim /var/log/exim4
     chgrp Debian-exim /var/log/exim4
@@ -1932,11 +1933,66 @@ configure_apache
 
 
 configure_ntp() {
-    echo "FPP - Configuring NTP Daemon"
-    # Clear all existing servers/pools and set the falconplayer pool
-    sed -i '/^server.*/d' /etc/ntpsec/ntp.conf
-    sed -i '/^pool.*/d' /etc/ntpsec/ntp.conf
-    sed -i '$s/$/\npool falconplayer.pool.ntp.org iburst minpoll 8 maxpoll 12 prefer/' /etc/ntpsec/ntp.conf
+    echo "FPP - Configuring chrony (NTP daemon)"
+
+    # An older FPP (or the base image) may have shipped ntpsec; it and chrony
+    # both bind UDP/123, so make sure ntpsec is gone before chrony takes over.
+    systemctl disable --now ntpsec.service > /dev/null 2>&1 || true
+    if dpkg -l ntpsec > /dev/null 2>&1; then
+        apt-get -y purge ntpsec > /dev/null 2>&1 || true
+    fi
+    # systemd-timesyncd would also fight chrony for the clock/port; keep it off.
+    systemctl disable --now systemd-timesyncd.service > /dev/null 2>&1 || true
+    systemctl mask systemd-timesyncd.service > /dev/null 2>&1 || true
+
+    # Write FPP's managed chrony.conf. The pool/server line is rewritten by the
+    # "Override default NTP Server" setting (see SetNTPServer in settings.php);
+    # everything else is FPP policy.
+    cat > /etc/chrony/chrony.conf <<'EOF'
+# FPP-managed chrony configuration.
+# The pool/server source line below is rewritten by the "Override default NTP
+# Server" web setting; the rest is regenerated on install.
+
+# Time source. FPP's public pool by default; replaced by the ntpServer setting.
+pool falconplayer.pool.ntp.org iburst minpoll 8 maxpoll 12
+
+# Record the clock's drift rate so time stays reasonable across reboots even
+# without an RTC or a reachable upstream.
+driftfile /var/lib/chrony/chrony.drift
+
+# ntpd "-g" equivalent: step (rather than slew) the clock for the first few
+# updates so an RTC-less board that boots with a wildly wrong time corrects fast.
+makestep 1.0 3
+
+# Read from / write back to the hardware RTC when one is present.
+rtcsync
+
+# DHCP-provided NTP servers are dropped into this dir by the networkd-dispatcher
+# chrony hook, but only when the UseNTPFromDHCP setting is enabled. Empty/absent
+# otherwise, which is harmless.
+sourcedir /run/chrony-dhcp
+
+# --- FPP as an NTP server for the rest of the fleet -------------------------
+# FPP has always run an NTP server that other controllers can point at (via the
+# "Override default NTP Server" setting). Users run on arbitrary IP ranges, so
+# the server is NOT restricted to a particular subnet. chrony (unlike classic
+# ntpd) does not answer mode 6/7 management queries over the network, so this
+# only exposes basic time service.
+allow all
+# Serve our own clock even with no synced upstream, so a controller acting as
+# the site time source keeps answering when the internet path is down/filtered.
+# Stratum 10 stays well above real servers, so a reachable upstream is always
+# preferred over the local clock.
+local stratum 10
+EOF
+
+    # chrony.conf references sourcedir /run/chrony-dhcp, and /run is tmpfs (empty
+    # at boot). Have systemd-tmpfiles create it early so chronyd never starts
+    # against a missing directory.
+    cat > /etc/tmpfiles.d/fpp-chrony.conf <<'EOF'
+d /run/chrony-dhcp 0755 root root -
+EOF
+    mkdir -p /run/chrony-dhcp
 }
 configure_ntp
 
@@ -2119,7 +2175,7 @@ if $isimage; then
     # correctness and because anything copied out of the tree with "cp -a"
     # (preserving ownership) would otherwise carry the build uid into /etc. A
     # concrete failure: networkd-dispatcher refuses to run hooks in directories
-    # not owned by root, which broke the routable.d/ntpd fast time-sync hook.
+    # not owned by root, which broke the routable.d/chrony fast time-sync hook.
     # Do this before install_fpp_services so its copies inherit root ownership.
     echo "FPP - Setting root:root ownership on /opt/fpp"
     chown -R root:root /opt/fpp

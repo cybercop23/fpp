@@ -1,0 +1,48 @@
+#!/bin/sh
+# Runs when an interface becomes routable. Two jobs:
+#   1. Reconcile DHCP-provided NTP servers with the UseNTPFromDHCP setting.
+#   2. On a runtime network reconnect, nudge chrony to re-measure and step.
+#
+# During the initial boot, fppinit's postNetwork step already does a fast SNTP
+# clock set, so forcing a chrony step here is redundant and just piles
+# contention onto the boot critical path. "Still booting" = uptime under 120s
+# AND fppd not yet running; either being false means this is a runtime reconnect
+# (ethernet cable inserted, flaky wifi reconnecting) and we should resync.
+
+SETTINGS=/home/fpp/media/settings
+
+# --- 1. DHCP-provided NTP servers ------------------------------------------
+# chrony reads "sourcedir /run/chrony-dhcp" from chrony.conf. Populate it from
+# the NTP servers in the systemd-networkd DHCP leases, but only when enabled.
+mkdir -p /run/chrony-dhcp
+if grep -qE '^UseNTPFromDHCP = "?1"?' "$SETTINGS" 2>/dev/null; then
+    servers=$(awk -F= '/^NTP=/{print $2}' /run/systemd/netif/leases/* 2>/dev/null | tr ' ' '\n' | sort -u)
+    if [ -n "$servers" ]; then
+        : > /run/chrony-dhcp/dhcp.sources
+        for s in $servers; do
+            echo "server $s iburst" >> /run/chrony-dhcp/dhcp.sources
+        done
+    else
+        rm -f /run/chrony-dhcp/dhcp.sources
+    fi
+else
+    rm -f /run/chrony-dhcp/dhcp.sources
+fi
+/usr/bin/chronyc reload sources > /dev/null 2>&1 || true
+
+# --- 2. Runtime reconnect resync -------------------------------------------
+UPTIME=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
+if [ -n "$UPTIME" ] && [ "$UPTIME" -lt 120 ] && ! /usr/bin/pgrep -x fppd > /dev/null 2>&1; then
+    exit 0
+fi
+
+# Wait a moment for DNS to be fully available.
+sleep 2
+
+# Bring sources back online and force a fresh measurement + step. Unlike the old
+# "systemctl stop ntp; ntpd -gq; start" dance, chrony does this without dropping
+# the daemon, so it keeps serving the fleet the whole time.
+/usr/bin/chronyc online > /dev/null 2>&1 || true
+/usr/bin/chronyc burst 4/4 > /dev/null 2>&1 || true
+sleep 8
+/usr/bin/chronyc makestep > /dev/null 2>&1 || true

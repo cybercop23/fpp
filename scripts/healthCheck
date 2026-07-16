@@ -251,7 +251,7 @@ HC_NTPOffset() {
     ntp_synced=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null)
 
     if [ "$ntp_synced" != "yes" ]; then
-        if pgrep -x ntpd >/dev/null 2>&1; then
+        if pgrep -x chronyd >/dev/null 2>&1; then
             STATUS=2
             STATUSSTR="NTP daemon not synchronized"
         else
@@ -259,13 +259,13 @@ HC_NTPOffset() {
             STATUSSTR="NTP daemon not running"
         fi
     else
-        offsets=$(ntpq -nc peers 2>/dev/null | tail -n +3 | cut -c 62-66 | tr -d '\.-')
-        for offset in ${offsets}; do
-            if [ ${offset:-0} -ge ${limit:-100} ]; then
-                STATUS=0
-                STATUSSTR="Your time may be incorrect, please verify"
-            fi
-        done
+        # chrony reports the last correction via "chronyc tracking".
+        offset=$(chronyc -n tracking 2>/dev/null | awk -F': *' '/Last offset/ {print $2; exit}' | awk '{print $1}')
+        offms=$(awk -v o="${offset:-0}" 'BEGIN { o = (o < 0) ? -o : o; printf "%d", o * 1000 }')
+        if [ "${offms:-0}" -ge "${limit:-100}" ]; then
+            STATUS=0
+            STATUSSTR="Your time may be incorrect, please verify"
+        fi
     fi
 
     PrintItemFoot

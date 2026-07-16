@@ -138,9 +138,9 @@
                     ]
                 },
                 "NTPPeers": {
-                    "title": "NTP Peers",
+                    "title": "NTP Sources",
                     "description": "",
-                    "cmd": "pgrep ntpd > /dev/null && ntpq -c peers",
+                    "cmd": "pgrep -x chronyd > /dev/null && chronyc sources -v && echo && chronyc tracking",
                     "platforms": [
                         "all"
                     ]

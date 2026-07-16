@@ -280,13 +280,13 @@ HC_DNS() {
 
 HC_NTPOffset() {
     local status="pass"
-    local message=""
-    local ntp_synced
+    local message="Time synchronized"
+    local ntp_synced offset offms
 
     ntp_synced=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null)
 
     if [ "$ntp_synced" != "yes" ]; then
-        if pgrep -x ntpd >/dev/null 2>&1; then
+        if pgrep -x chronyd >/dev/null 2>&1; then
             status="warn"
             message="NTP daemon not synchronized"
         else
@@ -294,14 +294,13 @@ HC_NTPOffset() {
             message="NTP daemon not running"
         fi
     else
-        offsets=$(ntpq -nc peers 2>/dev/null | tail -n +3 | cut -c 62-66 | tr -d '\.-')
-        message="Time synchronized"
-        for offset in ${offsets}; do
-            if [ ${offset:-0} -ge ${limit:-100} ]; then
-                status="warn"
-                message="Time may be incorrect"
-            fi
-        done
+        # chrony reports the last correction via "chronyc tracking".
+        offset=$(chronyc -n tracking 2>/dev/null | awk -F': *' '/Last offset/ {print $2; exit}' | awk '{print $1}')
+        offms=$(awk -v o="${offset:-0}" 'BEGIN { o = (o < 0) ? -o : o; printf "%d", o * 1000 }')
+        if [ "${offms:-0}" -ge "${limit:-100}" ]; then
+            status="warn"
+            message="Time may be incorrect"
+        fi
     fi
 
     emit_event "ntp" "Time Sync (NTP)" "fa-clock" "$status" "$message"

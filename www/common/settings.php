@@ -45,25 +45,30 @@ function SetRTC($rtc)
 
 function RestartNTPD()
 {
-    exec("sudo service ntp restart");
+    exec("sudo systemctl restart chrony");
 }
 
 function SetNTPServer($value)
 {
-    $ntpConfigFile = '/etc/ntpsec/ntp.conf';
+    // FPP uses chrony as its NTP daemon. Only the time-source line (pool/server)
+    // is managed here; the server-mode directives (allow/local/etc) written at
+    // install time are left in place so this controller keeps serving time to
+    // any other Pis pointed at it. chrony's default minsources is 1, so pointing
+    // at a single server (e.g. another FPP) syncs without extra tuning.
+    $ntpConfigFile = '/etc/chrony/chrony.conf';
+    // Remove existing pool and server source lines.
+    exec("sudo sed -i '/^pool .*/d' $ntpConfigFile ; sudo sed -i '/^server .*/d' $ntpConfigFile");
     if ($value != '') {
-        // Remove existing server and pool lines, then add the new server line
-        exec("sudo sed -i '/^server.*/d' $ntpConfigFile ; sudo sed -i '/^pool.*/d' $ntpConfigFile ; sudo sed -i '\$a\\server $value iburst' $ntpConfigFile");
-        exec("sudo sed -i -e 's/minsane 3/minsane 1/' $ntpConfigFile");
+        // Sync from the explicitly configured server (often another FPP/RTC Pi).
+        exec("sudo sed -i '\$a\\server $value iburst' $ntpConfigFile");
     } else {
-        // Remove existing server and pool lines, then add the custom pool line
-        exec("sudo sed -i '/^server.*/d' $ntpConfigFile ; sudo sed -i '/^pool.*/d' $ntpConfigFile ; sudo sed -i '\$a\\pool falconplayer.pool.ntp.org iburst minpoll 8 maxpoll 12 prefer' $ntpConfigFile");
-        exec("sudo sed -i -e 's/minsane 1/minsane 3/' $ntpConfigFile");
+        // Fall back to FPP's public pool.
+        exec("sudo sed -i '\$a\\pool falconplayer.pool.ntp.org iburst minpoll 8 maxpoll 12' $ntpConfigFile");
     }
 
     // Add default gateway as a fallback NTP server reachable on the local
     // subnet (no NAT boundary). Safe even if the gateway does not run NTP;
-    // ntpsec simply marks it as unreachable.
+    // chrony simply marks it as unreachable.
     $gateway = exec("ip route show default 2>/dev/null | awk '{print \$3}'");
     if (!empty($gateway) && filter_var($gateway, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
         $gwInConf = exec("grep -c 'server $gateway' $ntpConfigFile 2>/dev/null");
