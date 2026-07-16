@@ -24,6 +24,10 @@
         var activeCategorySlug = 'all';
         var activeTopTab = 'available';
         var updatesCheckedOnce = false;
+        // Both feed UpdatePopularStripVisibility(): the strip is hidden during a search
+        // (the results grid is the answer then) and whenever it has nothing to show.
+        var popularStripHasCards = false;
+        var pluginSearchActive = false;
         var OTHER_CATEGORY = { name: 'Other', slug: 'other', icon: 'fas fa-puzzle-piece' };
         // The plugin list and its category taxonomy both live in FalconChristmas/fpp-data
         // (raw.githubusercontent.com is already allow-listed in FPP's Apache CSP connect-src).
@@ -185,6 +189,7 @@
                     $(this).addClass('active');
                     activeCategorySlug = $(this).attr('data-category-slug');
                     this.scrollIntoView({ block: 'nearest', inline: 'center' });
+                    BuildPopularStrip();   // strip follows the category being browsed
                     FilterPlugins();
                 });
                 li.append(btn);
@@ -476,7 +481,7 @@
                 'anything else on the network FPP is connected to</b>. This is inherently dangerous unless you ' +
                 'trust the plugin\'s author. The FPP project <b>does not test, vet, or guarantee the quality or ' +
                 'safety</b> of plugins &mdash; install at your own risk, and only from authors you trust. The ' +
-                '<span class="badge bg-primary"><i class="fas fa-certificate"></i> Official</span> badge marks ' +
+                '<span class="badge text-bg-graceful"><i class="fas fa-certificate"></i> Official</span> badge marks ' +
                 'plugins maintained by the FPP team (this plugin is not one of them).</div>';
             if (src) body += '<div class="small text-secondary"><i class="fas fa-code"></i> Source: ' +
                 '<a href="' + src + '" target="_blank" rel="noopener noreferrer">' + src + '</a></div>';
@@ -838,31 +843,24 @@
         var firstCompatible = 1;
         var firstUntested = 1;
         var firstIncompatible = 1;
-        function InsertCardSorted(gridId, key, html) {
+        // Sorted insert shared by both grids: group by rank first (lower sorts higher),
+        // then A-Z within a rank. Available cards rank by how usable the plugin is on
+        // this box (see PluginSortRank); the Installed grid passes 0 throughout, so it
+        // stays purely alphabetical. Rank and name are both known at insert time, so
+        // insertion order is final -- nothing ever re-sorts the grid.
+        function InsertCardSorted(gridId, key, html, rank) {
             var strcmp = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare;
+            var r = rank || 0;
             var placed = false;
             $('#' + gridId).children('.pluginCard').each(function () {
                 if (placed) return;
+                var tr = parseInt($(this).attr('data-sort-rank'), 10) || 0;
                 var t = $(this).find('.pluginTitle').text();
-                if (t && strcmp(t, key) >= 0) { $(html).insertBefore(this); placed = true; }
-            });
-            if (!placed) $('#' + gridId).append(html);
-        }
-
-        // Insert an Available card into #pluginGrid ranked by popularity desc, name asc.
-        function InsertAvailableCard(html, name, popularity) {
-            var strcmp = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare;
-            var placed = false;
-            var $grid = $('#pluginGrid');
-            $grid.children('.pluginCard').each(function () {
-                if (placed) return;
-                var p = parseInt($(this).attr('data-popularity'), 10) || 0;
-                var t = $(this).find('.pluginTitle').text();
-                if (popularity > p || (popularity === p && strcmp(name, t) < 0)) {
+                if (tr > r || (tr === r && t && strcmp(t, key) >= 0)) {
                     $(html).insertBefore(this); placed = true;
                 }
             });
-            if (!placed) $grid.append(html);
+            if (!placed) $('#' + gridId).append(html);
         }
 
         // --- Popularity (Phase 2) ---
@@ -873,13 +871,13 @@
             return (typeof n === 'number' && n > 0) ? n : 0;
         }
 
-        // A neutral install-count badge. Count is an integer, so the interpolation
-        // below is safe; untrusted plugin text is never placed here.
+        // A quiet install-count tag. Count is an integer, so the interpolation below is
+        // safe; untrusted plugin text is never placed here.
         function PopularityBadgeHtml(count) {
             if (!count) return '';
             var formatted = count.toLocaleString();
-            return '<span class="badge bg-info text-dark me-1 fppPopBadge" title="' + formatted +
-                ' installs (last 365 days)" aria-label="' + formatted + ' installs">' +
+            return '<span class="fpp-tag gap-1 me-1 fppPopBadge" title="' + formatted +
+                ' installs (past year)" aria-label="' + formatted + ' installs">' +
                 '<i class="fas fa-download"></i> ' + formatted + '</span>';
         }
 
@@ -914,60 +912,45 @@
             pluginPopularity = map || {};
             popularityLoaded = true;
             PatchPopularityBadges();   // stamp already-rendered cards
-            ReorderCategoryPanes();    // re-sort now that counts are known
             BuildPopularStrip();
             FilterPlugins();
         }
 
-        // Stamp data-popularity + inject/refresh the badge on already-rendered cards.
+        // Inject/refresh the install-count tag on already-rendered cards. Only the tag:
+        // the grids are sorted A-Z, so a late-arriving count never reorders anything.
         function PatchPopularityBadges() {
             $('#pluginGrid, #installedGrid').children('.pluginCard').each(function () {
                 var repo = ($(this).attr('id') || '').replace(/^row-/, '');
                 var count = PopularityOf(repo);
-                $(this).attr('data-popularity', count);
                 var $holder = $(this).find('.pluginCardBadges').first();
                 $holder.find('.fppPopBadge').remove();
                 if (count) $holder.append(PopularityBadgeHtml(count));
             });
         }
 
-        // Re-sort the Available grid by popularity desc (name tiebreak). Cheap at
-        // this catalog size; called after the feed lands and (debounced) as loads settle.
-        function ReorderCategoryPanes() {
-            var strcmp = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare;
-            var $grid = $('#pluginGrid');
-            var cards = $grid.children('.pluginCard').get();
-            cards.sort(function (a, b) {
-                var pa = parseInt(a.getAttribute('data-popularity'), 10) || 0;
-                var pb = parseInt(b.getAttribute('data-popularity'), 10) || 0;
-                if (pa !== pb) return pb - pa;
-                return strcmp($(a).find('.pluginTitle').text(), $(b).find('.pluginTitle').text());
-            });
-            $.each(cards, function (i, el) { $grid.append(el); });
-        }
-
-        // Debounced "loads settled" re-sort + strip rebuild (popularity may arrive
-        // mid-load; avoids O(n^2) reshuffle on every async insert).
+        // Debounced "loads settled" strip rebuild + filter: popularity can arrive
+        // mid-load, and the strip needs the full plugin list to rank against.
         var _settleTimer = null;
         function ScheduleSettle() {
             if (!popularityLoaded) return;
             clearTimeout(_settleTimer);
             _settleTimer = setTimeout(function () {
-                ReorderCategoryPanes();
                 BuildPopularStrip();
                 FilterPlugins();
             }, 300);
         }
 
-        // Top-5 Popular strip: highest install counts across all categories. Excludes
-        // already-installed plugins and ones that can't be installed on this box (no
-        // compatible or untested version) — the strip is a discovery surface for
-        // plugins the user can actually add. Rebuilt as info/feed arrive.
+        // Top-10 Popular strip for the active category ("All" spans every category).
+        // Excludes already-installed plugins and ones that can't be installed on this box
+        // (no compatible or untested version) — the strip is a discovery surface for
+        // plugins the user can actually add. Rebuilt as info/feed arrive and whenever the
+        // category changes; the grid itself is plain A-Z, so this is the only place
+        // popularity affects what you see first.
         function BuildPopularStrip() {
-            var $wrap = $('#popularStripWrap');
             var $strip = $('#popularStrip');
             if (!$strip.length) return;
-            if (!popularityLoaded) { $wrap.addClass('d-none'); return; }
+            popularStripHasCards = false;
+            if (!popularityLoaded) { UpdatePopularStripVisibility(); return; }
             var ranked = [];
             for (var i = 0; i < pluginInfos.length; i++) {
                 var d = pluginInfos[i];
@@ -975,16 +958,38 @@
                 if (PluginIsInstalled(d.repoName)) continue;   // exclude installed
                 var sel = SelectPluginVersionIndices(d);
                 if (sel.compatible < 0 && sel.untested < 0) continue;  // exclude uninstallable
+                if (activeCategorySlug !== 'all' &&
+                    PluginCategoryInfo(d).obj.slug !== activeCategorySlug) continue;
                 var c = PopularityOf(d.repoName);
                 if (c > 0) ranked.push({ data: d, count: c });
             }
             ranked.sort(function (a, b) { return b.count - a.count; });
             ranked = ranked.slice(0, 10);
             $strip.empty();
-            if (!ranked.length) { $wrap.addClass('d-none'); return; }
+            popularStripHasCards = ranked.length > 0;
             for (var j = 0; j < ranked.length; j++)
                 $strip.append(PopularCardHtml(ranked[j].data, ranked[j].count));
-            $wrap.removeClass('d-none');
+
+            // Name the category being browsed so the strip explains its own contents.
+            // .text() because category names come from the plugin feed.
+            var $h = $('#popularStripHeading');
+            if (activeCategorySlug === 'all') $h.text('Popular Plugins');
+            else {
+                var pill = pluginCategoryBySlug[activeCategorySlug];
+                $h.text(pill ? 'Popular in ' + pill.name : 'Popular Plugins');
+            }
+            UpdatePopularStripVisibility();
+        }
+
+        // Sole owner of the strip's visibility: BuildPopularStrip and FilterPlugins both
+        // have a say (cards vs. search), so deciding it in one place keeps them from
+        // fighting each other and flickering the strip.
+        function UpdatePopularStripVisibility() {
+            var show = popularityLoaded && popularStripHasCards && !pluginSearchActive;
+            $('#popularStripWrap').toggleClass('d-none', !show);
+            // Only measurable once shown: while the wrap (or its pane) is d-none,
+            // clientWidth is 0 and every strip looks like it does not overflow.
+            if (show) UpdatePopularScrollState();
         }
 
         // Compact card for the Popular strip. Built with jQuery .text() for the
@@ -993,8 +998,6 @@
             // Strip only holds installable, not-installed plugins (see BuildPopularStrip),
             // so a compatible/untested version index always exists here.
             var repo = data.repoName;
-            var formatted = count.toLocaleString();
-
             var cat = PluginCategoryInfo(data);
             var $col = $('<div class="pluginPopularCard"></div>');
             // The whole card opens the detail modal; there is no direct install from the
@@ -1008,15 +1011,65 @@
             $body.append('<div class="small text-secondary mb-1" title="' + (cat.obj.longName || cat.name) +
                 '"><i class="' + cat.obj.icon + '"></i> ' + cat.name + '</div>');
             $body.append($('<div class="card-title fw-semibold small mb-1 pluginPopularTitle pluginTitle"></div>').text(data.name));
-            // Bottom line: install count (last 365 days).
+            // Bottom line: install count over the past year. Shares PopularityBadgeHtml
+            // with the grid cards so the two can't drift apart.
             var $act = $('<div class="mt-auto d-flex align-items-center gap-2"></div>');
-            $act.append('<span class="badge bg-info text-dark" title="' + formatted +
-                ' installs (last 365 days)" aria-label="' + formatted + ' installs">' +
-                '<i class="fas fa-download"></i> ' + formatted + '</span>');
+            $act.append(PopularityBadgeHtml(count));
             $body.append($act);
             $card.append($body);
             $col.append($card);
             return $col;
+        }
+
+        // The edge fade and the arrows exist because overlay scrollbars (macOS/iOS/
+        // Android) stay invisible until you are already scrolling, so without them
+        // roughly half the strip is undiscoverable. Both are driven from here: measure
+        // the overflow, then reflect it into state classes (read by .pluginPopularScroll
+        // in fpp.css) and the arrow buttons. Must run only once #popularStripWrap is
+        // visible -- clientWidth is 0 while it, or the pane, is d-none.
+        function UpdatePopularScrollState() {
+            var el = document.getElementById('popularStrip');
+            if (!el) return;
+            var max = el.scrollWidth - el.clientWidth;
+            var overflows = max > 1;    // 1px of slack for sub-pixel layout
+            var atStart = !overflows || el.scrollLeft <= 1;
+            var atEnd = !overflows || el.scrollLeft >= max - 1;
+
+            el.classList.toggle('is-scrollable-start', !atStart);
+            el.classList.toggle('is-scrollable-end', !atEnd);
+            $('#popularStripNav').toggleClass('d-none', !overflows);
+            $('#popularStripPrev').prop('disabled', atStart);
+            $('#popularStripNext').prop('disabled', atEnd);
+        }
+
+        // Scroll by just under a viewport so one card stays on screen as an anchor;
+        // scroll-snap then settles the result to a card edge.
+        function ScrollPopularStrip(dir) {
+            var el = document.getElementById('popularStrip');
+            if (!el) return;
+            var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+            el.scrollBy({ left: dir * el.clientWidth * 0.8, behavior: reduce ? 'auto' : 'smooth' });
+        }
+
+        // Bound once: BuildPopularStrip() only empties #popularStrip, it never replaces
+        // the element, so these survive every rebuild.
+        function BindPopularStripControls() {
+            var el = document.getElementById('popularStrip');
+            if (!el) return;
+            var raf = null;
+            el.addEventListener('scroll', function () {
+                // Coalesce to one update per frame: the fade has to track the scroll
+                // live, so a trailing debounce would lag and a leading one would miss
+                // the final resting position.
+                if (raf) return;
+                raf = requestAnimationFrame(function () { raf = null; UpdatePopularScrollState(); });
+            }, { passive: true });
+            // Catches window resize, the tab/pane d-none -> visible transition, and font
+            // reflow -- none of which fire a scroll event, and the last two of which
+            // never fire window resize either.
+            if (window.ResizeObserver) new ResizeObserver(UpdatePopularScrollState).observe(el);
+            $('#popularStripPrev').on('click', function () { ScrollPopularStrip(-1); });
+            $('#popularStripNext').on('click', function () { ScrollPopularStrip(1); });
         }
 
         function PluginVersionsText(data) {
@@ -1106,6 +1159,15 @@
 
         // Single source of truth for a plugin's status badges, so cards and the
         // detail modal stay consistent. includeCategory adds the category chip.
+        //
+        // Color budget: amber "Not updated" and red "Incompatible" are the only problem
+        // colors, and purple "Official" the only provenance one (matching the Dev badge
+        // on about.php); everything else is a quiet .fpp-tag. So a card carries at most
+        // one warning plus one trust mark rather than five competing alerts. Previously
+        // Private and "Not updated" were both amber, which left amber meaning nothing in
+        // particular. Every tag keeps an icon: with the color gone the icon is what tells
+        // the grey pills apart, and it keeps the two problem states from being
+        // distinguished by hue alone.
         function PluginBadgesHtml(data, includeCategory) {
             var repo = data.repoName;
             var installed = PluginIsInstalled(repo);
@@ -1114,19 +1176,19 @@
             var isPrivate = (data.private || pluginInfoUseCredentials[repo]);
             var h = '';
             if (installed)
-                h += '<span class="badge bg-success me-1"><i class="far fa-check-circle"></i> Installed</span>';
+                h += '<span class="fpp-tag gap-1 me-1"><i class="far fa-check-circle"></i> Installed</span>';
             if (official)
-                h += '<span class="badge bg-primary me-1" title="Official FPP plugin (maintained in the FalconChristmas GitHub organization)"><i class="fas fa-certificate"></i> Official</span>';
+                h += '<span class="badge text-bg-graceful me-1" title="Official FPP plugin (maintained in the FalconChristmas GitHub organization)"><i class="fas fa-certificate"></i> Official</span>';
             if (isPrivate)
-                h += '<span class="badge bg-warning text-dark me-1" title="Hosted in a private GitHub repository"><i class="fas fa-lock"></i> Private</span>';
+                h += '<span class="fpp-tag gap-1 me-1" title="Hosted in a private GitHub repository"><i class="fas fa-lock"></i> Private</span>';
             if (!installed && sel.compatible == -1 && sel.untested >= 0)
-                h += '<span class="badge bg-warning text-dark me-1" title="This plugin has not been updated to work with your version of FPP. It may still install and work, but has not been confirmed for this release.">Not updated for FPP ' + getFPPMajorVersion() + '</span>';
+                h += '<span class="badge text-bg-warning me-1" title="This plugin has not been updated to work with your version of FPP. It may still install and work, but has not been confirmed for this release."><i class="fas fa-exclamation-triangle"></i> Not updated for FPP ' + getFPPMajorVersion() + '</span>';
             else if (!installed && sel.compatible == -1)
-                h += '<span class="badge bg-danger me-1" title="No version compatible with this FPP version/platform">Incompatible</span>';
+                h += '<span class="badge text-bg-danger me-1" title="No version compatible with this FPP version/platform"><i class="fas fa-ban"></i> Incompatible</span>';
             h += PopularityBadgeHtml(PopularityOf(repo));
             if (includeCategory) {
                 var cat = PluginCategoryInfo(data);
-                h += '<span class="badge bg-secondary me-1 pluginCatChip" title="' + (cat.obj.longName || cat.name) + '"><i class="' + cat.obj.icon + '"></i> ' + cat.name + '</span>';
+                h += '<span class="fpp-tag gap-1 me-1 pluginCatChip" title="' + (cat.obj.longName || cat.name) + '"><i class="' + cat.obj.icon + '"></i> ' + cat.name + '</span>';
             }
             return h;
         }
@@ -1145,7 +1207,11 @@
             var official = IsOfficialPlugin(data);
             var pcatName = data.__category || pluginCategoryOf[(data.repoName || '').toLowerCase()] || pluginCategoryOf[(data.name || '').toLowerCase()] || 'Other';
             var pcatObj = pluginCategoryByName[pcatName] || OTHER_CATEGORY;
-            var popularity = PopularityOf(data.repoName);
+            // Available grid order: usable here first, then "install anyway", then
+            // won't-install. Installed cards are all rank 0 so their grid stays A-Z.
+            // The uiLevel gate below means ranks 1 and 2 are often not rendered at all.
+            var sortRank = installed ? 0
+                : (compatibleVersion >= 0 ? 0 : (untestedVersion >= 0 ? 1 : 2));
 
             // Category chip on Available cards only (shown in the All view / search — see
             // FilterPlugins); installed cards live in their own tab with no category browse.
@@ -1175,7 +1241,7 @@
             }
 
             var html = '';
-            html += '<div id="row-' + data.repoName + '" class="col pluginCard" data-category-slug="' + pcatObj.slug + '" data-popularity="' + popularity + '">';
+            html += '<div id="row-' + data.repoName + '" class="col pluginCard" data-category-slug="' + pcatObj.slug + '" data-sort-rank="' + sortRank + '">';
             html += '<div class="card h-100 pluginCardInner" role="button" tabindex="0" onclick="ShowPluginDetail(\'' + data.repoName + '\');">';
             html += '<div class="card-body d-flex flex-column">';
             html += '<h5 class="card-title pluginTitle mb-1">' + data.name + '</h5>';
@@ -1187,7 +1253,7 @@
             html += '</div></div></div>';
 
             if (installed) {
-                InsertCardSorted('installedGrid', data.name, html);
+                InsertCardSorted('installedGrid', data.name, html, sortRank);
             } else {
                 var uiLevel = parseInt(settings["uiLevel"]) || 0;
                 if (data.repoName == 'fpp-plugin-Template') {
@@ -1199,7 +1265,7 @@
                 } else {
                     if (uiLevel < 3) return;
                 }
-                InsertAvailableCard(html, data.name, popularity);
+                InsertCardSorted('pluginGrid', data.name, html, sortRank);
             }
             if (insert) {
                 var el = document.getElementById('row-' + data.repoName);
@@ -1347,6 +1413,7 @@
             if (isUrl) $('.fppPluginInput').addClass('is-url'); else $('.fppPluginInput').removeClass('is-url');
 
             var searching = (value !== '' && !isUrl);
+            pluginSearchActive = searching;
 
             // Category chip shows only where categories are mixed: the All view and search
             // results. Inside a single-category pane it is redundant with the active pill.
@@ -1380,6 +1447,11 @@
             if (activeTopTab === 'updates') $('#noUpdatesHint').toggleClass('d-none', installedVisible > 0);
             else $('#noUpdatesHint').addClass('d-none');
 
+            // With nothing to update, an "Updates Available" title claims the opposite of
+            // what the pane shows. .invisible (not .d-none) so the header keeps its box and
+            // the buttons stay put relative to the Installed tab.
+            $('#manageHeading').toggleClass('invisible', activeTopTab === 'updates' && updateVisible === 0);
+
             // "No results" messages so an empty view reads as a search miss, not a bug.
             var installedTotal = $('#installedGrid').children('.pluginCard').length;
             $('#noAvailableResults').toggleClass('d-none', !(searching && activeTopTab === 'available' && availVisible === 0));
@@ -1394,6 +1466,10 @@
                 var $li = $(this).closest('.nav-item');
                 if (s !== 'all' && val === 0) $li.addClass('d-none'); else $li.removeClass('d-none');
             });
+
+            // Search hides the strip: the results are the answer, not a discovery shelf.
+            // Visibility only — rebuilding 10 cards per keystroke would be waste.
+            UpdatePopularStripVisibility();
 
             // Top-tab counts.
             $('#topCountAvailable').text(total);
@@ -1416,6 +1492,7 @@
                 ShowTopTab($(this).attr('data-top-tab'));
                 this.scrollIntoView({ block: 'nearest', inline: 'center' });
             });
+            BindPopularStripControls();
             GetPluginPopularity();   // parallel with the list/installed loads (Phase 2)
             GetInstalledPlugins();
 
@@ -1434,11 +1511,6 @@
             <div class="pageContent">
 
                 <div id="plugins" class="settings">
-
-                    <div id="popularStripWrap" class="mb-3 d-none">
-                        <h2 class="h5"><i class="fas fa-fire text-warning"></i> Popular Plugins</h2>
-                        <div id="popularStrip" class="d-flex flex-nowrap overflow-auto gap-2 pb-2 pluginPopularScroll"></div>
-                    </div>
 
                     <div class='plugindiv'>
                         <!-- Desktop: tabs on the left, find box on the right of the same row.
@@ -1461,7 +1533,14 @@
                                 </div>
                             </div>
                             <div class="col-12 col-lg order-lg-1">
-                                <ul class="nav nav-tabs flex-nowrap flex-md-wrap overflow-auto overflow-md-visible" id="pluginTopTabs" role="tablist">
+                                <!-- overflow-x-auto, not overflow-auto: .nav-tabs .nav-link carries
+                                     margin-bottom:-1px to sit over the nav's border, which overflows
+                                     the box vertically by exactly 1px. Against overflow-y:auto that
+                                     is enough for Chrome to draw a full vertical scrollbar next to
+                                     the tabs. Horizontal scroll is still needed -- the tabs do not
+                                     fit on a phone. (The old overflow-md-visible here was a no-op:
+                                     Bootstrap 5.3 ships no responsive overflow utilities.) -->
+                                <ul class="nav nav-tabs flex-nowrap flex-md-wrap overflow-x-auto overflow-y-hidden" id="pluginTopTabs" role="tablist">
                                     <li class="nav-item" role="presentation">
                                         <button type="button" class="nav-link active text-nowrap" data-top-tab="available" role="tab">
                                             <i class="fas fa-store"></i> Available
@@ -1486,8 +1565,33 @@
 
                         <div id="pane-available" class="pluginTopPane">
                             <div class="fppPluginAvailableHead">
-                                <ul class="nav nav-pills mb-3 pageContent-tabs flex-nowrap flex-md-wrap overflow-auto overflow-md-visible pb-1" id="pluginCategoryPills" role="tablist"></ul>
+                                <ul class="nav nav-pills mb-3 pageContent-tabs flex-nowrap flex-md-wrap overflow-x-auto pb-1" id="pluginCategoryPills" role="tablist"></ul>
                             </div>
+
+                            <!-- Lives inside pane-available, below the pills that drive it: the strip
+                                 follows the active category, and the pane's own d-none keeps it off the
+                                 Installed/Updates tabs where no category pills exist to explain it. -->
+                            <div id="popularStripWrap" class="mb-3 d-none">
+                                <div class="d-flex align-items-center justify-content-between mb-2">
+                                    <h2 class="h5 mb-0"><i class="fas fa-fire text-secondary"></i> <span id="popularStripHeading">Popular Plugins</span></h2>
+                                    <!-- Shown by UpdatePopularScrollState() only when the strip actually
+                                         overflows; the edge fade alone can't be clicked or tabbed to. -->
+                                    <div class="btn-group btn-group-sm d-none" id="popularStripNav" role="group"
+                                        aria-label="Scroll popular plugins">
+                                        <button type="button" class="btn btn-outline-secondary" id="popularStripPrev"
+                                            aria-label="Scroll popular plugins left" aria-controls="popularStrip">
+                                            <i class="fas fa-chevron-left" aria-hidden="true"></i>
+                                        </button>
+                                        <button type="button" class="btn btn-outline-secondary" id="popularStripNext"
+                                            aria-label="Scroll popular plugins right" aria-controls="popularStrip">
+                                            <i class="fas fa-chevron-right" aria-hidden="true"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div id="popularStrip" class="d-flex flex-nowrap overflow-auto gap-2 pb-2 pluginPopularScroll"
+                                    tabindex="0" role="group" aria-label="Popular plugins"></div>
+                            </div>
+
                             <div id='pluginTable'>
                                 <div id='pluginGrid' class="row row-cols-1 row-cols-md-2 row-cols-xxl-3 g-3"></div>
                                 <div id="noAvailableResults" class="alert alert-info d-none mt-2">

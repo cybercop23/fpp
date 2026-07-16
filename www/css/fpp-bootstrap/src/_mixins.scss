@@ -55,7 +55,12 @@
 	$disabled-border: rgba(0, 0, 0, 0.1),
 	$disabled-color: rgba(0, 0, 0, 0.3)
 ) {
-	color: #fff;
+	/* $color, not a hardcoded #fff: the resting text color has to honor the argument
+	   or a light-backgrounded variant is unreadable. .btn-warning passes $black and
+	   was rendering white on #ffc107 (~1.9:1) until hover -- where $hover-color
+	   defaults to $color -- flipped it to black. Every other caller takes the #fff
+	   default, so their output is unchanged. */
+	color: $color;
 	@include gradient-bg($background);
 	border-color: $border;
 	@include box-shadow($btn-box-shadow);
