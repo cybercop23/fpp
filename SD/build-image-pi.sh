@@ -50,10 +50,8 @@ SKIP_FPPOS="${SKIP_FPPOS:-0}"                # 1 => skip squashfs generation
 SKIP_ZIP="${SKIP_ZIP:-0}"                    # 1 => leave raw .img only, no zip
 USE_LOCAL_SRC="${USE_LOCAL_SRC:-0}"          # 1 => seed /opt/fpp from local tree
 FPP_SRC_DIR="${FPP_SRC_DIR:-$(readlink -f "$(dirname "$(readlink -f "$0")")/..")}"
-# Default ON (skip): the 2026-06 Trixie base ships 6.18 LTS already. The whole
-# rpi-update path below is retained (just gated off) for the next time RPi lags
-# behind a new LTS kernel -- re-enable with --kernel-update or SKIP_KERNEL_UPDATE=0.
-SKIP_KERNEL_UPDATE="${SKIP_KERNEL_UPDATE:-1}"    # 1 => skip rpi-update next
+# Default OFF (don't skip) - need the latest fixes for various GPU/media issues
+SKIP_KERNEL_UPDATE="${SKIP_KERNEL_UPDATE:0}"    # 1 => skip rpi-update next
 
 usage() {
     cat <<EOF
