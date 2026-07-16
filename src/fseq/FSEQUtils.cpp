@@ -265,6 +265,7 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
 
+            src->setReadPattern(FSEQFile::ReadPattern::Bulk);
             src->prepareRead(ranges);
 
             char title[50];
@@ -283,6 +284,7 @@ int main(int argc, char* argv[]) {
             for (auto& f : mergeFseqs) {
                 FSEQFile* src = FSEQFile::openFSEQFile(f.filename);
                 if (src) {
+                    src->setReadPattern(FSEQFile::ReadPattern::Bulk);
                     f.srcFile = src;
                     if (f.ranges.empty()) {
                         f.ranges.push_back(std::pair<uint32_t, uint32_t>(0, 8024 * 1024));
@@ -316,6 +318,7 @@ int main(int argc, char* argv[]) {
                 V2FSEQFile* f = (V2FSEQFile*)dest;
                 f->m_sparseRanges = ranges;
             }
+            src->setReadPattern(FSEQFile::ReadPattern::Bulk);
             src->prepareRead(ranges);
 
             dest->initializeFromFSEQ(*src);
