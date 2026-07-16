@@ -27,7 +27,7 @@ ARG PACKAGE_LIST="alsa-utils arping avahi-daemon avahi-utils locales nano net-to
     fbi fbset file flite ca-certificates lshw gettext wget iproute2 \
     build-essential ffmpeg gcc g++ gdb vim vim-common bison flex device-tree-compiler dh-autoreconf \
     git hdparm i2c-tools jq less sysstat tcpdump time usbutils usb-modeswitch \
-    samba rsync sudo shellinabox dnsmasq hostapd vsftpd ntpsec sqlite3 at haveged samba samba-common-bin \
+    samba rsync sudo shellinabox dnsmasq hostapd vsftpd chrony sqlite3 at haveged samba samba-common-bin \
     mp3info exim4 mailutils dhcp-helper parprouted bridge-utils libiio-utils \
     php${PHPVER} php${PHPVER}-cli php${PHPVER}-fpm php${PHPVER}-common php${PHPVER}-curl php-pear \
     php${PHPVER}-bcmath php${PHPVER}-sqlite3 php${PHPVER}-zip php${PHPVER}-xml \
