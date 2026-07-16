@@ -161,6 +161,37 @@ DPIPixelsOutput::~DPIPixelsOutput() {
         delete fb;
 }
 
+// The RPIWS281X driver has been removed and its outputs are now driven by DPI.  Most
+// RPIWS281X capes ship a DPIPixels variant of their string config in the same EEPROM
+// with an identical pin list, so prefer that.  rPi-28D is special cased: its RPIWS281X
+// config's third output is ws2801 over SPI which DPI cannot drive, so it maps to the
+// 4-output variant that repurposes CN1's clock/data pins as WS281x outputs.
+static std::map<std::string, std::string> RPIWS281X_SUBTYPE_MAP = {
+    { "PiHat", "PiHat-DPIPixels" },
+    { "rPi-MFC", "rPi-MFC-DPIPixels" },
+    { "rPi-28D", "rPi-28D-DPIPixels-4" }
+};
+
+bool DPIPixelsOutput::LoadStringConfig(const std::string& subType, Json::Value& root, std::string& usedSubType) {
+    auto it = RPIWS281X_SUBTYPE_MAP.find(subType);
+    if ((it != RPIWS281X_SUBTYPE_MAP.end()) && CapeUtils::INSTANCE.getStringConfig(it->second, root)) {
+        usedSubType = it->second;
+        return true;
+    }
+    // A cape we don't know about.  If it ships a "-DPIPixels" variant, use it.
+    if (!endsWith(subType, "-DPIPixels") && CapeUtils::INSTANCE.getStringConfig(subType + "-DPIPixels", root)) {
+        usedSubType = subType + "-DPIPixels";
+        return true;
+    }
+    // Fall back to the config as named.  For a third-party cape with a physically burned
+    // EEPROM this may be an RPIWS281X config, which uses the same pin format we do.
+    if (CapeUtils::INSTANCE.getStringConfig(subType, root)) {
+        usedSubType = subType;
+        return true;
+    }
+    return false;
+}
+
 int DPIPixelsOutput::Init(Json::Value config) {
     LogDebug(VB_CHANNELOUT, "DPIPixelsOutput::Init(JSON)\n");
 
@@ -175,17 +206,21 @@ int DPIPixelsOutput::Init(Json::Value config) {
 
     licensedOutputs = CapeUtils::INSTANCE.getLicensedOutputs();
 
-    if (!CapeUtils::INSTANCE.getStringConfig(subType, root)) {
+    std::string usedSubType;
+    if (!LoadStringConfig(subType, root, usedSubType)) {
         LogErr(VB_CHANNELOUT, "Could not read pin configuration for %s\n", subType.c_str());
         WarningHolder::AddWarning(13, "DPIPixels: Could not read pin configuration for " + subType);
         return 0;
     }
+    if (usedSubType != subType) {
+        LogInfo(VB_CHANNELOUT, "Mapped string config %s to %s for DPI output\n",
+                subType.c_str(), usedSubType.c_str());
+    }
 
-    if ((licensedOutputs == 0) &&
-        ((startsWith(GetFileContents("/proc/device-tree/model"), "Raspberry Pi 5")) ||
-         (startsWith(GetFileContents("/proc/device-tree/model"), "Raspberry Pi Compute Module 5")))) {
-        // Pi 5 doesn't have onboard sound but also doesn't work with RPIWS281x.  We'll allow a standard
-        // PiHat with two strings to work with DPI on the Pi5.  More than two strings will require a license
+    if (licensedOutputs == 0) {
+        // Two strings driven directly off the Pi's GPIO header is what the old RPIWS281X
+        // driver provided for free, so DPI has to keep providing it.  More than two
+        // outputs still requires a license.
         licensedOutputs = 2;
     }
 
@@ -208,6 +243,7 @@ int DPIPixelsOutput::Init(Json::Value config) {
     std::vector<std::string> outputPinMap;
     std::vector<int> outputChannelCounts;
     std::string outputList;
+    std::string skippedOutputs;
     int firstStringInBank[MAX_DPI_PIXEL_LATCHES];
 
     memset(latchPinMasks, 0, sizeof(latchPinMasks));
@@ -234,15 +270,24 @@ int DPIPixelsOutput::Init(Json::Value config) {
 
         if (root["outputs"][i].isMember("pin")) {
             std::string pinName = root["outputs"][i]["pin"].asString();
+            int pinBitPos = startsWith(pinName, "P") ? GetDPIPinBitPosition(pinName) : -1;
 
-            if (pinName[0] == 'P') {
-                bitPos[i] = GetDPIPinBitPosition(pinName);
-                outputToStringMap[bitPos[i]] = i;
-                stringToOutputMap[i] = bitPos[i];
-                stringLengths[bitPos[i]] = newString->m_outputChannels;
+            if (pinBitPos >= 0) {
+                bitPos[i] = pinBitPos;
+                outputToStringMap[pinBitPos] = i;
+                stringToOutputMap[i] = pinBitPos;
+                stringLengths[pinBitPos] = newString->m_outputChannels;
 
                 outputPinMap.push_back(pinName);
             } else {
+                // A pin DPI cannot drive.  The old RPIWS281X configs put ws2801 strings on
+                // spidev pins, so skip just that output rather than failing the whole cape.
+                if (newString->m_outputChannels > 0) {
+                    if (skippedOutputs != "") {
+                        skippedOutputs += ", ";
+                    }
+                    skippedOutputs += std::to_string(i + 1) + " (" + pinName + ")";
+                }
                 outputPinMap.push_back("");
             }
         } else if (root["outputs"][i].isMember("sharedOutput")) {
@@ -295,6 +340,13 @@ int DPIPixelsOutput::Init(Json::Value config) {
             newString->m_outputChannels = chanCount;
         }
         pixelStrings.push_back(newString);
+    }
+
+    if (skippedOutputs != "") {
+        std::string warning = "DPIPixels: output(s) " + skippedOutputs +
+                              " cannot be driven by DPI and have been disabled.  Only pixels on the Pi's DPI pins are supported.";
+        WarningHolder::AddWarning(warning);
+        LogWarn(VB_CHANNELOUT, "WARNING: %s\n", warning.c_str());
     }
 
     for (int i = 0; i < outputPinMap.size(); i++) {

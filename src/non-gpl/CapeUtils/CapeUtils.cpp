@@ -724,6 +724,13 @@ static std::map<std::string, std::string> CONFIG_EEPROM_UPGRADE_MAP = {
     { "spixels:spixels", "spixels" },
     { "RPIWS281X:rPi-MFC", "rPi-MFC" },
     { "RPIWS281X:rPi-28D", "rPi-28D" },
+    // The RPIWS281X entries above are only matched until the config is migrated to DPI.
+    // These map the migrated configs back to the same EEPROMs so a cape that loses its
+    // config/cape-eeprom.bin after migrating can still have it reinstalled.
+    { "DPIPixels:PiHat-DPIPixels", "PiHat" },
+    { "DPIPixels:rPi-MFC-DPIPixels", "rPi-MFC" },
+    { "DPIPixels:rPi-28D-DPIPixels", "rPi-28D" },
+    { "DPIPixels:rPi-28D-DPIPixels-4", "rPi-28D" },
     { "BBB48String:F8-B", "F8-B" },
     { "BBB48String:F8-B-16", "F8-B" },
     { "BBB48String:F8-B-20", "F8-B" },

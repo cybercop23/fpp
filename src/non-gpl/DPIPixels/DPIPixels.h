@@ -45,6 +45,7 @@ public:
     virtual bool SupportsTesting() const override { return true; }
 
 private:
+    bool LoadStringConfig(const std::string& subType, Json::Value& root, std::string& usedSubType);
     int GetDPIPinBitPosition(std::string pinName);
     bool FrameBufferIsConfigured(void);
     void WriteDataAtPosition(uint8_t *&ptr, const uint32_t value);

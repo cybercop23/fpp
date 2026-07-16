@@ -276,7 +276,10 @@ static std::map<std::string, std::string> OUTPUT_REMAPS = {
     { "DMX-Open", "USBDMX" },
     { "Pixelnet-Lynx", "USBPixelnet" },
     { "Pixelnet-Open", "USBPixelnet" },
-    { "universes", "UDPOutput" }
+    { "universes", "UDPOutput" },
+    // The RPIWS281X driver has been removed.  DPIPixels drives the same pins and
+    // maps the old RPIWS281X string configs itself, so old configs load unchanged.
+    { "RPIWS281X", "DPIPixels" }
 };
 
 extern int ChannelOutputThreadIsRunning(void);

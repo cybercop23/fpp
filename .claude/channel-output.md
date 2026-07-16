@@ -25,7 +25,6 @@ Plugins are loaded at runtime via `dlopen()` in `Plugins.cpp`. Each plugin expor
 
 | Plugin | Hardware | Platform |
 | --- | --- | --- |
-| `libfpp-co-RPIWS281X` | WS2811/WS2812 via SPI+PWM | RPi |
 | `libfpp-co-spixels` | SPiWare SPI pixels | RPi |
 | `libfpp-co-SPIws2801` | WS2801 SPI | RPi/Linux |
 | `libfpp-co-SPInRF24L01` | nRF24L01 wireless SPI | RPi/Linux |

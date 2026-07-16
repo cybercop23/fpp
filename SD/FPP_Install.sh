@@ -1339,7 +1339,6 @@ if [ "$FPPPLATFORM" == "Raspberry Pi" ]; then
     # while initializing
     git submodule update --init external/RF24
     git submodule update --init external/rpi-rgb-led-matrix
-    git submodule update --init external/rpi_ws281x
     git submodule update --init external/spixels
     cd /opt/fpp/src
     make gitsubmodules

@@ -66,7 +66,6 @@ $fpp_version = "v" . getFPPVersion();
 
                 <h2>3rd Party Libraries used by FPP for some Channel Outputs:</h2>
                 <div class="backdrop">
-                  <a href='https://github.com/jgarff/rpi_ws281x'>rpi_ws281x</a> by Jeremy Garff<br />
                   <a href='https://github.com/hzeller/rpi-rgb-led-matrix'>rpi-rgb-led-matrix</a> by Henner Zeller<br />
                   <a href='https://github.com/hzeller/spixels'>spixels</a> by Henner Zeller<br />
                   <a href='https://github.com/TMRh20/RF24'>RF24</a> (nRF24L01)<br />

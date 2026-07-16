@@ -114,4 +114,4 @@ PHP-based REST API using Limonade micro-framework. 24 controllers, 150+ endpoint
 
 ## External Dependencies (`external/`)
 
-Git submodules (auto-fetched during build): RF24 (2.4GHz wireless), rpi-rgb-led-matrix (GPIO LED panels), rpi_ws281x (WS2811/2812 driver), spixels (SPI pixel strings).
+Git submodules (auto-fetched during build): RF24 (2.4GHz wireless), rpi-rgb-led-matrix (GPIO LED panels), spixels (SPI pixel strings).

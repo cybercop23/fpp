@@ -22,10 +22,11 @@ function readCapes($cd, $capes)
             if ($string != "") {
                 $json = json_decode($string, true);
                 $driver = $json['driver'] ?? '';
-                if (str_contains($settings["SubPlatform"], "Raspberry Pi 5") || str_contains($settings["SubPlatform"], "Raspberry Pi Compute Module 5")) {
-                    if ($driver == "RPIWS281X") {
-                        continue;
-                    }
+                // The RPIWS281X driver has been removed.  These capes are still described by
+                // their EEPROMs but are driven by DPIPixels now, which each one ships a
+                // matching "-DPIPixels" string config for.
+                if ($driver == "RPIWS281X") {
+                    continue;
                 }
 
 
@@ -166,9 +167,7 @@ function readCapes($cd, $capes)
             <? if ($settings['BeaglePlatform']) { ?>
                 var outputType = "BBB Pixel Strings";
             <? } else { ?>
-                var outtype = $('#PixelStringSubType').val();
-                var driver = MapPixelStringType(outtype);
-                var outputType = (driver == 'DPIPixels') ? "DPI Pixels" : "RPI Pixel Strings";
+                var outputType = "DPI Pixels";
             <? } ?>
 
             var data = '{"command":"Test Start","multisyncCommand":false,"multisyncHosts":"","args":["2000","Output Specific","' + outputType + '","' + val + '"]}';
@@ -273,7 +272,7 @@ function readCapes($cd, $capes)
         <? } else { ?>
             var outtype = $('#PixelStringSubType').val();
             var driver = MapPixelStringType(outtype);
-            var isChannelBased = (driver == 'DPIPixels') || (driver == 'RPIWS281X');
+            var isChannelBased = (driver == 'DPIPixels');
         <? } ?>
 
         result += "<td>";
@@ -1014,6 +1013,39 @@ function readCapes($cd, $capes)
         return type;
     }
 
+    // The RPIWS281X driver has been removed and its capes are driven by DPIPixels now.  The
+    // matching DPIPixels string config uses the same pins, so point an old config at it and a
+    // Save will write the migrated output back out.  Mirrors setupChannelOutputs() in
+    // src/boot/FPPINIT_Config.cpp, which migrates the config on disk at boot.
+    var RPIWS281X_SUBTYPE_MAP = {
+        // The rPi-28D's third output was ws2801 over SPI which DPI cannot drive.  The 4 output
+        // variant drives CN1's clock and data pins as WS281x instead.
+        'rPi-28D': 'rPi-28D-DPIPixels-4',
+        'PiHat': 'PiHat-DPIPixels',
+        'rPi-MFC': 'rPi-MFC-DPIPixels'
+    };
+
+    function MigrateRPIWS281XOutput(output) {
+        if (output.type != 'RPIWS281X') {
+            return;
+        }
+        output.type = 'DPIPixels';
+
+        var subType = (output.subType == "" || output.subType == null) ? 'PiHat' : output.subType;
+        if (RPIWS281X_SUBTYPE_MAP[subType]) {
+            output.subType = RPIWS281X_SUBTYPE_MAP[subType];
+        } else if (KNOWN_CAPES[subType + '-DPIPixels.json']) {
+            // A cape we don't have an explicit mapping for that ships a DPIPixels variant
+            output.subType = subType + '-DPIPixels';
+        }
+
+        for (var o = 0; output.outputs != null && o < output.outputs.length; o++) {
+            if (output.outputs[o].protocol == 'ws2801') {
+                output.outputs[o].protocol = 'ws2811';
+            }
+        }
+    }
+
 
     //get array of header pin#s indexed by port#:
     //NOTE: used by non-BBB capes as well
@@ -1496,7 +1528,7 @@ function readCapes($cd, $capes)
                     } else {
                         $('#BBPixelTiming').hide();
                     }
-                    if ((type == 'BBB48String') || (type == 'DPIPixels') || (type == 'BBShiftString') || (type == 'RPIWS281X')) {
+                    if ((type == 'BBB48String') || (type == 'DPIPixels') || (type == 'BBShiftString')) {
                         $('#PixelTestPatternDiv').show();
                     } else {
                         $('#PixelTestPatternDiv').hide();
@@ -1809,12 +1841,10 @@ function readCapes($cd, $capes)
             PixelStringLoaded = true;
             for (var i = 0; i < data.channelOutputs.length; i++) {
                 var output = data.channelOutputs[i];
+                MigrateRPIWS281XOutput(output);
                 var type = output.type;
                 if (IsPixelStringDriverType(type)) {
                     if (output.subType == "") {
-                        if (output.type == "RPIWS281X") {
-                            output.subType = "PiHat";
-                        }
                         if (output.type == "spixels") {
                             output.subType = "spixels";
                         }
@@ -1871,7 +1901,10 @@ function readCapes($cd, $capes)
                 return intval($settings['cape-info']['signed']['licensePorts']);
             }
         }
-        if (str_contains($settings["SubPlatform"], "Raspberry Pi 5") || str_contains($settings["SubPlatform"], "Raspberry Pi Compute Module 5")) {
+        if ($settings['Platform'] == "Raspberry Pi") {
+            // Two strings driven directly off the Pi's GPIO header is what the old RPIWS281X
+            // driver provided for free, so DPI has to keep providing it.  More than two
+            // outputs still requires a license.  Mirrors DPIPixelsOutput::Init().
             return 2;
         }
         return 0;

@@ -28,10 +28,10 @@
 </center>
 </p>
 
-<p><b>RPIWS281X</b> - The RPIWS281X output can drive two independent strings of WS281x pixels directly off the Raspberry Pi's GPIO ports.  The data and ground lines attach directly to the Pi while power for the pixels is injected from another source.  <b>NOTE: When you enable the RPIWS281X output, the onboard audio on the Pi will be disabled since both audio and RPIWS281X need to use the same PWM output.</b></p>
+<p><b>PiHat</b> - The PiHat output can drive two independent strings of WS281x pixels directly off the Raspberry Pi's GPIO ports.  The data and ground lines attach directly to the Pi while power for the pixels is injected from another source.  These strings are driven by the <b>DPIPixels</b> output described below.  <b>NOTE: This replaces the older RPIWS281X output, which required the onboard audio on the Pi to be disabled.  Existing RPIWS281X configurations are migrated automatically and the onboard audio now continues to work.</b></p>
 <p>
 <center>
-<b>RPIWS281x Output Connections</b><br>
+<b>PiHat Output Connections</b><br>
 <table border='1' cellpadding='4' cellspacing='1'>
 <tr><th>WS281x Function</th><th>Raspberry Pi</th></tr>
 <tr><td>Data String #1</td><td>Pin 12 - GPIO18</td></tr>
@@ -131,7 +131,7 @@
 </center>
 </p>
 
-<p><b>DPIPixels</b> - The DPIPixels Channel Output on the Raspberry Pi can drive up to 24 strings of LED pixels connected directly to the GPIO pins (a voltage shifter might also be needed since the GPIO pins are only 3.3V).  The number of pixels is determined by the frame rate and protocol.  For example, at 20 FPS over 1,600 WS281X pixels can be chained from each GPIO pin (each WS281X pixel takes 30 usec), allowing a Raspberry Pi to run close to 40K WS281x pixels at 20 FPS.  <a id="more-dpi-info" href="#">Click here to show/hide more info</a>.  <b>NOTE: The DPIPixels-2 Channel Output is pin-compatible with the PiHat/RPIWS281X Channel Output but allows the onboard audio on the Pi to continue to function.</b><p>
+<p><b>DPIPixels</b> - The DPIPixels Channel Output on the Raspberry Pi can drive up to 24 strings of LED pixels connected directly to the GPIO pins (a voltage shifter might also be needed since the GPIO pins are only 3.3V).  The number of pixels is determined by the frame rate and protocol.  For example, at 20 FPS over 1,600 WS281X pixels can be chained from each GPIO pin (each WS281X pixel takes 30 usec), allowing a Raspberry Pi to run close to 40K WS281x pixels at 20 FPS.  <a id="more-dpi-info" href="#">Click here to show/hide more info</a>.  <b>NOTE: The PiHat DPIPixels Channel Output is pin-compatible with the older RPIWS281X Channel Output but allows the onboard audio on the Pi to continue to function.</b><p>
 <p class="more-dpi-info">DPI redirects video output from the GPU onto selected GPIO pins.  The RPi GPU serves as a high-speed 24-bit parallel port dongle, repeatedly refreshing the LED pixels from a GPU framebuffer and off-loading time-critical I/O from the RPi general processor cores.</p>
 <p class="more-dpi-info">GPIO pins that are used for DPI are not available for other functions such as SPI, PMW, UART serial output, or sensors, but each GPIO can be configured individually for DPI so conflicts can be avoided - the tradeoff is fewer DPI Channel Outputs available for LED pixels.</p>
 <p class="more-dpi-info">

@@ -72,24 +72,6 @@ endif
 	@CC="ccache gcc" CXX="ccache g++" $(MAKE) -C ../external/rpi-rgb-led-matrix/lib/ librgbmatrix.a DEFINES="-Wno-format" CPU_ARCH_FLAGS="$(RGBMATRIX_CPU_ARCH_FLAGS)"
 
 #############################################################################
-# libws2811 on the Pi
-../external/rpi_ws281x/.git:
-	@cd ../ && \
-		git submodule init && \
-		git submodule update
-
-../external/rpi_ws281x/libws2811.a: ../external/rpi_ws281x/.git  $(PCH_FILE)
-	@echo "Building libws2811"
-	@cd ../external/rpi_ws281x/ && \
-		gcc -fPIC -c -o rpihw.o rpihw.c && \
-		gcc -fPIC -c -o mailbox.o mailbox.c && \
-		gcc -fPIC -c -o dma.o dma.c && \
-		gcc -fPIC -c -o pcm.o pcm.c && \
-		gcc -fPIC -c -o pwm.o pwm.c && \
-		gcc -fPIC -c -o ws2811.o ws2811.c && \
-		ar rcs libws2811.a rpihw.o mailbox.o dma.o pwm.o pcm.o ws2811.o
-
-#############################################################################
 # spixels library on the Pi
 ../external/spixels/.git:
 	@cd ../ && \
@@ -104,6 +86,5 @@ clean::
 	@if [ -e ../external/spixels/lib/libspixels.a ]; then $(MAKE) -C ../external/spixels/lib clean; fi
 	@if [ -e ../external/RF24/.git ]; then $(MAKE) -C ../external/RF24 clean; fi
 	@if [ -e ../external/rpi-rgb-led-matrix/.git ]; then $(MAKE) -C ../external/rpi-rgb-led-matrix clean; fi
-	@if [ -e ../external/rpi_ws281x/libws2811.a ]; then rm ../external/rpi_ws281x/*.o ../external/rpi_ws281x/*.a 2> /dev/null; fi
     
 endif

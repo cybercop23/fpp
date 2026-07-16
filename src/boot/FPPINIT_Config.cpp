@@ -890,7 +890,6 @@ void startDiskSwap() {
 
 void setupChannelOutputs() {
 #ifdef PLATFORM_PI
-    bool hasRPI = false;
     bool hasDPI = false;
     bool hasRPIMatrix = false;
     Json::Value v;
@@ -905,27 +904,44 @@ void setupChannelOutputs() {
     }
     if (FileExists("/home/fpp/media/config/co-pixelStrings.json")) {
         if (LoadJsonFromString(GetFileContents("/home/fpp/media/config/co-pixelStrings.json"), v)) {
+            bool migrated = false;
             for (int x = 0; x < v["channelOutputs"].size(); x++) {
-                if (v["channelOutputs"][x]["type"].asString() == "RPIWS281X" && v["channelOutputs"][x]["enabled"].asInt() == 1) {
-                    hasRPI = true;
-                    if (isPi5() && v["channelOutputs"][x]["subType"].asString() == "PiHat") {
-                        // Pi5 does not support RPIWS281X.  If using standard PiHat, then flip to DPIPixels,
-                        v["channelOutputs"][x]["type"] = "DPIPixels";
+                if (v["channelOutputs"][x]["type"].asString() == "RPIWS281X") {
+                    // The RPIWS281X driver has been removed.  DPI drives the same pins without
+                    // conflicting with the onboard audio, so migrate the config to DPIPixels.
+                    // Capes we don't have a mapping for keep their subType; DPIPixels resolves
+                    // the matching string config at runtime.
+                    std::string subType = v["channelOutputs"][x]["subType"].asString();
+                    v["channelOutputs"][x]["type"] = "DPIPixels";
+                    if (subType == "PiHat") {
                         v["channelOutputs"][x]["subType"] = "PiHat-DPIPixels";
-                        std::string newPixels = SaveJsonToString(v);
-                        bool b = PutFileContents("/home/fpp/media/config/co-pixelStrings.json", newPixels);
-                        hasRPI = false;
-                        hasDPI = true;
+                    } else if (subType == "rPi-MFC") {
+                        v["channelOutputs"][x]["subType"] = "rPi-MFC-DPIPixels";
+                    } else if (subType == "rPi-28D") {
+                        // The rPi-28D's third output was ws2801 over SPI which DPI cannot drive.
+                        // The 4 output variant drives CN1's clock and data pins as WS281x instead.
+                        v["channelOutputs"][x]["subType"] = "rPi-28D-DPIPixels-4";
+                        for (int o = 0; o < v["channelOutputs"][x]["outputs"].size(); o++) {
+                            if (v["channelOutputs"][x]["outputs"][o]["protocol"].asString() == "ws2801") {
+                                v["channelOutputs"][x]["outputs"][o]["protocol"] = "ws2811";
+                            }
+                        }
                     }
+                    migrated = true;
                 }
                 if (v["channelOutputs"][x]["type"].asString() == "DPIPixels" && v["channelOutputs"][x]["enabled"].asInt() == 1) {
                     hasDPI = true;
                 }
             }
+            if (migrated) {
+                PutFileContents("/home/fpp/media/config/co-pixelStrings.json", SaveJsonToString(v));
+            }
         }
     }
     bool changed = false;
-    if (hasRPI || hasRPIMatrix) {
+    // Only the RGBMatrix output still needs the onboard audio out of the way.  Pixel strings
+    // are driven by DPI now, which coexists with snd_bcm2835.
+    if (hasRPIMatrix) {
         if (!FileExists("/etc/modprobe.d/blacklist-bcm2835.conf")) {
             PutFileContents("/etc/modprobe.d/blacklist-bcm2835.conf", "blacklist snd_bcm2835");
             changed = true;

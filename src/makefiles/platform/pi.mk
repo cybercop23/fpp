@@ -28,7 +28,6 @@ endif
 SUBMODULES += \
 	external/RF24 \
 	external/rpi-rgb-led-matrix \
-	external/rpi_ws281x \
 	external/spixels
 
 OBJECTS_GPIO_ADDITIONS+=
