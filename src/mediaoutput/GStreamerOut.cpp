@@ -34,6 +34,7 @@
 #include <condition_variable>
 #include <thread>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <libdrm/drm.h>
 #include <libdrm/drm_mode.h>
 #include <xf86drm.h>
@@ -507,6 +508,181 @@ static int GetMaxPipeWireGroupDelayMs() {
     return maxDelay;
 }
 
+// ---------------------------------------------------------------------------
+// gst-pipewire channel-order quirk detection (FalconChristmas/fpp#2620)
+//
+// pipewiresink's caps→SPA conversion (set_default_channels() in
+// gstpipewireformat.c, present through at least pipewire 1.4.2) ignores the
+// GStreamer channel-mask and stamps a hard-coded PulseAudio-order position
+// table onto the stream — [FL FR RL RR FC LFE SL SR] for 7.1 — while the
+// samples stay in GStreamer/WAV canonical order [FL FR FC LFE RL RR SL SR].
+// Every label-matched PipeWire link downstream then swaps FC/LFE with RL/RR
+// (5.0/5.1 layouts are affected the same way; mono/stereo/quad tables happen
+// to match; 3ch/7ch get no position table at all).
+//
+// Rather than keying a workaround off a version number (a distro backport
+// would silently break it in either direction), probe the installed plugin
+// once: connect a silent unrouted 7.1 stream and read back the channel
+// positions it declares.  The verdict is cached keyed to the plugin binary's
+// identity, so a plugin upgrade re-probes and a fixed plugin automatically
+// disables the workaround.
+static bool IsGstPipeWireChannelOrderQuirky() {
+    static int cachedVerdict = -1; // -1 unknown, 0 clean, 1 quirky (per fppd run)
+    if (cachedVerdict >= 0)
+        return cachedVerdict == 1;
+    cachedVerdict = 0; // default: no workaround unless proven needed
+
+    // Identity of the installed gst-pipewire plugin binary
+    std::string pluginSig;
+    GstPlugin* plugin = gst_registry_find_plugin(gst_registry_get(), "pipewire");
+    if (plugin) {
+        const gchar* fn = gst_plugin_get_filename(plugin);
+        if (fn) {
+            struct stat st;
+            if (stat(fn, &st) == 0) {
+                pluginSig = std::string(fn) + ":" + std::to_string(st.st_mtime) + ":" + std::to_string(st.st_size);
+            }
+        }
+        gst_object_unref(plugin);
+    }
+    if (pluginSig.empty()) {
+        LogWarn(VB_MEDIAOUT, "GStreamer: cannot identify pipewire plugin; channel-order workaround disabled\n");
+        return false;
+    }
+
+    // Cached verdict from a previous run for this exact plugin binary?
+    const std::string cachePath = getFPPMediaDir() + "/config/gst-pipewire-quirks.json";
+    if (FileExists(cachePath)) {
+        Json::Value cache;
+        if (LoadJsonFromFile(cachePath, cache)
+            && cache.get("pluginSig", "").asString() == pluginSig) {
+            cachedVerdict = cache.get("channelOrderQuirky", false).asBool() ? 1 : 0;
+            LogInfo(VB_MEDIAOUT, "GStreamer: pipewire channel-order quirk (cached): %s\n",
+                    cachedVerdict ? "PRESENT (workaround active)" : "absent");
+            return cachedVerdict == 1;
+        }
+    }
+
+    // Probe: silent 7.1 stream, not linked to anything (node.autoconnect=false),
+    // then read the position array the plugin declared from pw-dump.
+    LogInfo(VB_MEDIAOUT, "GStreamer: probing pipewire plugin for channel-order quirk...\n");
+    GError* perr = nullptr;
+    GstElement* probe = gst_parse_launch(
+        "audiotestsrc wave=silence is-live=true ! "
+        "audio/x-raw,format=S16LE,rate=48000,channels=8,channel-mask=(bitmask)0xc3f ! "
+        "pipewiresink sync=false "
+        "stream-properties=\"props,node.name=(string)fpp_chorder_probe,node.autoconnect=(boolean)false\"",
+        &perr);
+    if (!probe || perr) {
+        LogWarn(VB_MEDIAOUT, "GStreamer: quirk probe pipeline failed: %s\n",
+                perr ? perr->message : "unknown");
+        if (perr)
+            g_error_free(perr);
+        if (probe)
+            gst_object_unref(probe);
+        return false;
+    }
+    gst_element_set_state(probe, GST_STATE_PLAYING);
+
+    // Poll pw-dump for the probe node's declared EnumFormat positions
+    std::vector<std::string> positions;
+    for (int attempt = 0; attempt < 10 && positions.empty(); attempt++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        FILE* p = popen("/usr/bin/pw-dump 2>/dev/null", "r");
+        if (!p)
+            break;
+        std::string out;
+        char buf[8192];
+        size_t r;
+        while ((r = fread(buf, 1, sizeof(buf), p)) > 0)
+            out.append(buf, r);
+        pclose(p);
+        Json::Value dump;
+        if (!LoadJsonFromString(out, dump) || !dump.isArray())
+            continue;
+        for (const auto& obj : dump) {
+            if (obj.get("type", "").asString() != "PipeWire:Interface:Node")
+                continue;
+            if (obj["info"]["props"].get("node.name", "").asString() != "fpp_chorder_probe")
+                continue;
+            for (const auto& fmt : obj["info"]["params"]["EnumFormat"]) {
+                const Json::Value& pos = fmt["position"];
+                if (pos.isArray() && pos.size() == 8) {
+                    for (const auto& ch : pos)
+                        positions.push_back(ch.asString());
+                    break;
+                }
+            }
+        }
+    }
+    gst_element_set_state(probe, GST_STATE_NULL);
+    gst_object_unref(probe);
+
+    if (positions.size() != 8) {
+        // PipeWire down or dump unparsable — leave workaround off, don't cache
+        LogWarn(VB_MEDIAOUT, "GStreamer: channel-order quirk probe inconclusive; workaround disabled this run\n");
+        return false;
+    }
+    int idxRL = -1, idxFC = -1;
+    for (int i = 0; i < 8; i++) {
+        if (positions[i] == "RL")
+            idxRL = i;
+        else if (positions[i] == "FC")
+            idxFC = i;
+    }
+    bool quirky = (idxRL >= 0 && idxFC >= 0 && idxRL < idxFC);
+    cachedVerdict = quirky ? 1 : 0;
+    LogWarn(VB_MEDIAOUT, "GStreamer: pipewire declares 7.1 positions [%s %s %s %s %s %s %s %s] — channel-order quirk %s\n",
+            positions[0].c_str(), positions[1].c_str(), positions[2].c_str(), positions[3].c_str(),
+            positions[4].c_str(), positions[5].c_str(), positions[6].c_str(), positions[7].c_str(),
+            quirky ? "PRESENT (pre-permute workaround active)" : "absent");
+
+    Json::Value cache;
+    cache["pluginSig"] = pluginSig;
+    cache["channelOrderQuirky"] = quirky;
+    cache["declaredOrder"] = Json::arrayValue;
+    for (const auto& s : positions)
+        cache["declaredOrder"].append(s);
+    SaveJsonToFile(cache, cachePath);
+    return quirky;
+}
+
+// Build the pre-permute fragment that reorders GStreamer/WAV canonical
+// channel order into the PulseAudio order the quirky plugin will declare,
+// so PipeWire's label-matched links route the right content.  Returns the
+// extra caps to append to the rate capsfilter and the permute elements.
+static void BuildChannelOrderFix(int channels, std::string& extraCaps, std::string& permuteChain) {
+    struct Layout {
+        int channels;
+        const char* mask;
+        std::vector<int> srcIdx; // pulse-order slot -> wav-order source channel
+    };
+    static const Layout layouts[] = {
+        { 5, "0x37", { 0, 1, 3, 4, 2 } },          // [FL FR RL RR FC] <- [FL FR FC RL RR]
+        { 6, "0x3f", { 0, 1, 4, 5, 2, 3 } },       // [FL FR RL RR FC LFE] <- [FL FR FC LFE RL RR]
+        { 8, "0xc3f", { 0, 1, 4, 5, 2, 3, 6, 7 } } // [FL FR RL RR FC LFE SL SR] <- [FL FR FC LFE RL RR SL SR]
+    };
+    for (const auto& l : layouts) {
+        if (l.channels != channels)
+            continue;
+        extraCaps = ",channels=" + std::to_string(channels) + ",channel-mask=(bitmask)" + l.mask;
+        std::string matrix = "<";
+        for (int row = 0; row < channels; row++) {
+            matrix += (row ? ",<" : "<");
+            for (int col = 0; col < channels; col++) {
+                matrix += (col ? "," : "");
+                matrix += (l.srcIdx[row] == col) ? "(float)1.0" : "(float)0.0";
+            }
+            matrix += ">";
+        }
+        matrix += ">";
+        permuteChain = "audioconvert mix-matrix=\"" + matrix + "\" ! audio/x-raw" + extraCaps + " ! ";
+        return;
+    }
+    extraCaps.clear();
+    permuteChain.clear();
+}
+
 GStreamerOutput::GStreamerOutput(const std::string& mediaFilename, MediaOutputStatus* status, const std::string& videoOut, int streamSlot)
     : m_videoOut(videoOut), m_streamSlot(streamSlot) {
     LogWarn(VB_MEDIAOUT, "GStreamer: CTOR enter (%s, videoOut=%s, slot=%d)\n", mediaFilename.c_str(), videoOut.c_str(), streamSlot);
@@ -564,9 +740,11 @@ int GStreamerOutput::Start(int msTime) {
     // Without this, the playlist status polls GetElapsedMS() before GStreamer
     // has queried the duration, causing m_duration to track elapsed time
     // and seconds_remaining to always report 0.
+    int mediaChannels = 0; // used by the pipewire channel-order workaround below
     {
         MediaDetails details;
         details.ParseMedia(fullPath.c_str());
+        mediaChannels = details.channels;
         if (details.lengthMS > 0) {
             int totalSecs = details.lengthMS / 1000;
             m_mediaOutputStatus->minutesTotal = totalSecs / 60;
@@ -1284,9 +1462,21 @@ int GStreamerOutput::Start(int msTime) {
         // H.264 decoder for a video branch nothing consumes; tearing that down
         // leaves vb2 buffers active and sprays kernel WARN stack dumps
         // (videobuf2-core "driver bug: stop_streaming...") on every stop.
+        // Multichannel + quirky gst-pipewire plugin: pin the layout and
+        // pre-permute the samples into the (wrong) PulseAudio channel order
+        // the plugin will declare, so the labels PipeWire routes by actually
+        // match the content.  Self-disabling: once a fixed plugin is
+        // installed the probe returns false and no permute is inserted.
+        std::string chOrderCaps, chOrderPermute;
+        if (usePipeWire && (mediaChannels == 5 || mediaChannels == 6 || mediaChannels == 8)
+            && IsGstPipeWireChannelOrderQuirky()) {
+            BuildChannelOrderFix(mediaChannels, chOrderCaps, chOrderPermute);
+            LogWarn(VB_MEDIAOUT, "GStreamer: applying %dch channel-order workaround for quirky gst-pipewire plugin\n",
+                    mediaChannels);
+        }
         std::string pipelineStr =
             "filesrc location=\"" + fullPath + "\" ! decodebin expose-all-streams=false caps=\"audio/x-raw\" ! audioconvert ! audioresample ! "
-            "audio/x-raw,rate=48000 ! "
+            "audio/x-raw,rate=48000" + chOrderCaps + " ! " + chOrderPermute +
             "tee name=t "
             "t. ! queue ! volume name=vol ! " + sinkStr + " "
             "t. ! queue max-size-buffers=3 leaky=downstream ! "
