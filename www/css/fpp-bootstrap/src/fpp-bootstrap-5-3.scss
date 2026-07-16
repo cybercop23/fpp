@@ -420,7 +420,10 @@ input[type='checkbox'][disabled='']:checked {
 	background-color: var(--bs-secondary-bg);
 }
 .alert {
-	color: $white;
+	// Do NOT force white on every alert: Bootstrap's per-variant --bs-alert-color
+	// keeps text readable on pale subtle backgrounds (e.g. .alert-warning, which had
+	// no FPP override and rendered white-on-pale in light mode). Only the solid-bg
+	// variants below opt into white text.
 	a {
 		color: $black;
 		font-weight: bold;
@@ -429,6 +432,7 @@ input[type='checkbox'][disabled='']:checked {
 		}
 	}
 	&.detract {
+		color: $white;
 		background-color: #f2bc5f;
 	}
 	&-danger-outline {
@@ -436,6 +440,7 @@ input[type='checkbox'][disabled='']:checked {
 		background-color: $red;
 	}
 	&-danger {
+		color: $white;
 		background-color: $red;
 		border-color: $red;
 	}
@@ -446,6 +451,7 @@ input[type='checkbox'][disabled='']:checked {
 }
 
 .alert-info {
+	color: $white;
 	background-color: #008b8b;
 	border-color: #008b8b;
 }

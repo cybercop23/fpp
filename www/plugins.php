@@ -16,6 +16,33 @@
         var pluginInfos = [];
         var pluginInfoURLs = [];
         var pluginInfoUseCredentials = {};
+        // --- Plugin categories (Phase 1) ---
+        var pluginCategoryList = [];      // [{name,longName,slug,icon}] from pluginCategories.json
+        var pluginCategoryBySlug = {};
+        var pluginCategoryByName = {};
+        var pluginCategoryOf = {};        // lowercased pluginList name -> category name
+        var activeCategorySlug = 'all';
+        var activeTopTab = 'available';
+        var updatesCheckedOnce = false;
+        var OTHER_CATEGORY = { name: 'Other', slug: 'other', icon: 'fas fa-puzzle-piece' };
+        // The plugin list and its category taxonomy both live in FalconChristmas/fpp-data
+        // (raw.githubusercontent.com is already allow-listed in FPP's Apache CSP connect-src).
+        // The 3rd element of each pluginList entry is the (short) category name; older FPP
+        // clients read only [0]/[1] and ignore it, so it is backward compatible.
+        var PLUGIN_LIST_URL = 'https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/pluginList.json';
+        var PLUGIN_CATEGORIES_URL = 'https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/pluginCategories.json';
+        // --- Plugin popularity (Phase 2) ---
+        // Install counts keyed by repoName (== row id). D17: the device does NOT fetch the
+        // personal stats host from the browser — that origin is not in FPP's Apache CSP
+        // connect-src. Instead the SAME-ORIGIN backend endpoint api/plugin/popularity proxies
+        // the stats feed server-side (CSP does not apply to PHP), requests gzip, slims it to
+        // repoName->count, and disk-caches the result (shared per box, 7-day TTL). It fails soft:
+        // on an upstream error it serves a stale cache, else an empty map — the UI then hides
+        // the Popular strip and falls back to name sort. Same-origin, so no popularity fixture
+        // and no CSP entry are needed.
+        var pluginPopularity = {};        // repoName -> integer install count
+        var popularityLoaded = false;
+        var POPULARITY_URL = 'api/plugin/popularity';
 
         function PluginIsInstalled(plugin) {
             for (var i = 0; i < installedPlugins.length; i++) {
@@ -44,9 +71,21 @@
         }
 
         function GetPluginList() {
-            var url = 'https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/pluginList.json';
+            // Fetch the category taxonomy first (non-fatal on failure), then the list.
             $.ajax({
-                url: url,
+                url: PLUGIN_CATEGORIES_URL,
+                dataType: 'json',
+                complete: function (xhr) {
+                    var cats = (xhr && xhr.responseJSON && xhr.responseJSON.categories) || [];
+                    LoadPluginCategories(cats);
+                    GetPluginListData();
+                }
+            });
+        }
+
+        function GetPluginListData() {
+            $.ajax({
+                url: PLUGIN_LIST_URL,
                 dataType: 'json',
                 success: function (data) {
                     LoadPlugins(data.pluginList);
@@ -61,6 +100,99 @@
             });
         }
 
+        // Build category lookup maps + pills from pluginCategories.json (D16).
+        function LoadPluginCategories(cats) {
+            pluginCategoryList = [];
+            pluginCategoryBySlug = {};
+            pluginCategoryByName = {};
+            for (var i = 0; i < cats.length; i++) {
+                var c = cats[i];
+                if (!c || !c.name) continue;
+                if (!c.slug) c.slug = c.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+                if (!c.icon) c.icon = 'fas fa-puzzle-piece';
+                pluginCategoryList.push(c);
+                pluginCategoryBySlug[c.slug] = c;
+                // name is the PRIMARY key (what pluginList stores + matches on); longName
+                // is a SECONDARY key kept for back-tolerance + the tooltip.
+                pluginCategoryByName[c.name] = c;
+                if (c.longName) pluginCategoryByName[c.longName] = c;
+            }
+            // Present categories alphabetically by their displayed label so the visible
+            // pill order reads A-Z ("All" stays pinned first in BuildCategoryPills).
+            pluginCategoryList.sort(function (a, b) { return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }); });
+            BuildCategoryPills();
+        }
+
+        // "Official" = clone origin (srcURL) is a repo in the FalconChristmas GitHub org.
+        // Parse the URL (host + first path segment) so a spoofed host/path can't earn it (D18).
+        function IsOfficialPlugin(data) {
+            var u = data && data.srcURL;
+            if (!u) return false;
+            try {
+                var parsed = new URL(u);
+                if (parsed.host.toLowerCase() !== 'github.com') return false;
+                var seg = parsed.pathname.split('/').filter(function (x) { return x.length > 0; });
+                return seg.length > 0 && seg[0].toLowerCase() === 'falconchristmas';
+            } catch (e) {
+                return false;
+            }
+        }
+
+        // Attribution HTML derived from the clone origin (srcURL) rather than the
+        // self-supplied `author` field, which nobody verifies (D18). Returns the repo
+        // owner (the GitHub/host account or org) linked to their profile. The
+        // self-reported `author` is deliberately not shown — only the verifiable
+        // source owner. Returns '' when there is no usable source URL (caller omits
+        // the attribution line entirely).
+        function PluginAuthorHtml(data) {
+            var u = data && data.srcURL;
+            if (!u) return '';
+            try {
+                var parsed = new URL(u);
+                var seg = parsed.pathname.split('/').filter(function (x) { return x.length > 0; });
+                if (seg.length === 0) return '';
+                var owner = seg[0];
+                var profile = (parsed.host.toLowerCase() === 'github.com')
+                    ? 'https://github.com/' + owner
+                    : parsed.origin + '/' + owner;
+                return '<a href="' + profile + '" target="_blank" rel="noopener noreferrer">' + owner + '</a>';
+            } catch (e) {
+                return '';
+            }
+        }
+
+        function BuildCategoryPills() {
+            var $pills = $('#pluginCategoryPills');
+            if (!$pills.length) return;
+            $pills.empty();
+            var uiLevel = parseInt(settings["uiLevel"]) || 0;
+            var pills = [];
+            // "All" view shown at every UI level (D27) and is the default landing view.
+            pills.push({ name: 'All', slug: 'all', icon: 'fas fa-border-all' });
+            for (var i = 0; i < pluginCategoryList.length; i++) pills.push(pluginCategoryList[i]);
+            activeCategorySlug = 'all';
+            for (var j = 0; j < pills.length; j++) {
+                var c = pills[j];
+                var li = $('<li class="nav-item" role="presentation"></li>');
+                var btn = $('<button type="button" role="tab" class="nav-link text-nowrap"></button>');
+                if (c.slug === activeCategorySlug) btn.addClass('active');
+                btn.attr('data-category-slug', c.slug);
+                btn.attr('title', c.longName || c.name);
+                btn.html('<i class="' + c.icon + '"></i> ' + c.name +
+                    ' <span class="badge bg-secondary ms-1 fppCatCount" data-count-slug="' + c.slug + '">0</span>');
+                btn.on('click', function () {
+                    $('#pluginCategoryPills .nav-link').removeClass('active');
+                    $(this).addClass('active');
+                    activeCategorySlug = $(this).attr('data-category-slug');
+                    this.scrollIntoView({ block: 'nearest', inline: 'center' });
+                    FilterPlugins();
+                });
+                li.append(btn);
+                $pills.append(li);
+            }
+            FilterPlugins();
+        }
+
         function CheckPluginForUpdates(plugin) {
             var url = 'api/plugin/' + plugin + '/updates';
 
@@ -72,10 +204,13 @@
                 success: function (data) {
                     $('html,body').css('cursor', 'auto');
                     if (data.Status == 'OK') {
-                        if (data.updatesAvailable)
-                            $('#row-' + plugin).find('.updatesAvailable').show();
-                        else
+                        if (data.updatesAvailable) {
+                            $('#row-' + plugin).addClass('fppHasUpdate').find('.updatesAvailable').show();
+                        } else {
+                            $('#row-' + plugin).removeClass('fppHasUpdate');
                             $.jGrowl('No updates available for ' + plugin, { themeState: 'detract' });
+                        }
+                        FilterPlugins();
                     }
                     else
                         alert('ERROR: ' + data.Message);
@@ -110,7 +245,7 @@
                     success: function (data) {
                         checked++;
                         if (data.Status == 'OK' && data.updatesAvailable) {
-                            $('#row-' + plugin).find('.updatesAvailable').show();
+                            $('#row-' + plugin).addClass('fppHasUpdate').find('.updatesAvailable').show();
                             updatesFound++;
                         }
 
@@ -122,6 +257,7 @@
                             } else {
                                 $.jGrowl('All plugins are up to date', { themeState: 'success' });
                             }
+                            FilterPlugins();
                         }
                     },
                     error: function () {
@@ -130,6 +266,161 @@
                             $('html,body').css('cursor', 'auto');
                             $('#checkAllUpdatesBtn').prop('disabled', false);
                             $.jGrowl('Completed checking plugins (some checks failed)', { themeState: 'warn' });
+                            FilterPlugins();
+                        }
+                    }
+                });
+            });
+        }
+
+        // Update All: (re)check every installed plugin for updates, then upgrade
+        // each one that has an update available, sequentially, in a single progress
+        // dialog. Cheaper and safer than Reinstall All -- it only touches plugins
+        // with a pending update and never uninstalls anything (no removal window),
+        // so a shared dependency can't be dropped mid-flight. Mirrors the Reinstall
+        // All queue + progress-dialog + verify-by-recheck pattern.
+        var updateAllQueue = [];
+        var updateAllAttempted = [];
+        var updateAllTotal = 0;
+        // The progress popup body is a <textarea> (see DisplayProgressDialog) and
+        // cannot render HTML, so status lines are plain text appended to .value,
+        // matching how StreamURL writes the streamed command output. Auto-scroll.
+        function UpdateAllLog(text) {
+            var outputArea = document.getElementById('pluginsProgressPopupText');
+            if (!outputArea)
+                return;
+            outputArea.value += text;
+            outputArea.scrollTop = outputArea.scrollHeight;
+        }
+
+        // Entry point (toolbar button). Runs a fresh update check across all
+        // installed plugins first so the user does not have to click "Check All for
+        // Updates" beforehand, then confirms and upgrades those with updates.
+        function UpdateAllPlugins() {
+            if (installedPlugins.length === 0) {
+                $.jGrowl('No plugins installed', { themeState: 'detract' });
+                return;
+            }
+            $('html,body').css('cursor', 'wait');
+            $('#updateAllBtn').prop('disabled', true);
+            $('#checkAllUpdatesBtn').prop('disabled', true);
+
+            var checked = 0;
+            var total = installedPlugins.length;
+            var withUpdates = [];
+            installedPlugins.forEach(function (plugin) {
+                $.ajax({
+                    url: 'api/plugin/' + plugin + '/updates',
+                    type: 'POST',
+                    dataType: 'json',
+                    success: function (data) {
+                        if (data.Status == 'OK' && data.updatesAvailable) {
+                            $('#row-' + plugin).addClass('fppHasUpdate').find('.updatesAvailable').show();
+                            withUpdates.push(plugin);
+                        }
+                    },
+                    // complete runs on both success and error so one failed check
+                    // does not strand the batch.
+                    complete: function () {
+                        checked++;
+                        if (checked === total)
+                            UpdateAllChecksDone(withUpdates);
+                    }
+                });
+            });
+        }
+
+        function UpdateAllChecksDone(withUpdates) {
+            $('html,body').css('cursor', 'auto');
+            $('#updateAllBtn').prop('disabled', false);
+            $('#checkAllUpdatesBtn').prop('disabled', false);
+            FilterPlugins();
+            if (withUpdates.length === 0) {
+                $.jGrowl('All plugins are up to date', { themeState: 'success' });
+                return;
+            }
+            DoModalDialog({
+                id: "updateAllPluginsDialog",
+                class: "modal-lg",
+                title: "Update All Plugins",
+                body: "Update the " + withUpdates.length + " plugin(s) with an available update, one at a time?" +
+                    "<div class='small text-secondary mt-2'>" + withUpdates.join(', ') + "</div>",
+                backdrop: true,
+                keyboard: true,
+                buttons: {
+                    "Update All": function () {
+                        CloseModalDialog("updateAllPluginsDialog");
+                        RunUpdateAll(withUpdates);
+                    },
+                    Abort: function () {
+                        CloseModalDialog("updateAllPluginsDialog");
+                    }
+                }
+            });
+        }
+
+        function RunUpdateAll(withUpdates) {
+            updateAllQueue = withUpdates.slice();
+            updateAllAttempted = withUpdates.slice();
+            updateAllTotal = withUpdates.length;
+            DisplayProgressDialog("pluginsProgressPopup", "Update All Plugins");
+            UpdateNextPlugin();
+        }
+
+        function UpdateNextPlugin() {
+            if (updateAllQueue.length === 0) {
+                UpdateAllFinish();
+                return;
+            }
+            var plugin = updateAllQueue.shift();
+            var done = updateAllTotal - updateAllQueue.length;
+            SetProgressDialogStatus('pluginsProgressPopup',
+                'Update All — updating ' + done + ' of ' + updateAllTotal);
+            UpdateAllLog('\n===== Updating ' + plugin + ' (' + done + ' of ' + updateAllTotal + ') =====\n');
+            var url = 'api/plugin/' + plugin + '/upgrade?stream=true';
+            // Chain to the next plugin on both success and failure so a single
+            // failed upgrade does not stop the rest of the batch.
+            StreamURL(url, 'pluginsProgressPopupText', 'UpdateNextPlugin', 'UpdateNextPlugin');
+        }
+
+        // After all upgrades have streamed, verify by re-checking each attempted
+        // plugin: the upgrade endpoint streams output even on a logical failure, so
+        // any plugin that STILL reports an update available did not update. Mirrors
+        // ReinstallFinish's re-query verification.
+        function UpdateAllFinish() {
+            var rechecked = 0;
+            var total = updateAllAttempted.length;
+            var stillStale = [];
+            updateAllAttempted.forEach(function (plugin) {
+                $.ajax({
+                    url: 'api/plugin/' + plugin + '/updates',
+                    type: 'POST',
+                    dataType: 'json',
+                    success: function (data) {
+                        if (data.Status == 'OK' && data.updatesAvailable) {
+                            stillStale.push(plugin);
+                            $('#row-' + plugin).addClass('fppHasUpdate').find('.updatesAvailable').show();
+                        } else {
+                            $('#row-' + plugin).removeClass('fppHasUpdate').find('.updatesAvailable').hide();
+                        }
+                    },
+                    complete: function () {
+                        rechecked++;
+                        if (rechecked === total) {
+                            var ok = total - stillStale.length;
+                            SetProgressDialogStatus('pluginsProgressPopup',
+                                stillStale.length ? ('Update All — ' + stillStale.length + ' may have failed, ' + ok + ' of ' + total + ' ok')
+                                                  : ('Update All — complete (' + ok + ' of ' + total + ')'));
+                            UpdateAllLog('\n===== Update complete: ' + ok + ' of ' + total + ' plugin(s) updated successfully =====\n');
+                            if (stillStale.length)
+                                UpdateAllLog('Still reporting an available update (may have failed): ' + stillStale.join(', ') + '\n');
+                            UpdateAllLog('Reload the page to refresh the plugin list.\n');
+                            if (stillStale.length)
+                                $.jGrowl(stillStale.length + ' plugin(s) may not have updated', { themeState: 'warn' });
+                            else
+                                $.jGrowl('All ' + ok + ' plugin(s) updated successfully', { themeState: 'success' });
+                            FilterPlugins();
+                            ProgressDialogDone('pluginsProgressPopupText');
                         }
                     }
                 });
@@ -163,6 +454,49 @@
             var postData = JSON.stringify(pluginInfo);
             DisplayProgressDialog("pluginsProgressPopup", "Install Plugin");
             StreamURL(url, 'pluginsProgressPopupText', 'ProgressDialogDone', 'ProgressDialogDone', 'POST', postData, 'application/json');
+        }
+
+        // Gate before InstallPlugin (D12): Official plugins (FalconChristmas org)
+        // install directly; third-party/community plugins pop a confirmation first
+        // so the user acknowledges they are installing code from outside the FPP
+        // project, which runs with full access to their system. Applies at all UI
+        // levels and to every install entry point (cards, popular strip, modal).
+        function ConfirmAndInstall(plugin, branch, sha) {
+            var i = FindPluginInfo(plugin);
+            var data = (i >= 0) ? pluginInfos[i] : null;
+            if (data && IsOfficialPlugin(data)) {
+                InstallPlugin(plugin, branch, sha);
+                return;
+            }
+            var name = (data && data.name) ? data.name : plugin;
+            var src = (data && data.srcURL) ? data.srcURL : '';
+            var body = '<div class="alert alert-warning text-warning-emphasis py-2 mb-2">' +
+                '<i class="fas fa-exclamation-triangle"></i> Installing <b>' + name + '</b> runs ' +
+                '<b>third-party, untrusted code</b> on your FPP. It has full access to this device <b>and to ' +
+                'anything else on the network FPP is connected to</b>. This is inherently dangerous unless you ' +
+                'trust the plugin\'s author. The FPP project <b>does not test, vet, or guarantee the quality or ' +
+                'safety</b> of plugins &mdash; install at your own risk, and only from authors you trust. The ' +
+                '<span class="badge bg-primary"><i class="fas fa-certificate"></i> Official</span> badge marks ' +
+                'plugins maintained by the FPP team (this plugin is not one of them).</div>';
+            if (src) body += '<div class="small text-secondary"><i class="fas fa-code"></i> Source: ' +
+                '<a href="' + src + '" target="_blank" rel="noopener noreferrer">' + src + '</a></div>';
+            DoModalDialog({
+                id: "confirmInstallDialog",
+                class: "modal-lg",
+                title: "Install third-party plugin?",
+                body: body,
+                backdrop: true,
+                keyboard: true,
+                buttons: {
+                    Install: function () {
+                        CloseModalDialog("confirmInstallDialog");
+                        InstallPlugin(plugin, branch, sha);
+                    },
+                    Cancel: function () {
+                        CloseModalDialog("confirmInstallDialog");
+                    }
+                }
+            });
         }
 
         function UninstallPlugin(plugin) {
@@ -446,32 +780,38 @@
 
         // Determine which version entry applies to this FPP version/platform.
         // Returns { compatible, untested } indices (or -1). Shared by LoadPlugin
-        // (rendering) and ReinstallAllPlugins (picking a version to reinstall) so
-        // the selection logic lives in one place. NOTE: this mutates a version's
-        // maxFPPVersion to flag untested entries for the compatibility display,
-        // matching the original inline behaviour in LoadPlugin.
+        // (rendering), ShowPluginDetail (the modal) and ReinstallAllPlugins so the
+        // selection logic lives in one place. MUST be idempotent: it is called
+        // repeatedly on the same pluginInfo object (card render, then again when the
+        // detail modal opens). It therefore does NOT mutate the version data — a
+        // version with no declared upper bound that was built for an older FPP major
+        // is capped only in a LOCAL variable for the compatibility test. (The earlier
+        // version mutated maxFPPVersion, so the second call saw a real cap and lost
+        // the "untested" flag — the card offered install but the modal didn't.)
         function SelectPluginVersionIndices(data) {
             var compatibleVersion = -1;
             var untestedVersion = -1;
+            var curMajor = getFPPMajorVersion();
+            var isUnset = function (m) { return m == "0" || m == "0.0" || m == "" || m == undefined; };
             for (var i = 0; i < data.versions.length; i++) {
-                if ((data.versions[i].maxFPPVersion == "0") || (data.versions[i].maxFPPVersion == "0.0") || (data.versions[i].maxFPPVersion == "")) {
-                    // maxVersion is the .999 of the min version Major version due to symantic versioning
-                    var nv = data.versions[i].minFPPVersion;
-                    nv = nv.split('.')[0];
-                    if (nv != getFPPMajorVersion()) {
-                        nv = (getFPPMajorVersion() - 1) + ".999";
-                        data.versions[i].maxFPPVersion = nv;
+                var v = data.versions[i];
+                var effMax = v.maxFPPVersion; // effective upper bound used only for this test
+                if (isUnset(effMax)) {
+                    // No upper bound declared. If it was built for a different (older)
+                    // FPP major, treat it as "not updated for this version": cap at the
+                    // previous major's .999 so the compat test fails, and flag untested.
+                    var minMajor = String(v.minFPPVersion).split('.')[0];
+                    if (minMajor != curMajor) {
+                        effMax = (curMajor - 1) + ".999";
                         untestedVersion = i;
                     }
                 }
 
-                if ((CompareFPPVersions(data.versions[i].minFPPVersion, getFPPVersionTriplet()) <= 0) &&
-                    ((data.versions[i].maxFPPVersion == "0") || (data.versions[i].maxFPPVersion == "0.0") ||
-                        (CompareFPPVersions(data.versions[i].maxFPPVersion, getFPPVersionTriplet()) > 0)) &&
-                    ((!data.versions[i].hasOwnProperty('platforms')) ||
-                        (data.versions[i].platforms.includes(settings['Platform'])))) {
+                var minOk = CompareFPPVersions(v.minFPPVersion, getFPPVersionTriplet()) <= 0;
+                var maxOk = isUnset(effMax) || (CompareFPPVersions(effMax, getFPPVersionTriplet()) > 0);
+                var platOk = (!v.hasOwnProperty('platforms')) || (v.platforms.includes(settings['Platform']));
+                if (minOk && maxOk && platOk)
                     compatibleVersion = i;
-                }
             }
             return { compatible: compatibleVersion, untested: untestedVersion };
         }
@@ -498,186 +838,375 @@
         var firstCompatible = 1;
         var firstUntested = 1;
         var firstIncompatible = 1;
-        function LoadPlugin(data, insert = false) {
-            var html = '';
-            var infoURL = pluginInfoURLs[data.repoName];
+        function InsertCardSorted(gridId, key, html) {
+            var strcmp = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare;
+            var placed = false;
+            $('#' + gridId).children('.pluginCard').each(function () {
+                if (placed) return;
+                var t = $(this).find('.pluginTitle').text();
+                if (t && strcmp(t, key) >= 0) { $(html).insertBefore(this); placed = true; }
+            });
+            if (!placed) $('#' + gridId).append(html);
+        }
 
-            if ($('#row-' + data.repoName).length) {
-                // Delete the original entry so we can re-add with the latest info
-                $('#row-' + data.repoName).next('.row').remove();
-                if ($('#row-' + data.repoName).next('.row').html() == '<div class="col"><hr></div>')
-                    $('#row-' + data.repoName).next('.row').remove();
-                else
-                    $('#row-' + data.repoName).prev('.row').remove();
+        // Insert an Available card into #pluginGrid ranked by popularity desc, name asc.
+        function InsertAvailableCard(html, name, popularity) {
+            var strcmp = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare;
+            var placed = false;
+            var $grid = $('#pluginGrid');
+            $grid.children('.pluginCard').each(function () {
+                if (placed) return;
+                var p = parseInt($(this).attr('data-popularity'), 10) || 0;
+                var t = $(this).find('.pluginTitle').text();
+                if (popularity > p || (popularity === p && strcmp(name, t) < 0)) {
+                    $(html).insertBefore(this); placed = true;
+                }
+            });
+            if (!placed) $grid.append(html);
+        }
 
-                $('#row-' + data.repoName).remove();
-            } else {
-                pluginInfos.push(data);
+        // --- Popularity (Phase 2) ---
+
+        // Install count for a repo (0 when unknown / feed unavailable).
+        function PopularityOf(repo) {
+            var n = pluginPopularity[repo];
+            return (typeof n === 'number' && n > 0) ? n : 0;
+        }
+
+        // A neutral install-count badge. Count is an integer, so the interpolation
+        // below is safe; untrusted plugin text is never placed here.
+        function PopularityBadgeHtml(count) {
+            if (!count) return '';
+            var formatted = count.toLocaleString();
+            return '<span class="badge bg-info text-dark me-1 fppPopBadge" title="' + formatted +
+                ' installs (last 365 days)" aria-label="' + formatted + ' installs">' +
+                '<i class="fas fa-download"></i> ' + formatted + '</span>';
+        }
+
+        // Fetch install counts via the backend proxy (api/plugin/popularity), which
+        // caches server-side (shared per box, 7-day TTL) — no browser-side cache. Runs in
+        // parallel with the installed/list loads; failure degrades gracefully.
+        function GetPluginPopularity() {
+            $.ajax({
+                url: POPULARITY_URL,
+                dataType: 'json',
+                success: function (d) {
+                    // Accept the slim snapshot ({counts:{…}} or a bare repoName->count
+                    // map), and still tolerate the raw stats feed shape if ever pointed
+                    // at it directly. Treat the payload as untrusted.
+                    var counts = (d && d.counts) ? d.counts
+                        : (d && d.topPlugins && d.topPlugins.data)
+                            ? (d.topPlugins.data.last365Days || d.topPlugins.data.totalCount || {})
+                            : (d || {});
+                    var map = {};
+                    for (var k in counts) {
+                        if (!counts.hasOwnProperty(k)) continue;
+                        var n = parseInt(counts[k], 10);
+                        if (!isNaN(n) && n > 0) map[k] = n;
+                    }
+                    ApplyPopularity(map);
+                }
+                // No error handler: no badges, no Popular strip, alphabetical order.
+            });
+        }
+
+        function ApplyPopularity(map) {
+            pluginPopularity = map || {};
+            popularityLoaded = true;
+            PatchPopularityBadges();   // stamp already-rendered cards
+            ReorderCategoryPanes();    // re-sort now that counts are known
+            BuildPopularStrip();
+            FilterPlugins();
+        }
+
+        // Stamp data-popularity + inject/refresh the badge on already-rendered cards.
+        function PatchPopularityBadges() {
+            $('#pluginGrid, #installedGrid').children('.pluginCard').each(function () {
+                var repo = ($(this).attr('id') || '').replace(/^row-/, '');
+                var count = PopularityOf(repo);
+                $(this).attr('data-popularity', count);
+                var $holder = $(this).find('.pluginCardBadges').first();
+                $holder.find('.fppPopBadge').remove();
+                if (count) $holder.append(PopularityBadgeHtml(count));
+            });
+        }
+
+        // Re-sort the Available grid by popularity desc (name tiebreak). Cheap at
+        // this catalog size; called after the feed lands and (debounced) as loads settle.
+        function ReorderCategoryPanes() {
+            var strcmp = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare;
+            var $grid = $('#pluginGrid');
+            var cards = $grid.children('.pluginCard').get();
+            cards.sort(function (a, b) {
+                var pa = parseInt(a.getAttribute('data-popularity'), 10) || 0;
+                var pb = parseInt(b.getAttribute('data-popularity'), 10) || 0;
+                if (pa !== pb) return pb - pa;
+                return strcmp($(a).find('.pluginTitle').text(), $(b).find('.pluginTitle').text());
+            });
+            $.each(cards, function (i, el) { $grid.append(el); });
+        }
+
+        // Debounced "loads settled" re-sort + strip rebuild (popularity may arrive
+        // mid-load; avoids O(n^2) reshuffle on every async insert).
+        var _settleTimer = null;
+        function ScheduleSettle() {
+            if (!popularityLoaded) return;
+            clearTimeout(_settleTimer);
+            _settleTimer = setTimeout(function () {
+                ReorderCategoryPanes();
+                BuildPopularStrip();
+                FilterPlugins();
+            }, 300);
+        }
+
+        // Top-5 Popular strip: highest install counts across all categories. Excludes
+        // already-installed plugins and ones that can't be installed on this box (no
+        // compatible or untested version) — the strip is a discovery surface for
+        // plugins the user can actually add. Rebuilt as info/feed arrive.
+        function BuildPopularStrip() {
+            var $wrap = $('#popularStripWrap');
+            var $strip = $('#popularStrip');
+            if (!$strip.length) return;
+            if (!popularityLoaded) { $wrap.addClass('d-none'); return; }
+            var ranked = [];
+            for (var i = 0; i < pluginInfos.length; i++) {
+                var d = pluginInfos[i];
+                if (!d || !d.repoName) continue;
+                if (PluginIsInstalled(d.repoName)) continue;   // exclude installed
+                var sel = SelectPluginVersionIndices(d);
+                if (sel.compatible < 0 && sel.untested < 0) continue;  // exclude uninstallable
+                var c = PopularityOf(d.repoName);
+                if (c > 0) ranked.push({ data: d, count: c });
             }
+            ranked.sort(function (a, b) { return b.count - a.count; });
+            ranked = ranked.slice(0, 10);
+            $strip.empty();
+            if (!ranked.length) { $wrap.addClass('d-none'); return; }
+            for (var j = 0; j < ranked.length; j++)
+                $strip.append(PopularCardHtml(ranked[j].data, ranked[j].count));
+            $wrap.removeClass('d-none');
+        }
+
+        // Compact card for the Popular strip. Built with jQuery .text() for the
+        // author-controlled name so the strip does not widen the existing XSS surface.
+        function PopularCardHtml(data, count) {
+            // Strip only holds installable, not-installed plugins (see BuildPopularStrip),
+            // so a compatible/untested version index always exists here.
+            var repo = data.repoName;
+            var formatted = count.toLocaleString();
+
+            var cat = PluginCategoryInfo(data);
+            var $col = $('<div class="pluginPopularCard"></div>');
+            // The whole card opens the detail modal; there is no direct install from the
+            // strip so users always see the plugin's full detail (and third-party
+            // warning) before installing.
+            var $card = $('<div class="card h-100 pluginCardInner" role="button" tabindex="0"></div>')
+                .on('click', function () { ShowPluginDetail(repo); });
+            var $body = $('<div class="card-body d-flex flex-column p-2"></div>');
+            // Category logo + name so the strip conveys what each popular plugin is for.
+            // Wraps (no truncation) so long category names show in full on the narrow card.
+            $body.append('<div class="small text-secondary mb-1" title="' + (cat.obj.longName || cat.name) +
+                '"><i class="' + cat.obj.icon + '"></i> ' + cat.name + '</div>');
+            $body.append($('<div class="card-title fw-semibold small mb-1 pluginPopularTitle pluginTitle"></div>').text(data.name));
+            // Bottom line: install count (last 365 days).
+            var $act = $('<div class="mt-auto d-flex align-items-center gap-2"></div>');
+            $act.append('<span class="badge bg-info text-dark" title="' + formatted +
+                ' installs (last 365 days)" aria-label="' + formatted + ' installs">' +
+                '<i class="fas fa-download"></i> ' + formatted + '</span>');
+            $body.append($act);
+            $card.append($body);
+            $col.append($card);
+            return $col;
+        }
+
+        function PluginVersionsText(data) {
+            var html = '';
+            for (var i = 0; i < data.versions.length; i++) {
+                if (i > 0) html += ',';
+                if ((data.versions[i].minFPPVersion > 0) && (data.versions[i].maxFPPVersion > 0))
+                    html += ' v' + data.versions[i].minFPPVersion + ' - v' + data.versions[i].maxFPPVersion;
+                else if (data.versions[i].minFPPVersion > 0)
+                    html += ' > v' + data.versions[i].minFPPVersion;
+                else if (data.versions[i].maxFPPVersion > 0)
+                    html += ' < v' + data.versions[i].maxFPPVersion;
+                if (data.versions[i].hasOwnProperty('platforms')) {
+                    var platforms = data.versions[i].platforms;
+                    html += ' ';
+                    for (var p = 0; p < platforms.length; p++) {
+                        if (p != 0) html += '/';
+                        if (platforms[p] == 'Raspberry Pi') html += 'Pi';
+                        else if (platforms[p] == 'BeagleBone Black') html += 'BBB';
+                        else if (platforms[p] == 'BeagleBone 64') html += 'BB64';
+                        else html += platforms[p];
+                    }
+                }
+            }
+            return html;
+        }
+
+        // Full-detail modal for a plugin card (reuses FPP's DoModalDialog).
+        function ShowPluginDetail(repo) {
+            var i = FindPluginInfo(repo);
+            if (i < 0) return;
+            var data = pluginInfos[i];
+            var installed = PluginIsInstalled(repo);
+            var sel = SelectPluginVersionIndices(data);
+            var compatibleVersion = sel.compatible, untestedVersion = sel.untested;
+            var body = '';
+            body += '<div class="mb-2">' + PluginBadgesHtml(data, true) + '</div>';
+            var authorHtml = PluginAuthorHtml(data);
+            if (authorHtml) body += '<div class="mb-2 text-secondary"><i class="fas fa-user"></i> ' + authorHtml + '</div>';
+            body += '<p>' + data.description + '</p>';
+            // Supported-versions detail is noise for Basic users; show it from Advanced up.
+            if ((parseInt(settings["uiLevel"]) || 0) >= 1)
+                body += '<div class="mb-2 text-muted small"><i class="fas fa-info-circle"></i> Compatible FPP versions: <b>' + PluginVersionsText(data) + '</b></div>';
+            if (!installed && compatibleVersion == -1 && untestedVersion >= 0)
+                body += '<div class="alert alert-warning text-warning-emphasis py-2"><i class="fas fa-exclamation-triangle"></i> This plugin has not been updated to work with your version of FPP (' + getFPPMajorVersion() + '). You can still install it, but it may not work correctly.</div>';
+            else if (!installed && compatibleVersion == -1)
+                body += '<div class="alert alert-danger py-2"><i class="fas fa-exclamation-triangle"></i> No version is compatible with your FPP version/platform.</div>';
+            body += '<div class="d-flex flex-column gap-1 small">';
+            if (data.homeURL) body += '<a href="' + data.homeURL + '" target="_blank" rel="noopener noreferrer"><i class="fas fa-home"></i> ' + data.homeURL + '</a>';
+            // Omit "View Source" when srcURL just duplicates the home link (same repo),
+            // ignoring a trailing slash or .git suffix so github.com/x/y(.git)(/) all match.
+            var sameLink = function (a, b) {
+                var n = function (u) { return (u || '').replace(/\.git$/i, '').replace(/\/+$/, '').toLowerCase(); };
+                return a && b && n(a) === n(b);
+            };
+            if (data.srcURL && !sameLink(data.srcURL, data.homeURL)) body += '<a href="' + data.srcURL + '" target="_blank" rel="noopener noreferrer"><i class="fas fa-code"></i> View Source</a>';
+            if (data.bugURL) body += '<a href="' + data.bugURL + '" target="_blank" rel="noopener noreferrer"><i class="fas fa-bug"></i> Report a Bug</a>';
+            body += '</div>';
+
+            var buttons = {};
+            if (installed) {
+                buttons['Check for Updates'] = function () { CheckPluginForUpdates(repo); };
+                buttons['Uninstall'] = function () { CloseModalDialog('pluginDetailDialog'); ShowUninstallPluginPopup(repo, data.name); };
+            } else if (compatibleVersion >= 0 || untestedVersion >= 0) {
+                var idx = compatibleVersion < 0 ? untestedVersion : compatibleVersion;
+                // Match the card's wording: "Install anyway" when the only available
+                // version has not been updated for this FPP release.
+                var installLabel = (compatibleVersion < 0 && untestedVersion >= 0) ? 'Install anyway' : 'Install';
+                buttons[installLabel] = function () { CloseModalDialog('pluginDetailDialog'); ConfirmAndInstall(repo, data.versions[idx].branch, data.versions[idx].sha); };
+            }
+            buttons['Close'] = function () { CloseModalDialog('pluginDetailDialog'); };
+
+            DoModalDialog({ id: 'pluginDetailDialog', class: 'modal-lg', title: data.name, body: body, backdrop: true, keyboard: true, buttons: buttons });
+        }
+
+        // Category name/icon for a plugin, validated against the loaded taxonomy so
+        // only known category names reach the DOM (unknown -> "Other").
+        function PluginCategoryInfo(data) {
+            var repo = data.repoName || '';
+            var name = data.__category
+                || pluginCategoryOf[repo.toLowerCase()]
+                || pluginCategoryOf[(data.name || '').toLowerCase()]
+                || 'Other';
+            var known = pluginCategoryByName[name];
+            return { name: known ? known.name : 'Other', obj: known || OTHER_CATEGORY };
+        }
+
+        // Single source of truth for a plugin's status badges, so cards and the
+        // detail modal stay consistent. includeCategory adds the category chip.
+        function PluginBadgesHtml(data, includeCategory) {
+            var repo = data.repoName;
+            var installed = PluginIsInstalled(repo);
+            var sel = SelectPluginVersionIndices(data);
+            var official = IsOfficialPlugin(data);
+            var isPrivate = (data.private || pluginInfoUseCredentials[repo]);
+            var h = '';
+            if (installed)
+                h += '<span class="badge bg-success me-1"><i class="far fa-check-circle"></i> Installed</span>';
+            if (official)
+                h += '<span class="badge bg-primary me-1" title="Official FPP plugin (maintained in the FalconChristmas GitHub organization)"><i class="fas fa-certificate"></i> Official</span>';
+            if (isPrivate)
+                h += '<span class="badge bg-warning text-dark me-1" title="Hosted in a private GitHub repository"><i class="fas fa-lock"></i> Private</span>';
+            if (!installed && sel.compatible == -1 && sel.untested >= 0)
+                h += '<span class="badge bg-warning text-dark me-1" title="This plugin has not been updated to work with your version of FPP. It may still install and work, but has not been confirmed for this release.">Not updated for FPP ' + getFPPMajorVersion() + '</span>';
+            else if (!installed && sel.compatible == -1)
+                h += '<span class="badge bg-danger me-1" title="No version compatible with this FPP version/platform">Incompatible</span>';
+            h += PopularityBadgeHtml(PopularityOf(repo));
+            if (includeCategory) {
+                var cat = PluginCategoryInfo(data);
+                h += '<span class="badge bg-secondary me-1 pluginCatChip" title="' + (cat.obj.longName || cat.name) + '"><i class="' + cat.obj.icon + '"></i> ' + cat.name + '</span>';
+            }
+            return h;
+        }
+
+        function LoadPlugin(data, insert = false) {
+            // Re-render: drop any existing card for this repo and refresh the cache.
+            if ($('#row-' + data.repoName).length) $('#row-' + data.repoName).remove();
+            var pi = FindPluginInfo(data.repoName);
+            if (pi >= 0) pluginInfos[pi] = data; else pluginInfos.push(data);
 
             var installed = PluginIsInstalled(data.repoName);
             var versionSel = SelectPluginVersionIndices(data);
             var compatibleVersion = versionSel.compatible;
             var untestedVersion = versionSel.untested;
-            var compatibleVersionClass = (compatibleVersion == -1) ? " has-previous-compatible-version" : '';
-            html += '<div id="row-' + data.repoName + '" class="fppPluginEntry' + compatibleVersionClass + '"><div class="backdrop fppPluginEntryBackdrop"><div class="row">';
-            html += '<div class="col-lg-3"><h3 class="pluginTitle">' + data.name + '</h3>';
+            var isPrivate = (data.private || pluginInfoUseCredentials[data.repoName]);
+            var official = IsOfficialPlugin(data);
+            var pcatName = data.__category || pluginCategoryOf[(data.repoName || '').toLowerCase()] || pluginCategoryOf[(data.name || '').toLowerCase()] || 'Other';
+            var pcatObj = pluginCategoryByName[pcatName] || OTHER_CATEGORY;
+            var popularity = PopularityOf(data.repoName);
 
+            // Category chip on Available cards only (shown in the All view / search — see
+            // FilterPlugins); installed cards live in their own tab with no category browse.
+            var badges = PluginBadgesHtml(data, !installed);
+
+            var actions = '';
             if (installed) {
-                html += '<div class="text-success fppPluginEntryInstallStatus"><i class="far fa-check-circle"></i> <b>Installed</b></div>';
-            }
-
-            if (data.private || pluginInfoUseCredentials[data.repoName]) {
-                html += '<div class="text-warning fppPluginEntryPrivateStatus" title="This plugin is hosted in a private GitHub repository. The GitHub user name and Personal Access Token configured on the Developer settings page will be used to clone it."><i class="fas fa-lock"></i> <b>Private</b></div>';
-            }
-
-            html += '</div>';
-            html += '<div class="col-lg-2"><div class="labelHeading text-secondary">Author:</div><div class="text-primary">' + data.author + '</div></div>';
-            html += '<div class="col-lg"><div class="labelHeading text-secondary">Description:</div><div class="text-primary">' + data.description + '</div>';
-
-            html += '</div>';
-            html += '<div class="col-lg-auto fppPluginEntryActions">';
-
-            html += '<div align="right">';
-
-            if (installed) {
-                // Determine the effective allowUpdates flag. A matching version
-                // entry's allowUpdates overrides the top-level value; when neither
-                // is set, updates are allowed by default. This lets a plugin freeze
-                // an old FPP major (pinned sha, allowUpdates: 0 on that entry) while
-                // keeping updates enabled on the current-major entry.
                 var allowUpdates = true;
                 if (data.hasOwnProperty('allowUpdates'))
                     allowUpdates = data.allowUpdates ? true : false;
                 if ((compatibleVersion >= 0) && data.versions[compatibleVersion].hasOwnProperty('allowUpdates'))
                     allowUpdates = data.versions[compatibleVersion].allowUpdates ? true : false;
-
                 if (allowUpdates) {
-                    html += "<div class='pendingSpan updatesAvailable'";
-                    if (!data.updatesAvailable)
-                        html += " style='display: none;'";
-
-                    html += "><div class='updateTable text-success fppPluginEntryUpdateStatus'><i class='fas fa-exclamation-circle'></i> <b>Updates Available</b></div>";
-                    html += "<button class='buttons btn-success' onClick='UpgradePlugin(\"" + data.repoName + "\");'><i class='far fa-arrow-alt-circle-down'></i> Update Now</button>";
-
-                    html += '</div>';
-                    html += '</div><div align="right">';
-
-                    html += "<button class='buttons btn-outline-success' onClick='CheckPluginForUpdates(\"" + data.repoName + "\");'><i class='fas fa-sync-alt'></i> Check for Updates</button>";
-
-                } else {
-                    html += '</div><div align="right">';
+                    actions += "<span class='updatesAvailable' style='display: none;'>";
+                    actions += "<button class='btn btn-sm btn-success' onclick='event.stopPropagation();UpgradePlugin(\"" + data.repoName + "\");'><i class='far fa-arrow-alt-circle-down'></i> Update</button>";
+                    actions += "</span>";
                 }
-
-                html += '</div><div align="right">';
-                html += "<button class='buttons btn-outline-danger'  onClick='ShowUninstallPluginPopup(\"" + data.repoName + "\",\"" + data.name + "\");'><i class='fas fa-trash-alt'></i> Uninstall</button>";
-            } else {
-                html += '</div><div align="right">';
-                html += '</div><div align="right">';
-                if (compatibleVersion >= 0 || untestedVersion >= 0) {
-                    let idx = compatibleVersion < 0 ? untestedVersion : compatibleVersion;
-
-                    let installText = "Install";
-                    let btnClass = "btn-success";
-
-                    if (compatibleVersion < 0 && untestedVersion >= 0) {
-                        installText = "Install untested plugin at your own risk";
-                        btnClass = "btn-warning";
-                    }
-
-                    html += "<button class='buttons " + btnClass + "' onClick=' InstallPlugin(\"" + data.repoName + "\", \"" + data.versions[idx].branch + "\", \"" + data.versions[idx].sha + "\");'><i class='far fa-arrow-alt-circle-down'></i> " + installText + "</button>";
+            } else if (compatibleVersion >= 0 || untestedVersion >= 0) {
+                var idx = compatibleVersion < 0 ? untestedVersion : compatibleVersion;
+                var installText = 'Install';
+                var btnClass = 'btn-success';
+                if (compatibleVersion < 0 && untestedVersion >= 0) {
+                    installText = 'Install anyway';
+                    btnClass = 'btn-warning';
                 }
+                actions += "<button class='btn btn-sm " + btnClass + "' onclick='event.stopPropagation();ConfirmAndInstall(\"" + data.repoName + "\", \"" + data.versions[idx].branch + "\", \"" + data.versions[idx].sha + "\");'><i class='far fa-arrow-alt-circle-down'></i> " + installText + "</button>";
             }
 
-            html += '</div>';
-
-            html += '</div></div>';
-            html += '<div class="row fppPluginEntryFooter"><div class="col-lg"><a href="' + data.homeURL + '" target="_blank" rel="noopener noreferrer"><i class="fas fa-home"></i> ' + data.homeURL + '</a></div>';
-            html += '<div class="col-lg-auto"><a href="' + data.srcURL + '" target="_blank" rel="noopener noreferrer"><i class="fas fa-code"></i> View Source</a>';
-            html += ' <a href="' + data.bugURL + '" target="_blank" rel="noopener noreferrer" class="ps-2"><i class="fas fa-bug"></i> Report a Bug</a>';
-            html += '</div>';
-            html += '</div>';
-            html += '</div>';
-
-            if (compatibleVersion == -1) {
-                html += '<div class="text-muted fppPluginEntryCompatibilityStatus">';
-                html += '<i class="fas fa-info-circle"></i> Plugin has compatible versions for FPP Versions: <b>';
-                for (var i = 0; i < data.versions.length; i++) {
-                    if (i > 0)
-                        html += ',';
-
-                    if ((data.versions[i].minFPPVersion > 0) &&
-                        (data.versions[i].maxFPPVersion > 0)) {
-                        html += ' v' + data.versions[i].minFPPVersion + ' - v' + data.versions[i].maxFPPVersion;
-                    } else if (data.versions[i].minFPPVersion > 0) {
-                        html += ' > v' + data.versions[i].minFPPVersion;
-                    } else if (data.versions[i].maxFPPVersion > 0) {
-                        html += ' < v' + data.versions[i].maxFPPVersion;
-                    }
-
-                    if (data.versions[i].hasOwnProperty('platforms')) {
-                        var platforms = data.versions[i].platforms;
-                        html += " ";
-                        for (var p = 0; p < platforms.length; p++) {
-                            if (p != 0)
-                                html += "/";
-                            if (platforms[p] == 'Raspberry Pi') {
-                                html += "Pi";
-                            } else if (platforms[p] == 'BeagleBone Black') {
-                                html += "BBB";
-                            } else if (platforms[p] == 'BeagleBone 64') {
-                                html += "BB64";
-                            } else {
-                                html += platforms[p];
-                            }
-                        }
-                    }
-                }
-                html += '</b></div>';
-                if (installed) {
-                    html += '<div class="row"><div class="col" class="bad">WARNING: This plugin is already installed, but may be incompatible with this FPP version or platform.</div></div>';
-                }
-                html += '</div>';
-            }
+            var html = '';
+            html += '<div id="row-' + data.repoName + '" class="col pluginCard" data-category-slug="' + pcatObj.slug + '" data-popularity="' + popularity + '">';
+            html += '<div class="card h-100 pluginCardInner" role="button" tabindex="0" onclick="ShowPluginDetail(\'' + data.repoName + '\');">';
+            html += '<div class="card-body d-flex flex-column">';
+            html += '<h5 class="card-title pluginTitle mb-1">' + data.name + '</h5>';
+            html += '<div class="pluginCardBadges mb-2">' + badges + '</div>';
+            var cardAuthorHtml = PluginAuthorHtml(data);
+            if (cardAuthorHtml) html += '<div class="text-secondary small mb-1"><i class="fas fa-user"></i> ' + cardAuthorHtml + '</div>';
+            html += '<p class="card-text pluginCardDesc small flex-grow-1">' + data.description + '</p>';
+            html += '<div class="pluginCardActions mt-2" onclick="event.stopPropagation();">' + actions + '</div>';
+            html += '</div></div></div>';
 
             if (installed) {
-                $('#installedPlugins').show();
-                if (firstInstalled) {
-                    firstInstalled = 0;
-                }
-
-                InsertPluginTableItem('installedPlugins', data.name, html);
-            } else if (data.repoName == 'fpp-plugin-Template') {
-                if (settings["uiLevel"] > 2) {
-                    $('#templatePlugin').show();
-                    $('#templatePlugin').append(html);
-                }
-            } else if (compatibleVersion != -1) {
-                if (firstCompatible) {
-                    firstCompatible = 0;
-                }
-
-                if (insert) {
-                    $('#pluginTable').children(':first-child').after(html);
-                    document.getElementById("pluginTable").scrollIntoView();
-                } else {
-                    InsertPluginTableItem('pluginTable', data.name, html);
-                }
-            } else if (untestedVersion >= 0) {
-                if (firstUntested && settings["uiLevel"] > 0) {
-                    $('#untestedPlugins').show();
-                    firstUntested = 0;
-                }
-
-                InsertPluginTableItem('untestedPlugins', data.name, html);
+                InsertCardSorted('installedGrid', data.name, html);
             } else {
-                if (firstIncompatible && settings["uiLevel"] > 2) {
-                    $('#incompatiblePlugins').show();
-                    firstIncompatible = 0;
+                var uiLevel = parseInt(settings["uiLevel"]) || 0;
+                if (data.repoName == 'fpp-plugin-Template') {
+                    if (uiLevel < 3) return;
+                } else if (compatibleVersion != -1) {
+                    // compatible: shown at all UI levels
+                } else if (untestedVersion >= 0) {
+                    if (uiLevel < 1) return;
+                } else {
+                    if (uiLevel < 3) return;
                 }
-
-                InsertPluginTableItem('incompatiblePlugins', data.name, html);
+                InsertAvailableCard(html, data.name, popularity);
             }
+            if (insert) {
+                var el = document.getElementById('row-' + data.repoName);
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+            FilterPlugins();
+            ScheduleSettle();
         }
 
         function LoadInstalledPlugins() {
@@ -700,6 +1229,12 @@
 
         function LoadPlugins(pluginList) {
             for (var i = 0; i < pluginList.length; i++) {
+                // Record the category for every entry, installed or not. Installed plugins
+                // are fetched from api/plugin, which carries no category, so this map is the
+                // only way PluginCategoryInfo() can resolve one for them.
+                if (pluginList[i].length > 2 && pluginList[i][2])
+                    pluginCategoryOf[(pluginList[i][0] || '').toLowerCase()] = pluginList[i][2];
+
                 if (!PluginIsInstalled(pluginList[i][0])) {
                     var url = pluginList[i][1];
                     let index = i;
@@ -711,6 +1246,8 @@
                         dataType: 'json',
                         success: function (data) {
                             $('html,body').css('cursor', 'auto');
+                            if (pluginList[index] && pluginList[index].length > 2 && pluginList[index][2])
+                                data.__category = pluginList[index][2];
                             LoadPlugin(data);
                             $('#pluginInput').on('input', FilterPlugins);
                             FilterPlugins();
@@ -789,45 +1326,97 @@
                 alert('Invalid pluginInfo.json URL');
             }
         }
-        function FilterPlugins() {
-            if ($('#pluginInput').val().indexOf('://') > -1) {
-                $('.fppPluginInput').addClass('is-url');
-                $('.fppPluginEntry').addClass('pluginFilterVisible');
-                $('.fppPluginSection').addClass('pluginFilterSectionVisible');
-            } else {
-                $('.fppPluginInput').removeClass('is-url');
-                var value = $('#pluginInput').val().toLowerCase();
-                if (value == '') {
-                    $('.fppPluginEntry').addClass('pluginFilterVisible');
-                    $('.fppPluginSection').addClass('pluginFilterSectionVisible');
-                } else {
-                    $('.fppPluginSection').each(function () {
-                        var filterMatchesInSection = 0;
-                        $(this).children('.fppPluginEntry').each(function (index) {
-                            if ($(".pluginTitle", this).text().toLowerCase().indexOf(value) > -1) {
-                                $(this).addClass('pluginFilterVisible');
-                                filterMatchesInSection++;
-                            } else {
-                                $(this).removeClass('pluginFilterVisible');
-                            }
-                        });
-                        if (filterMatchesInSection > 0) {
-                            $(this).addClass('pluginFilterSectionVisible');
-                        } else {
-                            $(this).removeClass('pluginFilterSectionVisible');
-                        }
-                    });
-                }
+        function ShowTopTab(name) {
+            activeTopTab = name;
+            $('#pluginTopTabs .nav-link').removeClass('active');
+            $('#pluginTopTabs .nav-link[data-top-tab="' + name + '"]').addClass('active');
+            $('#pane-available').toggleClass('d-none', name !== 'available');
+            $('#pane-manage').toggleClass('d-none', name === 'available');
+            $('#manageHeading').text(name === 'updates' ? 'Updates Available' : 'Installed Plugins');
+            if (name === 'updates' && !updatesCheckedOnce && installedPlugins.length > 0) {
+                updatesCheckedOnce = true;
+                CheckAllPluginsForUpdates();
             }
+            FilterPlugins();
+        }
 
+        function FilterPlugins() {
+            var raw = $('#pluginInput').val() || '';
+            var isUrl = raw.indexOf('://') > -1;
+            var value = raw.toLowerCase();
+            if (isUrl) $('.fppPluginInput').addClass('is-url'); else $('.fppPluginInput').removeClass('is-url');
+
+            var searching = (value !== '' && !isUrl);
+
+            // Category chip shows only where categories are mixed: the All view and search
+            // results. Inside a single-category pane it is redundant with the active pill.
+            $('#pluginGrid .pluginCatChip').toggleClass('d-none', !(searching || activeCategorySlug === 'all'));
+
+            // Available cards: filter by active category pill + search.
+            var counts = {}, total = 0, availVisible = 0;
+            $('#pluginGrid').children('.pluginCard').each(function () {
+                var slug = $(this).attr('data-category-slug') || 'other';
+                counts[slug] = (counts[slug] || 0) + 1; total++;
+                var title = $('.pluginTitle', this).text().toLowerCase();
+                var matchesSearch = isUrl || value === '' || title.indexOf(value) > -1;
+                var matchesCat = searching || activeCategorySlug === 'all' || slug === activeCategorySlug;
+                var show = matchesSearch && matchesCat;
+                $(this).toggleClass('d-none', !show);
+                if (show) availVisible++;
+            });
+
+            // Installed cards: search filter; Updates tab shows only updatable ones.
+            var installedVisible = 0, updateVisible = 0;
+            $('#installedGrid').children('.pluginCard').each(function () {
+                var title = $('.pluginTitle', this).text().toLowerCase();
+                var matchesSearch = isUrl || value === '' || title.indexOf(value) > -1;
+                var hasUpdate = $(this).hasClass('fppHasUpdate');
+                if (hasUpdate) updateVisible++;
+                var matchesTab = (activeTopTab !== 'updates') || hasUpdate;
+                var vis = matchesSearch && matchesTab;
+                $(this).toggleClass('d-none', !vis);
+                if (vis) installedVisible++;
+            });
+            if (activeTopTab === 'updates') $('#noUpdatesHint').toggleClass('d-none', installedVisible > 0);
+            else $('#noUpdatesHint').addClass('d-none');
+
+            // "No results" messages so an empty view reads as a search miss, not a bug.
+            var installedTotal = $('#installedGrid').children('.pluginCard').length;
+            $('#noAvailableResults').toggleClass('d-none', !(searching && activeTopTab === 'available' && availVisible === 0));
+            $('#noInstalledResults').toggleClass('d-none', !(searching && activeTopTab === 'installed' && installedVisible === 0 && installedTotal > 0));
+            $('.fppNoResultsTerm').text(raw);
+
+            // Pill counts + hide empty category pills.
+            $('#pluginCategoryPills .fppCatCount').each(function () {
+                var s = $(this).attr('data-count-slug');
+                var val = (s === 'all') ? total : (counts[s] || 0);
+                $(this).text(val);
+                var $li = $(this).closest('.nav-item');
+                if (s !== 'all' && val === 0) $li.addClass('d-none'); else $li.removeClass('d-none');
+            });
+
+            // Top-tab counts.
+            $('#topCountAvailable').text(total);
+            $('#topCountInstalled').text($('#installedGrid').children('.pluginCard').length);
+            $('#topCountUpdates').text(updateVisible);
         }
         $(document).ready(function () {
+            // Firefox restores input values on reload regardless of autocomplete="off",
+            // which would leave the list filtered by a term the user can't see a reason for.
+            $('#pluginInput').val('');
+
             // Uninstall All and Reinstall All are bulk destructive actions, so only
             // expose them in Advanced UI mode or higher.
             if (settings["uiLevel"] > 0) {
+                $('#updateAllBtn').removeClass('d-none');
                 $('#uninstallAllBtn').removeClass('d-none');
                 $('#reinstallAllBtn').removeClass('d-none');
             }
+            $('#pluginTopTabs .nav-link').on('click', function () {
+                ShowTopTab($(this).attr('data-top-tab'));
+                this.scrollIntoView({ block: 'nearest', inline: 'center' });
+            });
+            GetPluginPopularity();   // parallel with the list/installed loads (Phase 2)
             GetInstalledPlugins();
 
         });
@@ -846,33 +1435,81 @@
 
                 <div id="plugins" class="settings">
 
-                    <div id='pluginTableHead'>
+                    <div id="popularStripWrap" class="mb-3 d-none">
+                        <h2 class="h5"><i class="fas fa-fire text-warning"></i> Popular Plugins</h2>
+                        <div id="popularStrip" class="d-flex flex-nowrap overflow-auto gap-2 pb-2 pluginPopularScroll"></div>
+                    </div>
 
-                        <div class="row fppPluginInput">
-                            <div class="col">
-                                <input type="text" id="pluginInput"
-                                    class="form-control form-control-lg form-control-rounded has-shadow"
-                                    placeholder="Find a Plugin or Enter a plugininfo.json URL" />
-
+                    <div class='plugindiv'>
+                        <!-- Desktop: tabs on the left, find box on the right of the same row.
+                             align-items-lg-center vertically centres the find box against the
+                             (taller) tab row so the input sits level with the tab labels instead
+                             of floating high. Mobile (<lg): stacks with the find box on top. -->
+                        <div class="row align-items-lg-center g-2 mb-3">
+                            <div id='pluginTableHead' class="col-12 col-lg-4 order-lg-2 d-lg-flex">
+                                <div class="row fppPluginInput gx-2 flex-grow-1 align-items-center">
+                                    <div class="col d-flex">
+                                        <input type="text" id="pluginInput" autocomplete="off"
+                                            class="form-control form-control-rounded has-shadow flex-grow-1"
+                                            placeholder="Find a Plugin or Enter a plugininfo.json URL" />
+                                    </div>
+                                    <div class="col-auto fppPluginInputActionCol">
+                                        <div class="buttons btn-rounded btn-outline-success" onClick='ManualLoadInfo();'>
+                                            <i class="fas fa-download"></i> Get Plugin Info
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
-                            <div class="col-auto fppPluginInputActionCol">
-                                <div class="buttons btn-lg btn-rounded btn-outline-success" onClick='ManualLoadInfo();'>
-                                    <i class="fas fa-download"></i> Get Plugin Info
+                            <div class="col-12 col-lg order-lg-1">
+                                <ul class="nav nav-tabs flex-nowrap flex-md-wrap overflow-auto overflow-md-visible" id="pluginTopTabs" role="tablist">
+                                    <li class="nav-item" role="presentation">
+                                        <button type="button" class="nav-link active text-nowrap" data-top-tab="available" role="tab">
+                                            <i class="fas fa-store"></i> Available
+                                            <span class="badge bg-secondary ms-1" id="topCountAvailable">0</span>
+                                        </button>
+                                    </li>
+                                    <li class="nav-item" role="presentation">
+                                        <button type="button" class="nav-link text-nowrap" data-top-tab="installed" role="tab">
+                                            <i class="far fa-check-circle"></i> Installed
+                                            <span class="badge bg-secondary ms-1" id="topCountInstalled">0</span>
+                                        </button>
+                                    </li>
+                                    <li class="nav-item" role="presentation">
+                                        <button type="button" class="nav-link text-nowrap" data-top-tab="updates" role="tab">
+                                            <i class="far fa-arrow-alt-circle-up"></i> Updates
+                                            <span class="badge bg-secondary ms-1" id="topCountUpdates">0</span>
+                                        </button>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+
+                        <div id="pane-available" class="pluginTopPane">
+                            <div class="fppPluginAvailableHead">
+                                <ul class="nav nav-pills mb-3 pageContent-tabs flex-nowrap flex-md-wrap overflow-auto overflow-md-visible pb-1" id="pluginCategoryPills" role="tablist"></ul>
+                            </div>
+                            <div id='pluginTable'>
+                                <div id='pluginGrid' class="row row-cols-1 row-cols-md-2 row-cols-xxl-3 g-3"></div>
+                                <div id="noAvailableResults" class="alert alert-info d-none mt-2">
+                                    <i class="fas fa-search"></i> No plugins match
+                                    "<b class="fppNoResultsTerm"></b>". Clear the search box to see all plugins.
                                 </div>
                             </div>
                         </div>
 
-                    </div>
-                    <div class='plugindiv'>
-
-                        <div id='installedPlugins' class="fppPluginSection">
+                        <div id="pane-manage" class="pluginTopPane d-none">
                             <div class='pluginsHeader'>
-                                <h2>Installed Plugins</h2>
+                                <h2 id="manageHeading">Installed Plugins</h2>
                                 <div class="d-flex gap-2 align-items-center">
                                     <button id="checkAllUpdatesBtn" class="buttons btn-outline-success"
                                         onClick='CheckAllPluginsForUpdates();'
                                         title="Check all installed plugins for updates">
                                         <i class='fas fa-sync-alt'></i> Check All for Updates
+                                    </button>
+                                    <button id="updateAllBtn" class="buttons btn-outline-primary d-none"
+                                        onClick='UpdateAllPlugins();'
+                                        title="Check for and update all installed plugins that have an update available">
+                                        <i class='far fa-arrow-alt-circle-down'></i> Update All
                                     </button>
                                     <button id="reinstallAllBtn" class="buttons btn-outline-warning d-none"
                                         onClick='ShowReinstallAllPluginsPopup();'
@@ -886,26 +1523,14 @@
                                     </button>
                                 </div>
                             </div>
-                        </div>
-                        <div id='pluginTable' class="fppPluginSection">
-                            <div class='pluginsHeader '>
-                                <h2>Available Plugins</h2>
+                            <div id='installedPlugins'>
+                                <div id='installedGrid' class="row row-cols-1 row-cols-md-2 row-cols-xxl-3 g-3"></div>
                             </div>
-                        </div>
-                        <div id='untestedPlugins' class="fppPluginSection" style="display: none">
-                            <div class='pluginsHeader '>
-                                <h2>Plugins not tested with this FPP version</h2>
+                            <div id="noInstalledResults" class="alert alert-info d-none mt-2">
+                                <i class="fas fa-search"></i> No installed plugins match
+                                "<b class="fppNoResultsTerm"></b>".
                             </div>
-                        </div>
-                        <div id='templatePlugin' class="fppPluginSection" style="display: none">
-                            <div class='pluginsHeader '>
-                                <h2>Template Plugin</h2>
-                            </div>
-                        </div>
-                        <div id='incompatiblePlugins' class="fppPluginSection" style="display: none">
-                            <div class='pluginsHeader '>
-                                <h2>Incompatible Plugins</h2>
-                            </div>
+                            <div id="noUpdatesHint" class="text-secondary d-none">No updates found. Use <b>Check All for Updates</b> to refresh.</div>
                         </div>
                     </div>
 

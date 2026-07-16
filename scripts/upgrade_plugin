@@ -1,0 +1,95 @@
+#!/bin/bash
+
+BINDIR=$(cd $(dirname $0) && pwd)
+
+. ${BINDIR}/common
+
+if [ "x$1" = "x" ]
+then
+	echo "USAGE: $0 PLUGINNAME"
+	exit 1
+fi
+
+# startPluginLog streams the upgrade output to the caller (browser progress
+# dialog) unchanged AND appends a per-line-timestamped copy to the shared
+# ${LOGDIR}/plugin.log, tagged "[upgrade <plugin>]", alongside install/uninstall.
+startPluginLog upgrade "$1"
+
+PLUGIN="$1"
+PLUGINPATH="${PLUGINDIR}/${PLUGIN}"
+
+echo "Upgrading plugin ${PLUGIN}"
+
+# Resolve the checked-out branch so the hard-reset recovery below targets the
+# right upstream ref. Detached HEAD (empty or literal "HEAD") disables that
+# fallback -- there is no branch to reset to.
+BRANCH=$(cd "${PLUGINPATH}" && $SUDO git rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+# Make git ignore working-tree mode drift before pulling. FPP's own 'chmod a+x'
+# normalization (install_plugin) dirties the tree of any plugin whose author
+# committed scripts at 0644, and a mode-only dirty tree is enough to make the
+# pull below fail -- always so on repos configured pull.rebase=true -- pushing
+# every upgrade into the hard-reset recovery further down. install_plugin sets
+# this at clone time; setting it here too means plugins cloned before that
+# self-heal on their next upgrade instead of needing a reinstall. Per-repository,
+# and upstream mode changes still land.
+$SUDO git -C "${PLUGINPATH}" config core.fileMode false
+
+# Fast path: a plain pull works when the working tree is clean.
+(cd "${PLUGINPATH}" && $SUDO git pull)
+return_val=$?
+
+# Recovery: a plugin whose install script edits its own tracked files (e.g.
+# preStart.sh / fpp_install.sh) leaves a dirty tree, so 'git pull' fails -- and
+# 'git clean -fd' alone did NOT help because it only removes UNTRACKED files, not
+# modified tracked ones (bug-upgrade-silent-noop). Hard-reset the tracked files to
+# the fetched upstream tip (this reverts the plugin's self-edits; the post-pull
+# install script re-applies them), then drop untracked cruft. User data lives in
+# untracked/media paths and in git history -- both are preserved by this.
+if [ $return_val -ne 0 ]; then
+	if [ -n "${BRANCH}" ] && [ "${BRANCH}" != "HEAD" ]; then
+		echo "git pull failed, retrying with fetch + reset --hard origin/${BRANCH}"
+		(cd "${PLUGINPATH}" \
+			&& $SUDO git fetch \
+			&& $SUDO git reset --hard "origin/${BRANCH}" \
+			&& $SUDO git clean -fd)
+		return_val=$?
+	else
+		echo "git pull failed and HEAD is detached; cannot safely hard-reset"
+	fi
+fi
+
+# Run the plugin's optional post-pull script (upgrade first, then install), same
+# resolution order the PHP controller used.
+post_pull_script=""
+for cand in \
+	"${PLUGINDIR}/${PLUGIN}/scripts/fpp_upgrade.sh" \
+	"${PLUGINDIR}/${PLUGIN}/scripts/fpp_install.sh" \
+	"${PLUGINDIR}/${PLUGIN}/fpp_install.sh"
+do
+	if [ -f "$cand" ]; then
+		post_pull_script="$cand"
+		break
+	fi
+done
+
+if [ "x${post_pull_script}" != "x" ]; then
+	echo "Running ${post_pull_script}"
+	$SUDO FPPDIR=${FPPDIR} SRCDIR=${FPPDIR}/src ${post_pull_script}
+	return_val=$?
+fi
+
+# Never report success if the repo did not actually advance to upstream. Without
+# this, a failed git update followed by a succeeding install script (rc=0) would
+# masquerade as a successful upgrade while the plugin stays behind and keeps
+# showing "update available" (bug-upgrade-silent-noop). Best-effort: relies on a
+# current origin ref, which the pull/fetch above refreshed on the network-OK paths.
+if [ -n "${BRANCH}" ] && [ "${BRANCH}" != "HEAD" ]; then
+	behind=$(cd "${PLUGINPATH}" && $SUDO git rev-list --count "HEAD..origin/${BRANCH}" 2>/dev/null)
+	if [ -n "${behind}" ] && [ "${behind}" -gt 0 ] 2>/dev/null; then
+		echo "ERROR: ${PLUGIN} is still ${behind} commit(s) behind origin/${BRANCH} after upgrade"
+		return_val=1
+	fi
+fi
+
+exit $return_val

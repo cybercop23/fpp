@@ -20108,7 +20108,6 @@ input[type='checkbox'][disabled='']:checked {
 }
 
 .alert {
-	color: #fff;
 }
 .alert a {
 	color: #171720;
@@ -20118,6 +20117,7 @@ input[type='checkbox'][disabled='']:checked {
 	color: #fff;
 }
 .alert.detract {
+	color: #fff;
 	background-color: #f2bc5f;
 }
 .alert-danger-outline {
@@ -20125,6 +20125,7 @@ input[type='checkbox'][disabled='']:checked {
 	background-color: #dc3545;
 }
 .alert-danger {
+	color: #fff;
 	background-color: #dc3545;
 	border-color: #dc3545;
 }
@@ -20136,6 +20137,7 @@ input[type='checkbox'][disabled='']:checked {
 }
 
 .alert-info {
+	color: #fff;
 	background-color: #008b8b;
 	border-color: #008b8b;
 }

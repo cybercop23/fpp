@@ -5,13 +5,83 @@ BINDIR=$(cd $(dirname $0) && pwd)
 . ${BINDIR}/common
 . ${BINDIR}/functions
 
+# normalizePluginScriptModes <plugin>
+#   git preserves mode bits, so a plugin whose author committed its scripts at
+#   mode 0644 clones in still non-executable and the -x gates below (and the
+#   uninstall/upgrade/callback paths elsewhere) silently skip them. Normalize the
+#   files FPP actually runs: scripts/* (FPP's convention for runnable files -- the
+#   known entry points plus any author helpers kept there), the extension-less
+#   callbacks dispatcher, and the legacy flat-layout install/uninstall scripts.
+normalizePluginScriptModes() {
+	[ -d "${PLUGINDIR}/$1/scripts" ] && $SUDO chmod a+x "${PLUGINDIR}/$1/scripts/"* 2>/dev/null
+	for f in callbacks fpp_install.sh fpp_uninstall.sh; do
+		[ -f "${PLUGINDIR}/$1/$f" ] && $SUDO chmod a+x "${PLUGINDIR}/$1/$f"
+	done
+	return 0
+}
+
+# runPluginInstallScript <plugin>
+#   Run the plugin's own install script, preferring scripts/fpp_install.sh with
+#   the legacy repo-root fallback. Exit code is the script's own; no script at
+#   all is not an error.
+runPluginInstallScript() {
+	normalizePluginScriptModes "$1"
+
+	local script=""
+	if [ -x "${PLUGINDIR}/$1/scripts/fpp_install.sh" ]; then
+		script="${PLUGINDIR}/$1/scripts/fpp_install.sh"
+	elif [ -x "${PLUGINDIR}/$1/fpp_install.sh" ]; then
+		script="${PLUGINDIR}/$1/fpp_install.sh"
+	else
+		return 0
+	fi
+
+	echo "Running fpp_install.sh script for $1"
+	# Pass FPPDIR/SRCDIR through sudo as environment assignments AND as trailing
+	# arguments. Plugin install scripts in the wild read them as env vars (e.g.
+	# fpp-brightness sources ${FPPDIR}/scripts/common and builds with ${SRCDIR}),
+	# but the arguments alone do not set them -- and the args-only form was
+	# silently broken whenever SUDO lacks -E: the Plugin Manager exports
+	# SUDO="sudo" (www/config.php), which overrides common's "sudo -E" default and
+	# strips the exported FPPDIR/SRCDIR, so scripts ran with both empty and failed
+	# ("/scripts/common: No such file or directory"). That went unnoticed because
+	# the output was never logged. upgrade_plugin already uses the env form, which
+	# is why upgrades ran install scripts correctly while installs did not. The
+	# trailing args stay for plugins that parse them.
+	$SUDO FPPDIR=${FPPDIR} SRCDIR=${FPPDIR}/src ${script} FPPDIR=${FPPDIR} SRCDIR=${FPPDIR}/src
+}
+
+# --run-install-script <plugin>
+#   Run ONLY the plugin's own install script against an already-cloned plugin.
+#   The Plugin Manager clones with FPP_SKIP_INSTALL_SCRIPT=1 so it can resolve
+#   the plugin's declared dependencies first, then calls back here for this
+#   deferred phase. Going through this wrapper (rather than exec'ing the script
+#   straight from PHP) is what gets the phase logged: startPluginLog streams it
+#   to the caller unchanged AND appends a copy to ${LOGDIR}/plugin.log, tagged
+#   "install" like the clone phase above it. Otherwise the bulk of an install --
+#   a plugin script can build or fetch for minutes -- only ever reached the
+#   browser progress dialog and was lost when it closed.
+if [ "x$1" = "x--run-install-script" ]
+then
+	if [ "x$2" = "x" ]
+	then
+		echo "USAGE: $0 --run-install-script PLUGINNAME"
+		exit 1
+	fi
+
+	startPluginLog install "$2"
+	runPluginInstallScript "$2"
+	exit $?
+fi
+
 if [ "x$1" = "x" ] || [ "x$2" = "x" ] || [ "x$3" = "x" ]
 then
 	echo "USAGE: $0 PLUGINNAME GITURL BRANCH SHA1"
+	echo "       $0 --run-install-script PLUGINNAME"
 	exit 1
 fi
 
-teeOutput
+startPluginLog install "$1"
 
 # Sanitize the URL for display/logging in case it contains embedded GitHub
 # credentials (https://user:token@host/...). The original $2 is still passed
@@ -27,10 +97,26 @@ if [ $rc -ne 0 ]; then
     echo ""
     echo "The most common reason plugin installs fail is the lack of functioning Internet Access"
     echo ""
-    echo "You can troubleshoot this by going to the 'Help' menu and selecting 'System Heath Check'" 
+    echo "You can troubleshoot this by going to the 'Help' menu and selecting 'System Heath Check'"
     echo "======================================================================================="
 	exit 1
 fi
+
+# Stop FPP's own script-mode normalization (below) from showing up as local
+# modifications in the plugin's git tree. git tracks the executable bit, so
+# chmod'ing a script an author committed at 0644 leaves a mode-only " M" entry
+# forever. That dirt is not the user's work and it is not harmless: it makes a
+# later 'git pull' ABORT whenever upstream touches that same file, and fail
+# outright on repos configured pull.rebase=true -- forcing every upgrade down
+# upgrade_plugin's 'reset --hard' + 'git clean -fd' recovery, which deletes
+# untracked files in the plugin directory. Using a data-destroying hammer to
+# clean up dirt we created ourselves is the wrong trade.
+#
+# core.fileMode=false is per-repository (it lives in this clone's .git/config,
+# affecting nothing else) and only makes git ignore WORKING-TREE mode drift.
+# Upstream changes still land normally, modes included -- a plugin author making
+# a script executable still reaches the user.
+$SUDO git -C "${PLUGINDIR}/$1" config core.fileMode false
 
 if [ "x$4" != "x" ]
 then
@@ -42,31 +128,15 @@ if [ "${FPPPLATFORM}" != "MacOS" ]; then
     $SUDO chown -R fpp:fpp $1
 fi
 
-# git preserves mode bits, so a plugin whose author committed its scripts at
-# mode 0644 clones in still non-executable and the -x gates below (and the
-# uninstall/upgrade/callback paths elsewhere) silently skip them. Normalize the
-# files FPP actually runs: scripts/* (FPP's convention for runnable files -- the
-# known entry points plus any author helpers kept there), the extension-less
-# callbacks dispatcher, and the legacy flat-layout install/uninstall scripts.
-[ -d "${PLUGINDIR}/$1/scripts" ] && $SUDO chmod a+x "${PLUGINDIR}/$1/scripts/"* 2>/dev/null
-for f in callbacks fpp_install.sh fpp_uninstall.sh; do
-    [ -f "${PLUGINDIR}/$1/$f" ] && $SUDO chmod a+x "${PLUGINDIR}/$1/$f"
-done
+normalizePluginScriptModes "$1"
 
 # When FPP_SKIP_INSTALL_SCRIPT=1 the caller (the Plugin Manager) wants to
 # resolve the plugin's declared dependencies before its own install script
-# runs, so it clones here and runs the plugin's fpp_install.sh itself
-# afterwards. Otherwise run the install script inline as before.
+# runs, so it clones here and calls back with --run-install-script afterwards.
+# Otherwise run the install script inline as before.
 if [ "x${FPP_SKIP_INSTALL_SCRIPT}" = "x1" ]; then
-    # Caller runs the plugin's fpp_install.sh itself after resolving dependencies.
+    # Caller runs the plugin's install script itself once dependencies are in place.
     :
-elif [ -x "${PLUGINDIR}/$1/scripts/fpp_install.sh" ]
-then
-    echo "Running fpp_install.sh script for $1"
-    $SUDO ${PLUGINDIR}/$1/scripts/fpp_install.sh FPPDIR=${FPPDIR} SRCDIR=${FPPDIR}/src
 else
-    if [ -x "${PLUGINDIR}/$1/fpp_install.sh" ]; then
-        echo "Running fpp_install.sh script for $1"
-        $SUDO ${PLUGINDIR}/$1/fpp_install.sh FPPDIR=${FPPDIR} SRCDIR=${FPPDIR}/src
-    fi
+    runPluginInstallScript "$1"
 fi

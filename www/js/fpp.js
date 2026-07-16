@@ -511,7 +511,8 @@ function ParseLastStageMarker (text) {
 }
 function DoModalDialog (options) {
 	var dlg = $('#' + options.id);
-	if (dlg.length == 0) {
+	var isNewDialog = dlg.length == 0;
+	if (isNewDialog) {
 		dlg = $('#modalDialogBase').clone();
 		dlg.attr('id', options.id);
 		if (options.hasOwnProperty('class')) {
@@ -529,11 +530,6 @@ function DoModalDialog (options) {
 				options.close.call(self);
 			});
 		}
-		if (options.hasOwnProperty('footer') || options.hasOwnProperty('buttons')) {
-			dlg.find('.modal-footer').html(options.footer);
-		} else {
-			dlg.find('.modal-footer').remove();
-		}
 
 		if (typeof options.body !== 'string') {
 			dlg.find('.modal-body').append(options.body);
@@ -542,6 +538,21 @@ function DoModalDialog (options) {
 		if (typeof options.title !== 'string') {
 			dlg.find('.modal-title').append(options.title);
 		}
+	}
+
+	// (Re)build the footer whenever the caller supplies buttons/footer. This runs
+	// on first creation AND on reuse of a same-id dialog: previously the footer
+	// was wired only inside the creation block, so reopening a reused dialog kept
+	// the FIRST invocation's button labels and click handlers (title/body did
+	// refresh, the footer did not) -- e.g. a shared confirm dialog would fire the
+	// first item's action. Rebuilding here fixes that app-wide. Body-only updaters
+	// (progress dialogs pass neither buttons nor footer) leave the footer untouched.
+	if (options.hasOwnProperty('footer') || options.hasOwnProperty('buttons')) {
+		var $footer = dlg.find('.modal-footer');
+		if ($footer.length == 0) {
+			$footer = $('<div class="modal-footer"></div>').appendTo(dlg.find('.modal-content'));
+		}
+		$footer.html(options.footer || '');
 		$.each(options.buttons, function (buttonKey, buttonProps) {
 			var buttonId = '';
 			var buttonText = buttonKey;
@@ -569,7 +580,7 @@ function DoModalDialog (options) {
 					buttonStyle = ' style="' + buttonProps.style + '"';
 				}
 			}
-			$newButton = $(
+			var $newButton = $(
 				'<button ' +
 					buttonId +
 					buttonEnabled +
@@ -583,8 +594,10 @@ function DoModalDialog (options) {
 			$newButton.on('click', function () {
 				handleClick.call(self);
 			});
-			dlg.find('.modal-footer').append($newButton);
+			$footer.append($newButton);
 		});
+	} else if (isNewDialog) {
+		dlg.find('.modal-footer').remove();
 	}
 	if (options.noClose) {
 		dlg.find('#modalCloseButton').prop('disabled', true);
@@ -601,7 +614,9 @@ function DoModalDialog (options) {
 	}
 	new bootstrap.Modal('#' + options.id, options).show();
 
-	$('#' + options.id).on('shown.bs.modal', function () {
+	// Namespaced + rebound each call so a reused dialog does not accumulate a fresh
+	// shown handler every time it is reopened (which would re-run this N times).
+	$('#' + options.id).off('shown.bs.modal.fppDoModal').on('shown.bs.modal.fppDoModal', function () {
 		float_fppModalStickyThead();
 
 		// Now that the bootstrap is shown, focus the element if specified

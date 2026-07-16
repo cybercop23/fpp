@@ -142,6 +142,36 @@ teeOutput() {
 	fi
 }
 
+# startPluginLog <operation> <pluginName>
+#   Shared logging for the plugin install / uninstall / upgrade wrappers. The
+#   operation's combined stdout+stderr is streamed to the caller UNCHANGED (so
+#   the streaming web progress dialog -- and its logStage/ParseLastStageMarker
+#   parsing -- keeps working), while a SECOND, syslog-style copy is appended to
+#   ${LOGDIR}/plugin.log with every line prefixed "<date time> [<op> <plugin>]".
+#   The per-line prefix means that operations running concurrently (which can
+#   interleave in the single shared file) stay individually attributable. The
+#   run is bracketed with START / FINISH (with exit code) markers via an EXIT
+#   trap, so every exit path -- including early `exit 1` on failure -- is logged.
+#   No-op (plain stdout, no log) when invoked from a real interactive tty.
+#
+#   Only tee's own stdout is left unprefixed (that is what reaches the browser);
+#   the copy piped into the prefixer loop is timestamped and lands in plugin.log.
+#   printf '%(...)T' is a bash builtin, so the per-line timestamp forks nothing.
+startPluginLog() {
+	PLUGIN_OP="$1"
+	PLUGIN_NAME="$2"
+	MYTTY=$(tty)
+	if [ "x${MYTTY}" = "x/dev/console" -o "x${MYTTY}" = "x" -o "x${MYTTY}" = "xnot a tty" ]
+	then
+		makeLogDir
+
+		exec > >(tee >(while IFS= read -r __line; do printf '%(%Y-%m-%d %H:%M:%S)T [%s %s] %s\n' -1 "${PLUGIN_OP}" "${PLUGIN_NAME}" "${__line}"; done >> "${LOGDIR}/plugin.log"))
+		exec 2>&1
+	fi
+	echo "===== ${PLUGIN_OP} START: ${PLUGIN_NAME} ====="
+	trap '__rc=$?; echo "===== ${PLUGIN_OP} FINISH: ${PLUGIN_NAME} (rc=${__rc}) ====="' EXIT
+}
+
 # logStage "<message>"
 #   Declare a coarse progress "stage" for long-running, streamed operations
 #   (FPP upgrade, OS upgrade, etc.). Emits a "===== <message> =====" section

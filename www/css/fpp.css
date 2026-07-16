@@ -2573,6 +2573,16 @@ table#fppSystemsTable > thead > tr:last-child > td {
 	background-position: right 15px center;
 }
 
+/* The find-box row sits inside .settings, whose `.settings .row` rule adds a
+   1.1em bottom margin to every descendant row. As a flex child of the find
+   column that margin inflated the column height and pushed the input off-centre
+   (it top-pinned above the tab labels). Zero it so the input centres level with
+   the Available/Installed/Updates tabs. Specificity ties `.settings .row`; this
+   rule is later in the file so it wins. */
+.fppPluginInput.row {
+	margin-bottom: 0;
+}
+
 .fppPluginInputActionCol {
 	display: none;
 }
@@ -4402,4 +4412,38 @@ a.api-anchor {
    layout use Bootstrap utilities. */
 .checkboxSelectList {
 	max-height: 180px;
+}
+
+/* Plugin marketplace cards */
+.pluginCardInner {
+	cursor: pointer;
+}
+.pluginCardDesc {
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+/* Popular Plugins: single horizontally-scrollable row (functional scroll
+   boundary + fixed item width so flex children don't collapse; no Bootstrap
+   utility covers a fixed rem width). Scroll is contained here so the page
+   body never scrolls sideways on phones. */
+.pluginPopularScroll {
+	scroll-snap-type: x proximity;
+	-webkit-overflow-scrolling: touch;
+}
+.pluginPopularScroll > .pluginPopularCard {
+	flex: 0 0 auto;
+	width: 14rem;
+	scroll-snap-align: start;
+}
+/* Popular card title: allow two lines before truncating so more of long
+   plugin names is readable in the narrow fixed-width card. */
+.pluginPopularTitle {
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
 }
