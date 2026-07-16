@@ -412,6 +412,8 @@
                         </div>
                     </div>
 
+                    <div id="usbBandwidthWarning" class="d-none"></div>
+
                     <div id="groupsContainer">
                         <div class="no-groups-msg" id="noGroupsMsg">
                             <i class="fas fa-layer-group"></i>
@@ -466,6 +468,8 @@
     <script>
         // Available ALSA cards cache
         var availableCards = [];
+        // USB audio bandwidth check result (api/pipewire/audio/usb-check)
+        var usbCheck = { conflicts: [], kernelErrors: [] };
         // Current groups data
         var audioGroups = { groups: [] };
         // Next group ID counter
@@ -524,8 +528,9 @@
 
         $(document).ready(function () {
             CheckPipeWireStatus();
-            // Cards must be loaded before groups so the dropdowns can render
-            LoadAvailableCards().then(function () {
+            // Cards and the USB bandwidth check must both be loaded before
+            // groups so the dropdowns can render with conflict annotations
+            $.when(LoadAvailableCards(), CheckUsbBandwidth()).always(function () {
                 LoadGroups();
             });
         });
@@ -547,6 +552,123 @@
                         'PipeWire not responding — ensure the service is running'
                     );
                 });
+        }
+
+        /////////////////////////////////////////////////////////////////////////////
+        // USB bandwidth topology check (issue #2673)
+        // Multiple full-speed (12M) USB sound cards behind a single-TT USB hub
+        // share one ~12Mbit/s isochronous budget and cannot all stream at once.
+        // On a Pi 4 all four onboard USB-A ports sit behind one such hub, so
+        // two Sound Blasters plugged into the Pi directly will fail with
+        // kernel "Not enough bandwidth" errors. A powered multi-TT hub gives
+        // each port its own budget and works.
+        function CheckUsbBandwidth() {
+            return $.getJSON('api/pipewire/audio/usb-check')
+                .done(function (data) {
+                    usbCheck = data || { conflicts: [], kernelErrors: [] };
+                    RenderUsbBandwidthWarning();
+                })
+                .fail(function () {
+                    usbCheck = { conflicts: [], kernelErrors: [] };
+                });
+        }
+
+        // cardIds of sound cards that share an oversubscribed TT domain
+        function UsbConflictedCardIds() {
+            var ids = {};
+            var conflicts = (usbCheck && usbCheck.conflicts) || [];
+            for (var i = 0; i < conflicts.length; i++) {
+                var cards = conflicts[i].cards || [];
+                for (var j = 0; j < cards.length; j++) {
+                    ids[cards[j].cardId] = true;
+                }
+            }
+            return ids;
+        }
+
+        // If 2+ cards from the same conflict domain are members of enabled
+        // groups, the configuration will actually exercise the oversubscribed
+        // hub — return those card descriptions, else null.
+        function UsbConflictUsedInGroups() {
+            var conflicts = (usbCheck && usbCheck.conflicts) || [];
+            if (conflicts.length === 0) return null;
+
+            var usedCardIds = {};
+            for (var g = 0; g < audioGroups.groups.length; g++) {
+                var grp = audioGroups.groups[g];
+                if (!grp.enabled || !grp.members) continue;
+                for (var m = 0; m < grp.members.length; m++) {
+                    if (grp.members[m].cardId) usedCardIds[grp.members[m].cardId] = true;
+                }
+            }
+
+            for (var i = 0; i < conflicts.length; i++) {
+                var hit = [];
+                var cards = conflicts[i].cards || [];
+                for (var j = 0; j < cards.length; j++) {
+                    if (cards[j].cardId in usedCardIds) {
+                        hit.push(cards[j].product + ' [' + cards[j].cardId + ']');
+                    }
+                }
+                if (hit.length >= 2) return hit;
+            }
+            return null;
+        }
+
+        function RenderUsbBandwidthWarning() {
+            var box = $('#usbBandwidthWarning');
+            var conflicts = (usbCheck && usbCheck.conflicts) || [];
+            var kernelErrors = (usbCheck && usbCheck.kernelErrors) || [];
+            if (conflicts.length === 0 && kernelErrors.length === 0) {
+                box.addClass('d-none').empty();
+                return;
+            }
+
+            var isPi4 = usbCheck.model && usbCheck.model.indexOf('Raspberry Pi 4') !== -1;
+
+            var html = '';
+            if (conflicts.length > 0) {
+                html += '<div class="alert alert-danger mt-3" role="alert">';
+                html += '<h5 class="alert-heading"><i class="fas fa-exclamation-triangle"></i> ' +
+                    'These USB sound cards cannot all play audio at the same time</h5>';
+                for (var i = 0; i < conflicts.length; i++) {
+                    html += '<ul class="mb-2">';
+                    var cards = conflicts[i].cards || [];
+                    for (var j = 0; j < cards.length; j++) {
+                        html += '<li>' + EscapeHtml(cards[j].product) +
+                            ' [' + EscapeHtml(cards[j].cardId) + '] &mdash; USB port ' +
+                            EscapeHtml(cards[j].usbPath) + '</li>';
+                    }
+                    html += '</ul>';
+                }
+                html += '<p class="mb-2">The sound cards listed above are all connected through a part of ' +
+                    'this computer’s USB system that can only carry <strong>one</strong> sound card’s ' +
+                    'audio traffic at a time.' +
+                    (isPi4 ? ' On a Raspberry Pi 4 all four onboard USB ports are internally wired through a ' +
+                        'single hub chip with this limit, so it does not matter which onboard ports you use ' +
+                        '— they all share the same budget.' : '') +
+                    ' This is a hardware limitation, not an FPP configuration problem: playing audio on more ' +
+                    'than one of these cards at once will produce badly distorted or missing audio, and the ' +
+                    'kernel logs “Not enough bandwidth” errors.</p>';
+                html += '<p class="mb-2 fw-semibold">Fix: plug the sound cards into an external powered USB ' +
+                    'hub, and connect that hub to a single USB port.</p>';
+                html += '<p class="mb-0">This sounds backwards, but it works: a good external hub contains a ' +
+                    'separate USB 1.1 “translator” for <em>each</em> of its ports (called a ' +
+                    '“multi-TT” hub), so every sound card plugged into it gets its own full audio ' +
+                    'bandwidth allocation — something the onboard ports cannot provide. Most name-brand ' +
+                    'powered hubs are multi-TT; after re-plugging, reload this page to confirm the warning ' +
+                    'clears. Alternatively, use the onboard audio output plus a single USB sound card.</p>';
+                html += '</div>';
+            } else {
+                html += '<div class="alert alert-warning mt-3" role="alert">';
+                html += '<h5 class="alert-heading"><i class="fas fa-exclamation-triangle"></i> ' +
+                    'USB audio bandwidth errors found in the kernel log</h5>';
+                html += '<p class="mb-0">The current USB topology looks OK, so these errors may be from ' +
+                    'before devices were re-plugged, but if audio is failing or distorted on a USB sound ' +
+                    'card, connect the sound cards through a powered multi-TT USB hub.</p>';
+                html += '</div>';
+            }
+            box.html(html).removeClass('d-none');
         }
 
         /////////////////////////////////////////////////////////////////////////////
@@ -839,6 +961,8 @@
                 else hasAlsa = true;
             }
 
+            var conflictedCards = UsbConflictedCardIds();
+
             if (hasAlsa && hasAES67) html += '<optgroup label="Physical Sound Cards">';
             for (var i = 0; i < availableCards.length; i++) {
                 var card = availableCards[i];
@@ -849,6 +973,8 @@
                 if (card.byPath) label += ' (' + EscapeHtml(card.byPath) + ')';
                 // Prepend user-defined alias (issue #2586) if set.
                 if (card.alias) label = EscapeHtml(card.alias) + ' — ' + label;
+                // Flag cards sharing an oversubscribed USB hub (issue #2673)
+                if (card.cardId in conflictedCards) label += ' ⚠ shared USB bandwidth';
                 html += '<option value="' + EscapeAttr(card.cardId) + '"' + sel + '>' + label + '</option>';
             }
             if (hasAlsa && hasAES67) html += '</optgroup>';
@@ -1532,27 +1658,53 @@
         }
 
         function ApplyGroups() {
+            var body = 'This will save the current configuration, restart PipeWire audio services, and restart FPPD.<br><br>' +
+                'Any currently playing audio will be interrupted briefly.';
+            var applyLabel = 'Save & Apply';
+            var applyClass = 'btn-success';
+            var dialogSize = 'modal-sm';
+
+            // Block-with-override when the config uses 2+ sound cards that
+            // share one USB bandwidth budget (issue #2673) — it will not work.
+            var conflictCards = UsbConflictUsedInGroups();
+            if (conflictCards) {
+                body = '<div class="alert alert-danger">' +
+                    '<h6 class="alert-heading"><i class="fas fa-exclamation-triangle"></i> ' +
+                    'This configuration will NOT play correctly</h6>' +
+                    '<p class="mb-2">Your groups use these sound cards together, but they are connected ' +
+                    'through USB ports that share a single audio bandwidth budget (see the warning at the ' +
+                    'top of the page):</p>' +
+                    '<ul class="mb-2"><li>' + conflictCards.map(EscapeHtml).join('</li><li>') + '</li></ul>' +
+                    '<p class="mb-0">Audio will be distorted or missing. Move the sound cards onto a ' +
+                    'powered multi-TT USB hub first, then reload this page and apply.</p>' +
+                    '</div>' + body;
+                applyLabel = 'Apply Anyway';
+                applyClass = 'btn-danger';
+                dialogSize = '';
+            }
+
+            var buttons = {
+                'Cancel': {
+                    click: function () { CloseModalDialog('applyConfirmDialog'); },
+                    class: 'btn-outline-secondary'
+                }
+            };
+            buttons[applyLabel] = {
+                click: function () {
+                    CloseModalDialog('applyConfirmDialog');
+                    DoApplyGroups();
+                },
+                class: applyClass
+            };
+
             DoModalDialog({
                 id: 'applyConfirmDialog',
                 title: 'Save & Apply Audio Configuration',
-                body: 'This will save the current configuration, restart PipeWire audio services, and restart FPPD.<br><br>' +
-                    'Any currently playing audio will be interrupted briefly.',
-                class: 'modal-sm',
+                body: body,
+                class: dialogSize,
                 keyboard: true,
                 backdrop: true,
-                buttons: {
-                    'Cancel': {
-                        click: function () { CloseModalDialog('applyConfirmDialog'); },
-                        class: 'btn-outline-secondary'
-                    },
-                    'Save & Apply': {
-                        click: function () {
-                            CloseModalDialog('applyConfirmDialog');
-                            DoApplyGroups();
-                        },
-                        class: 'btn-success'
-                    }
-                }
+                buttons: buttons
             });
         }
 

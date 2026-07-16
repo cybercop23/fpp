@@ -1102,6 +1102,154 @@ function GetPipeWireAudioCards()
 }
 
 /////////////////////////////////////////////////////////////////////////////
+// Helper: find the USB Transaction Translator (TT) that a full/low-speed
+// device's isochronous traffic is scheduled through.
+//
+// Full-speed (12M) USB audio devices behind a high-speed hub share that
+// hub's TT. A single-TT hub (bDeviceProtocol 01 — e.g. the VL805's internal
+// hub that all four USB-A ports on a Pi 4 hang off) has one ~12Mbps
+// periodic budget for ALL downstream full-speed devices, so two sound
+// cards behind it fail with kernel "Not enough bandwidth for altsetting"
+// errors (issue #2673). A multi-TT hub (bDeviceProtocol 02 — most decent
+// powered hubs) has one TT per port, so each card gets its own budget.
+//
+// Returns null when the device is attached directly to an xHCI root port
+// (no TT involved — the controller schedules full-speed natively), else:
+//   array('hubPath', 'hubProduct', 'multiTT', 'port', 'ttKey')
+// Devices sharing the same non-empty ttKey compete for one 12Mbps budget.
+function UsbFindTTOwner($devPath, $sysfs = '/sys/bus/usb/devices')
+{
+    $path = $devPath;
+    // Walk up the topology: "3-2.4.2" -> hub "3-2.4" (port 2) -> hub "3-2" ...
+    // A path without '.' ("3-1") is attached directly to a root port.
+    while (($dotPos = strrpos($path, '.')) !== false) {
+        $port = substr($path, $dotPos + 1);
+        $parent = substr($path, 0, $dotPos);
+        $pSpeed = trim(@file_get_contents("$sysfs/$parent/speed"));
+        if ($pSpeed === '480') {
+            // Nearest high-speed hub upstream — this hub's TT carries the
+            // device's full-speed traffic.
+            $proto = trim(@file_get_contents("$sysfs/$parent/bDeviceProtocol"));
+            $multiTT = ($proto === '2' || $proto === '02');
+            return array(
+                'hubPath' => $parent,
+                'hubProduct' => trim(@file_get_contents("$sysfs/$parent/product")),
+                'multiTT' => $multiTT,
+                'port' => $port,
+                // Multi-TT: one TT per port, so key on hub+port.
+                // Single-TT: every downstream device shares one TT.
+                'ttKey' => $multiTT ? ($parent . ':' . $port) : $parent,
+            );
+        }
+        // Full-speed hub in between — the TT is further upstream.
+        $path = $parent;
+    }
+    return null;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// GET /api/pipewire/audio/usb-check
+// Detect USB sound cards that share a single Transaction Translator and
+// therefore cannot all stream audio at once (Pi 4 onboard ports, issue
+// #2673). Also surfaces any "Not enough bandwidth" kernel log entries so
+// the UI can report the failure even if the topology heuristic misses it.
+function GetUsbAudioBandwidthCheck()
+{
+    global $SUDO;
+
+    $sysfs = '/sys/bus/usb/devices';
+
+    // Map USB "busnum:devnum" -> sysfs topology path (e.g. "3-2.4.2")
+    $usbByBusDev = array();
+    foreach (glob($sysfs . '/*') as $entry) {
+        $name = basename($entry);
+        // Skip interface entries ("3-2.4:1.0") and root hubs ("usb3")
+        if (strpos($name, ':') !== false || !preg_match('/^\d+-[\d.]+$/', $name))
+            continue;
+        $busnum = trim(@file_get_contents("$entry/busnum"));
+        $devnum = trim(@file_get_contents("$entry/devnum"));
+        if ($busnum !== '' && $devnum !== '')
+            $usbByBusDev[intval($busnum) . ':' . intval($devnum)] = $name;
+    }
+
+    // Enumerate USB-attached ALSA cards via /proc/asound/card*/usbbus
+    $devices = array();
+    $byTTKey = array();
+    foreach (glob('/proc/asound/card*/usbbus') as $usbbusFile) {
+        if (!preg_match('#/card(\d+)/#', $usbbusFile, $cm))
+            continue;
+        $cardNum = intval($cm[1]);
+        $busDev = trim(@file_get_contents($usbbusFile)); // "003/006"
+        if (!preg_match('#^(\d+)/(\d+)$#', $busDev, $bm))
+            continue;
+        $key = intval($bm[1]) . ':' . intval($bm[2]);
+        if (!isset($usbByBusDev[$key]))
+            continue;
+        $usbPath = $usbByBusDev[$key];
+        $speed = trim(@file_get_contents("$sysfs/$usbPath/speed"));
+
+        $device = array(
+            'cardNum' => $cardNum,
+            'cardId' => trim(@file_get_contents("/proc/asound/card$cardNum/id")),
+            'product' => trim(@file_get_contents("$sysfs/$usbPath/product")),
+            'usbPath' => $usbPath,
+            'speed' => $speed,
+            'ttKey' => '',
+            'hubProduct' => '',
+            'singleTT' => false,
+        );
+
+        // Only full/low-speed devices consume shared TT bandwidth;
+        // high-speed (480M+) audio devices are not affected.
+        if ($speed === '12' || $speed === '1.5') {
+            $tt = UsbFindTTOwner($usbPath);
+            if ($tt !== null) {
+                $device['ttKey'] = $tt['ttKey'];
+                $device['hubProduct'] = $tt['hubProduct'];
+                $device['singleTT'] = !$tt['multiTT'];
+                $byTTKey[$tt['ttKey']][] = count($devices);
+            }
+        }
+        $devices[] = $device;
+    }
+
+    // Any TT domain carrying 2+ full-speed sound cards is oversubscribed
+    $conflicts = array();
+    foreach ($byTTKey as $ttKey => $indexes) {
+        if (count($indexes) < 2)
+            continue;
+        $cards = array();
+        foreach ($indexes as $i) {
+            $cards[] = array(
+                'cardNum' => $devices[$i]['cardNum'],
+                'cardId' => $devices[$i]['cardId'],
+                'product' => $devices[$i]['product'],
+                'usbPath' => $devices[$i]['usbPath'],
+            );
+        }
+        $conflicts[] = array(
+            'ttKey' => $ttKey,
+            'hubProduct' => $devices[$indexes[0]]['hubProduct'],
+            'cards' => $cards,
+        );
+    }
+
+    // Kernel log evidence of the failure (needs root — dmesg is restricted)
+    $kernelErrors = array();
+    exec($SUDO . " dmesg 2>/dev/null | grep -iE 'not enough bandwidth|usb_set_interface failed' | tail -n 6", $kernelErrors);
+
+    $model = trim(str_replace("\0", '', @file_get_contents('/proc/device-tree/model')));
+
+    return json(array(
+        'status' => (!empty($conflicts) || !empty($kernelErrors)) ? 'warning' : 'ok',
+        'model' => $model,
+        'devices' => $devices,
+        'conflicts' => $conflicts,
+        'kernelErrors' => $kernelErrors,
+    ));
+}
+
+/////////////////////////////////////////////////////////////////////////////
 // POST /api/pipewire/audio/group/volume
 // Set volume for a specific group or member sink
 function SetPipeWireGroupVolume()
