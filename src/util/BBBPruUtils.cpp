@@ -499,6 +499,41 @@ void BBBPru::stop() {
     }
 }
 
+// The core control register sits 0x22000 into the PRUSS mapping, one 0x2000
+// block per core, on both the AM335x and the AM62x.  Bit 1 enables the core.
+static constexpr uintptr_t PRU_CTRL_OFFSET = 0x22000;
+static constexpr uintptr_t PRU_CTRL_STRIDE = 0x2000;
+static constexpr uint32_t PRU_CTRL_ENABLE = 0x2;
+
+static volatile uint32_t* pruControlReg(unsigned pru_num) {
+    if (!base_memory_location) {
+        return nullptr;
+    }
+    return (volatile uint32_t*)(base_memory_location + PRU_CTRL_OFFSET + (pru_num * PRU_CTRL_STRIDE));
+}
+
+void BBBPru::pause() {
+    if (FAKE_PRU) {
+        return;
+    }
+    volatile uint32_t* ctrl = pruControlReg(pru_num);
+    if (ctrl) {
+        *ctrl = *ctrl & ~PRU_CTRL_ENABLE;
+        __sync_synchronize();
+    }
+}
+
+void BBBPru::resume() {
+    if (FAKE_PRU) {
+        return;
+    }
+    volatile uint32_t* ctrl = pruControlReg(pru_num);
+    if (ctrl) {
+        *ctrl = *ctrl | PRU_CTRL_ENABLE;
+        __sync_synchronize();
+    }
+}
+
 #include "../pru/SMEMRing.hp"
 
 void BBBPruSMEMRing::attach(BBBPru* pru, uint32_t pruBaseAddr, uint32_t ringSize, bool usePointerMode) {

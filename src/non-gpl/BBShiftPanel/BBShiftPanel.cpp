@@ -157,6 +157,11 @@ void BBShiftPanelOutput::StartingOutput() {
     // StoppingOutput is also called when the channel output thread simply
     // goes idle, so the stopping flag has to clear when output resumes
     m_stopping = false;
+    // Restart the refresh before the init registers go out below: the PRU
+    // has to be running to see them at all, and it only reads commands at a
+    // frame boundary, so if it is still working through a frame it needs the
+    // pump running to get there.
+    UnparkPRUs();
     if (!isPWMPanel() && m_panelType && pruData) {
         // FM6126A style panels need their configuration registers clocked
         // out before they will display anything; the registers can be lost
@@ -232,6 +237,80 @@ void BBShiftPanelOutput::StoppingOutput() {
     while (m_inFlight > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    ParkPRUs();
+}
+
+// The channel output thread only stops once nothing wants to output at all
+// (forceOutput() in channeloutputthread.cpp covers sequences, overlays,
+// effects, testing and bridging), and a shift panel only holds an image for
+// as long as the pump keeps re-shifting it - an idle panel is simply dark.
+// Streaming that blank frame costs most of a core for as long as fppd runs,
+// so park instead:
+//   - the pump stops on a frame boundary and clears the command word
+//   - the PRU reads that at the end of the frame it is in and parks in its
+//     command wait loop, which holds the display off; the OE PRU parks the
+//     same way once the brightness handshake stops
+//   - both cores are then halted, which also freezes their cycle counters
+// That last part is not just about saving (already idle) PRU cycles: the
+// counter saturates after 2^32 cycles (~17s) and the hardware clears CTR_EN
+// when it does, which RESET_PRU_CLOCK cannot undo, and the OE PRU's
+// GET_PRU_CLOCK spin loops would then never exit.  A halted core cannot
+// reach that state.
+//
+// PWM panels refresh from their own registers and their pump already idles
+// between commands, so none of this applies to them.
+void BBShiftPanelOutput::ParkPRUs() {
+    if (isPWMPanel() || !pru || !pruData || m_prusPaused) {
+        return;
+    }
+    m_pumpPaused = true;
+    // The pump only acts on this at a frame boundary, so it has written
+    // whole frames only.
+    int cnt = 0;
+    while (m_pumpRunning && !m_pumpParked && cnt < 500) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        cnt++;
+    }
+    // Then the frame still in flight has to drain, so the PRU ends up on the
+    // same frame boundary the pump stopped on and the two stay aligned in
+    // the byte stream.  The ring is far smaller than a frame, so this is at
+    // most that frame's tail.
+    for (cnt = 0; !m_ring.drained() && cnt < 500; cnt++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!m_pumpParked || !m_ring.drained()) {
+        // never leave the cores halted somewhere unknown - a frozen mid-scan
+        // output would hold one row lit
+        LogWarn(VB_CHANNELOUT, "BBShiftPanel: could not park (pumpParked=%d drained=%d), leaving the refresh running\n",
+                (int)m_pumpParked, (int)m_ring.drained());
+        m_pumpPaused = false;
+        return;
+    }
+    // The OE PRU only leaves its wait loop when this PRU hands it a
+    // brightness, so with this PRU parked one more display period is enough
+    // for both to be sitting in their command wait loops with the display
+    // off.  Halting anywhere else would freeze the pins mid-scan.
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    pru->pause();
+    if (pwmPru) {
+        pwmPru->pause();
+    }
+    m_prusPaused = true;
+}
+
+void BBShiftPanelOutput::UnparkPRUs() {
+    if (m_prusPaused) {
+        // the OE PRU first, so it is already waiting by the time the panel
+        // PRU starts handing it brightnesses
+        if (pwmPru) {
+            pwmPru->resume();
+        }
+        if (pru) {
+            pru->resume();
+        }
+        m_prusPaused = false;
+    }
+    m_pumpPaused = false;
 }
 
 BBShiftPanelOutput::~BBShiftPanelOutput() {
@@ -661,6 +740,28 @@ void BBShiftPanelOutput::runPumpThread() {
         return;
     }
     while (m_pumpRunning) {
+        if (m_pumpPaused.load(std::memory_order_acquire)) {
+            // Nothing is being output, so there is nothing to hold on the
+            // panel.  Clear the command word and stop: the PRU picks it up at
+            // the end of the frame it is in and parks in its command-wait
+            // loop, which holds the display off, and the OE PRU parks the
+            // same way once the brightness handshake stops.  SendData writes
+            // the command back on the first frame after StartingOutput.
+            //
+            // This is only reached at a frame boundary, and the ring is much
+            // smaller than one frame, so the PRU has at most the tail of the
+            // frame just written left to consume.  It ends up exactly where
+            // the pump stopped and the two stay aligned in the byte stream
+            // across the pause.
+            if (!m_pumpParked.load(std::memory_order_relaxed)) {
+                pruData->pixelsPerStride = 0;
+                __sync_synchronize();
+                m_pumpParked.store(true, std::memory_order_release);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        m_pumpParked.store(false, std::memory_order_relaxed);
         // frames stream back to back; a new frame from SendData is picked up
         // at the frame boundary so the PRU always sees whole frames
         uint8_t* src = m_frontBuffer.load(std::memory_order_acquire);
@@ -683,6 +784,9 @@ void BBShiftPanelOutput::runPumpThread() {
     }
 }
 void BBShiftPanelOutput::StopPRU(bool wait) {
+    // A halted core cannot see the stop command, and a parked one is already
+    // sitting on the check, so let them run first
+    UnparkPRUs();
     // Send the stop command
     if (pru) {
         pruData->command = PWM_COMMAND_HALT;

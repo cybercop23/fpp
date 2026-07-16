@@ -195,6 +195,19 @@ private:
     // pru/SMEMRing.hp for the layout.
     std::thread m_pumpThread;
     std::atomic<bool> m_pumpRunning{ false };
+    // Set while the channel output thread is idle.  Shift panels only hold an
+    // image for as long as the pump keeps re-shifting it, so a panel that is
+    // not being output to is simply dark - there is nothing to refresh and no
+    // reason to spend a core streaming a blank frame.  The pump acts on this
+    // only at a frame boundary; see runPumpThread.
+    std::atomic<bool> m_pumpPaused{ false };
+    // owned by the pump thread, read by StoppingOutput to wait for the park
+    std::atomic<bool> m_pumpParked{ false };
+    // set once both cores have been halted, so the park is not attempted or
+    // undone twice
+    bool m_prusPaused = false;
+    void ParkPRUs();
+    void UnparkPRUs();
     std::atomic<uint8_t*> m_frontBuffer{ nullptr };
     // PWM panels send one frame per DATA command; the pump streams once per
     // sequence bump so the byte flow stays in step with the commands

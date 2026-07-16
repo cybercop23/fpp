@@ -34,6 +34,24 @@ public:
     bool run(const std::string& program, bool clearSharedMems = true);
     void stop();
 
+    // Halt/restart the core in place.  Unlike stop()/run() these do not go
+    // through remoteproc or reload the firmware image: the program counter
+    // and every register survive, so resume() continues from exactly where
+    // pause() stopped and the data/shared RAM mappings stay usable while the
+    // core is halted.
+    //
+    // Two things to know before pausing:
+    //  - the output pins hold whatever the program last drove onto them, so
+    //    only pause where the firmware has parked them somewhere safe
+    //  - the cycle counter stops, which is usually the point: it saturates
+    //    after 2^32 cycles (~17s at 250MHz) and the hardware clears CTR_EN
+    //    when it does.  RESET_PRU_CLOCK does not recover from that, so any
+    //    firmware spinning on GET_PRU_CLOCK would hang forever afterwards.
+    //    A core left running but idle for >17s hits this; a paused one does
+    //    not.
+    void pause();
+    void resume();
+
     void clearPRUMem(uint8_t* ptr, size_t sz);
     void memcpyToPRU(uint8_t* dst, uint8_t* src, size_t sz);
 
@@ -100,6 +118,13 @@ public:
     // memory) and publishes the new write position; returns the number of
     // bytes written, limited by the available space
     uint32_t write(const uint8_t* src, uint32_t len);
+
+    // true once the consumer has caught up with every byte written; both
+    // conventions publish positions that compare equal only when empty.
+    // Producers that stop on a frame boundary can use this to know the PRU
+    // has consumed exactly what was produced, so the two stay aligned in the
+    // byte stream across a pause.
+    bool drained() const { return ctrl && ctrl[0] == ctrl[1]; }
 
     uint32_t size = 0;
 
