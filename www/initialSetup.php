@@ -87,6 +87,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['restoreFile'])) {
         #restoreSection .btn, #restoreSection small {
             font-size: 0.875rem;
         }
+        .fpp-backup-action-loading::after {
+            content: '';
+            display: inline-block;
+            width: 1em;
+            height: 1em;
+            border: 2px solid rgba(0,0,0,0.1);
+            border-left-color: var(--fpp-primary, #0d6efd);
+            border-radius: 50%;
+            animation: fpp-spin 0.6s linear infinite;
+            vertical-align: middle;
+            margin-left: 0.25em;
+        }
+        @keyframes fpp-spin {
+            to { transform: rotate(360deg); }
+        }
+        .fileCopyFields label { font-weight: 600; }
+        #fcFlagsTable td { vertical-align: top; white-space: nowrap; }
     </style>
     <?php
     include 'common/htmlMeta.inc';
@@ -115,6 +132,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['restoreFile'])) {
         if (isset($settings[$f]) && $settings[$f] == '1') {
             $alreadyConfigured = 1;
             break;
+        }
+    }
+
+    $backupHosts = getKnownFPPSystems();
+    $hostOptions = '';
+    if (!empty($backupHosts)) {
+        foreach ($backupHosts as $desc => $addr) {
+            $hostOptions .= '<option value="' . htmlspecialchars($addr) . '">' . htmlspecialchars($desc) . '</option>';
         }
     }
     ?>
@@ -237,6 +262,255 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['restoreFile'])) {
                     );
                 }
             });
+        }
+
+        // File Copy Restore functions
+        function fileCopyDirectionChanged() {
+            var direction = document.getElementById('fileCopyDirection').value;
+            $('.fcUSB').hide();
+            $('.fcHost').hide();
+            $('.fcHostDevice').hide();
+            $('.fcPathSelect').hide();
+            switch (direction) {
+                case 'FROMUSB':
+                    $('.fcUSB').show();
+                    $('.fcPathSelect').show();
+                    GetBackupDeviceDirectories();
+                    break;
+                case 'FROMLOCAL':
+                    $('.fcPathSelect').show();
+                    GetBackupDirsViaAPI(window.location.host, '', true);
+                    break;
+                case 'FROMREMOTE':
+                    $('.fcHost').show();
+                    $('.fcHostDevice').show();
+                    $('.fcPathSelect').show();
+                    if ($('#fcHost').val()) {
+                        GetRemoteHostUSBStorage();
+                    }
+                    break;
+            }
+        }
+
+        function GetBackupDevices() {
+            $('#fcUSBDevice').html('<option>Loading...</option>');
+            $.get('api/backups/devices').done(function (data) {
+                var options = '';
+                for (var i = 0; i < data.length; i++) {
+                    var desc = data[i].name;
+                    if (data[i].vendor != '') desc += ' - ' + data[i].vendor;
+                    if (data[i].model != '') {
+                        if (data[i].vendor != '') desc += ' ';
+                        else desc += ' - ';
+                        desc += ' ' + data[i].model;
+                    }
+                    desc += ' - ' + data[i].size + 'GB';
+                    options += "<option value='" + data[i].name + "'>" + desc + "</option>";
+                }
+                $('#fcUSBDevice').html(options);
+            }).fail(function () {
+                $('#fcUSBDevice').html('');
+            });
+        }
+
+        function GetBackupDeviceDirectories() {
+            var dev = $('#fcUSBDevice').val();
+            if (!dev) {
+                $('#fcPathSelect').html("<option value=''>No USB Device Selected</option>");
+                return;
+            }
+            $('#fcPathSelect').html('<option>Loading...</option>');
+            $.get('api/backups/list/' + dev).done(function (data) {
+                PopulateBackupDirs(data);
+            }).fail(function () {
+                $('#fcPathSelect').html('');
+            });
+        }
+
+        function USBDeviceChanged() {
+            var direction = document.getElementById('fileCopyDirection').value;
+            if (direction == 'FROMUSB') GetBackupDeviceDirectories();
+        }
+
+        function GetBackupDirsViaAPI(host, remoteStorageSelected, excludeRoot) {
+            $('#fcPathSelect').html('<option>Loading...</option>');
+            var url = 'api/backups/list';
+            if (remoteStorageSelected && remoteStorageSelected !== 'none') {
+                url = 'api/backups/list/' + encodeURIComponent(remoteStorageSelected);
+            }
+            if (host && host !== window.location.host) {
+                url += (url.indexOf('?') === -1 ? '?' : '&') + 'ip=' + encodeURIComponent(host);
+            }
+            $.get(url).done(function (data) {
+                PopulateBackupDirs(data, excludeRoot);
+            }).fail(function () {
+                $('#fcPathSelect').html('');
+            });
+        }
+
+        function GetBackupHostBackupDirs(remoteStorageSelected) {
+            var selStorage = (remoteStorageSelected && remoteStorageSelected !== 'none') ? remoteStorageSelected : '';
+            GetBackupDirsViaAPI($('#fcHost').val(), selStorage, true);
+        }
+
+        function GetRemoteHostUSBStorage() {
+            var host = $('#fcHost').val();
+            if (!host) return;
+            var requestUrl = 'api/backups/devices?ip=' + encodeURIComponent(host);
+            var defaultOption = "<option value='none'>Default FPP Storage</option>";
+            $('#fcRemoteStorage').parent().closest('td').addClass('fpp-backup-action-loading');
+            $.get(requestUrl).done(function (data) {
+                var options = '';
+                for (var i = 0; i < data.length; i++) {
+                    var desc = data[i].name;
+                    if (data[i].vendor != '') desc += ' - ' + data[i].vendor;
+                    if (data[i].model != '') {
+                        if (data[i].vendor != '') desc += ' ';
+                        else desc += ' - ';
+                        desc += ' ' + data[i].model;
+                    }
+                    desc += ' - ' + data[i].size + 'GB';
+                    options += "<option value='" + data[i].name + "'>" + desc + "</option>";
+                }
+                $('#fcRemoteStorage').html(defaultOption + options);
+                $('#fcRemoteStorage').parent().closest('td').removeClass('fpp-backup-action-loading');
+                if (options) GetBackupHostBackupDirs($('#fcRemoteStorage').val());
+            }).fail(function () {
+                $('#fcRemoteStorage').html(defaultOption);
+                $('#fcRemoteStorage').parent().closest('td').removeClass('fpp-backup-action-loading');
+            });
+        }
+
+        function PopulateBackupDirs(data, excludeRoot) {
+            var options = '';
+            for (var i = 0; i < data.length; i++) {
+                if (excludeRoot && data[i] == '/') continue;
+                if (data[i].substring(0, 5) != 'ERROR')
+                    options += "<option value='" + data[i] + "'>" + data[i] + "</option>";
+                else
+                    options += "<option value=''>" + data[i] + "</option>";
+            }
+            $('#fcPathSelect').html(options);
+        }
+
+        function GetFileCopyFlags() {
+            var flags = '';
+            $('.fcFlag:checked').each(function () {
+                flags += ' ' + $(this).val();
+            });
+            return flags.trim();
+        }
+
+        function PerformFileCopyRestore() {
+            var direction = $('#fileCopyDirection').val();
+            var host = $('#fcHost').val();
+            var remoteStorage = $('#fcRemoteStorage').val();
+            var path = $('#fcPathSelect').val();
+            var flags = GetFileCopyFlags();
+
+            if (!path) {
+                DialogError('Restore Failed', 'No backup path specified');
+                return;
+            }
+            if (!flags) {
+                DialogError('Restore Failed', 'No items selected to restore');
+                return;
+            }
+
+            var storageLocation;
+            var url = 'copystorage.php?wrapped=1&direction=' + direction;
+
+            if (direction == 'FROMUSB') {
+                storageLocation = $('#fcUSBDevice').val();
+                if (!storageLocation || storageLocation == 'none') {
+                    DialogError('Restore Failed', 'No USB device selected');
+                    return;
+                }
+            } else if (direction == 'FROMREMOTE') {
+                if (!host) {
+                    DialogError('Restore Failed', 'No remote host specified');
+                    return;
+                }
+                if (remoteStorage && remoteStorage !== 'none') {
+                    url += '&remoteStorage=' + remoteStorage;
+                }
+                storageLocation = host;
+            } else {
+                storageLocation = settings['mediaDirectory'] + '/backups';
+            }
+
+            url += '&path=' + path;
+            url += '&storageLocation=' + storageLocation;
+            url += '&flags=' + flags;
+            url += '&delete=' + ($('#fcDeleteExtra').is(':checked') ? 'yes' : 'no');
+            url += '&compress=no';
+
+            if (!confirm("Confirm File restore of '" + flags + "' from " + storageLocation + "?\n\nWARNING: This will overwrite any current files with the copies being restored")) {
+                return;
+            }
+
+            $('#restoreDialog').fppDialog('close');
+
+            var titleTxt = 'FPP File Copy Restore';
+            DoModalDialog({
+                id: 'fileCopyPopup_Modal',
+                title: titleTxt,
+                height: 600,
+                width: 900,
+                autoResize: true,
+                closeOnEscape: false,
+                backdrop: true,
+                body: $('#fileCopyPopup').html(),
+                class: 'no-close modal-dialog-scrollable',
+                buttons: {
+                    Close: {
+                        text: 'Please Wait',
+                        disabled: true,
+                        id: 'fileCopyPopup_ModalCloseButton',
+                        class: 'btn-secondary',
+                        click: function () {
+                            CloseFileCopyDialog();
+                        }
+                    }
+                }
+            });
+
+            $('#fileCopyPopup_ModalCloseButton').prop('disabled', true).text('Please Wait');
+            $('#fileCopyText').val('');
+            StreamURL(url, 'fileCopyText', 'FileCopyDone', 'FileCopyTimeoutError');
+        }
+
+        function CloseFileCopyDialog() {
+            CloseModalDialog('fileCopyPopup_Modal');
+        }
+
+        function FileCopyDone() {
+            EnableModalDialogCloseButton('fileCopyPopup_Modal');
+        }
+
+        function FileCopyTimeoutError() {
+            var logUrl = 'api/file/Logs/fpp_backup_filecopy.log';
+            var timeoutMsg = '!!! Attempting to track file copy process via its fallback log file...\n The file copy is still running in the background and will complete in due course.\n\n';
+            var lastLen = 0;
+
+            $('#fileCopyText').val(timeoutMsg);
+
+            var tailInterval = setInterval(function () {
+                $.get(logUrl, function (text) {
+                    if (text === 'File does not exist.') {
+                        clearInterval(tailInterval);
+                        FileCopyDone();
+                    } else {
+                        $('#fileCopyText').val(timeoutMsg + text);
+                        var el = $('#fileCopyText');
+                        el.scrollTop(el.prop('scrollHeight'));
+                        if (text.includes('unmounted from') || text.length === 0) {
+                            clearInterval(tailInterval);
+                            FileCopyDone();
+                        }
+                    }
+                });
+            }, 1000);
         }
 
         function showSetupProgress(msg) {
@@ -660,43 +934,168 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['restoreFile'])) {
         </div>
 
         <div id="restoreDialog" class="modal fade" tabindex="-1" role="dialog">
-            <div class="modal-dialog" role="document">
+            <div class="modal-dialog modal-lg" role="document">
                 <div class="modal-content">
                     <div class="modal-header">
                         <h5 class="modal-title"><i class="fas fa-upload"></i> Restore from Backup</h5>
                         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                     </div>
                     <div class="modal-body">
-                        <p class="text-muted small mb-2">Upload a JSON backup file to restore all settings. All current settings will be overwritten.</p>
-                        <div id="dropZone" class="border border-primary rounded text-center py-3 px-2"
-                            onclick="document.getElementById('restoreFileInput').click()">
-                            <div>
-                                <div><i class="fas fa-cloud-upload-alt fa-lg text-primary"></i></div>
-                                <p class="mb-0 small fw-bold">Drag file here or click to browse</p>
+                        <div class="mb-3">
+                            <label class="fw-bold mb-2">Restore Type</label>
+                            <select id="restoreType" class="form-select" onchange="restoreTypeChanged()">
+                                <option value="json">JSON Configuration Restore</option>
+                                <option value="filecopy">File Copy Restore</option>
+                            </select>
+                        </div>
+
+                        <div id="jsonRestoreSection">
+                            <p class="text-muted small mb-2">Upload a JSON backup file to restore configuration settings.</p>
+                            <div class="alert alert-info small py-2 mb-2">
+                                <i class="fas fa-info-circle"></i> The JSON Configuration backup file does not contain sequences, media, plugin files, or additional files. You will need to upload those files or perform an FPP Connect from xLights to restore your data.
+                            </div>
+                            <div id="dropZone" class="border border-primary rounded text-center py-3 px-2"
+                                onclick="document.getElementById('restoreFileInput').click()">
+                                <div>
+                                    <div><i class="fas fa-cloud-upload-alt fa-lg text-primary"></i></div>
+                                    <p class="mb-0 small fw-bold">Drag file here or click to browse</p>
+                                </div>
+                            </div>
+                            <input type="file" id="restoreFileInput" accept=".json" class="d-none">
+                            <div id="restoreFileInfo" class="d-none mt-1">
+                                <span class="text-success small"><i class="fas fa-check-circle"></i> <span id="restoreFileName" class="fw-bold"></span></span>
+                                <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1 ms-1" onclick="clearRestoreFile()"><i class="fas fa-times"></i></button>
+                            </div>
+                            <div id="restoreStatus" class="mt-1 d-none"></div>
+                        </div>
+
+                        <div id="fileCopySection" class="d-none">
+                            <p class="text-muted small mb-2">Restore configuration, sequences, plugins, and other files from a backup directory.</p>
+                            <table class="fileCopyFields">
+                                <tr>
+                                    <td class="pe-3 pb-2" style="white-space: nowrap;">Restore from:</td>
+                                    <td class="pb-2">
+                                        <select id="fileCopyDirection" class="form-select" onchange="fileCopyDirectionChanged()">
+                                            <option value="FROMUSB">Restore from USB</option>
+                                            <option value="FROMLOCAL">Restore from Local FPP Backups Directory</option>
+                                            <option value="FROMREMOTE">Restore from Remote FPP Backups Directory</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr class="fcUSB" style="display: none;">
+                                    <td class="pe-3 pb-2">USB Device:</td>
+                                    <td class="pb-2">
+                                        <select id="fcUSBDevice" class="form-select d-inline w-auto" onchange="USBDeviceChanged()"></select>
+                                        <input type='button' class='buttons btn-sm' onClick='GetBackupDevices();' value='Refresh List'>
+                                    </td>
+                                </tr>
+                                <tr class="fcHost" style="display: none;">
+                                    <td class="pe-3 pb-2">Remote Host:</td>
+                                    <td class="pb-2">
+                                        <select id="fcHost" class="form-select" onchange="GetBackupHostBackupDirs($('#fcRemoteStorage').val())">
+                                            <option value="">-- Select Remote Host --</option>
+                                            <?php echo $hostOptions; ?>
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr class="fcHostDevice" style="display: none;">
+                                    <td class="pe-3 pb-2">Remote Storage:</td>
+                                    <td class="pb-2">
+                                        <select id="fcRemoteStorage" class="form-select" onchange="GetBackupHostBackupDirs($(this).val())">
+                                            <option value="none">Default FPP Storage</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr class="fcPathSelect" style="display: none;">
+                                    <td class="pe-3 pb-2">Backup Path:</td>
+                                    <td class="pb-2">
+                                        <select id="fcPathSelect" class="form-select"></select>
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <div class="mt-2">
+                                <label class="fw-bold">What to restore:</label>
+                                <table id="fcFlagsTable">
+                                    <tr>
+                                        <td>
+                                            <input type='checkbox' class='fcFlag' value='Configuration' id='fcFlagConfig' checked>Configuration<br>
+                                            <input type='checkbox' class='fcFlag' value='Playlists' id='fcFlagPlaylists' checked>Playlists<br>
+                                        </td>
+                                        <td width='10px'></td>
+                                        <td>
+                                            <input type='checkbox' class='fcFlag' value='Plugins' id='fcFlagPlugins' checked>Plugins<br>
+                                        </td>
+                                        <td width='10px'></td>
+                                        <td>
+                                            <input type='checkbox' class='fcFlag' value='Sequences' id='fcFlagSequences' checked>Sequences<br>
+                                            <input type='checkbox' class='fcFlag' value='Images' id='fcFlagImages' checked>Images<br>
+                                        </td>
+                                        <td width='10px'></td>
+                                        <td>
+                                            <input type='checkbox' class='fcFlag' value='Scripts' id='fcFlagScripts' checked>Scripts<br>
+                                            <input type='checkbox' class='fcFlag' value='Effects' id='fcFlagEffects' checked>Effects<br>
+                                        </td>
+                                        <td width='10px'></td>
+                                        <td>
+                                            <input type='checkbox' class='fcFlag' value='Music' id='fcFlagMusic' checked>Music<br>
+                                            <input type='checkbox' class='fcFlag' value='Videos' id='fcFlagVideos' checked>Videos<br>
+                                        </td>
+                                        <td width='10px'></td>
+                                        <td>
+                                            <input type='checkbox' class='fcFlag' value='EEPROM' id='fcFlagEEPROM' checked>Virtual EEPROM<br>
+                                        </td>
+                                    </tr>
+                                </table>
+                                <div class="mt-1">
+                                    Delete extras:
+                                    <input type='checkbox' id='fcDeleteExtra'>
+                                    (Delete extra files on destination that do not exist in the backup)
+                                </div>
                             </div>
                         </div>
-                        <input type="file" id="restoreFileInput" accept=".json" class="d-none">
-                        <div id="restoreFileInfo" class="d-none mt-1">
-                            <span class="text-success small"><i class="fas fa-check-circle"></i> <span id="restoreFileName" class="fw-bold"></span></span>
-                            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1 ms-1" onclick="clearRestoreFile()"><i class="fas fa-times"></i></button>
-                        </div>
-                        <div id="restoreStatus" class="mt-1 d-none"></div>
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="buttons" data-bs-dismiss="modal">Cancel</button>
                         <button type="button" id="uploadRestoreBtn" class="buttons btn-success" disabled onclick="uploadRestoreFile()">
                             <i class="fas fa-upload"></i> Upload &amp; Restore
                         </button>
+                        <button type="button" id="fileCopyRestoreBtn" class="buttons btn-success d-none" onclick="PerformFileCopyRestore()">
+                            <i class="fas fa-undo"></i> Restore
+                        </button>
                     </div>
                 </div>
             </div>
         </div>
 
+        <div id="fileCopyPopup" class="d-none">
+            <textarea class="w-100" style="height: 55vh; min-height: 200px;" disabled id="fileCopyText"></textarea>
+        </div>
+
         <script>
+        function restoreTypeChanged() {
+            var type = $('#restoreType').val();
+            if (type == 'json') {
+                $('#jsonRestoreSection').removeClass('d-none');
+                $('#fileCopySection').addClass('d-none');
+                $('#uploadRestoreBtn').removeClass('d-none');
+                $('#fileCopyRestoreBtn').addClass('d-none');
+            } else {
+                $('#jsonRestoreSection').addClass('d-none');
+                $('#fileCopySection').removeClass('d-none');
+                $('#uploadRestoreBtn').addClass('d-none');
+                $('#fileCopyRestoreBtn').removeClass('d-none');
+                fileCopyDirectionChanged();
+            }
+        }
+
         function openRestoreDialog() {
             clearRestoreFile();
+            $('#restoreType').val('json');
+            restoreTypeChanged();
             $('#restoreDialog').fppDialog('open');
             setupDropZone();
+            GetBackupDevices();
         }
         </script>
 </body>
