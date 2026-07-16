@@ -202,6 +202,9 @@ function WriteSettingToFile($settingName, $new_setting_value, $plugin = "")
         }
         file_put_contents($filename, $RevisedSettingsStr);
     }
+    if ($plugin == "") {
+        $settings[$settingName] = $new_setting_value;
+    }
     flock($fd, LOCK_UN);
     fclose($fd);
 }
