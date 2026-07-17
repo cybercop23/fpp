@@ -38,8 +38,9 @@
             <div class="pageContent">
                 <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
                     <h2 class="mb-0">Troubleshooting Commands</h2>
-                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="DownloadZip('Logs');"
-                        title="Downloads a zip containing FPP logs, configuration and the output of the troubleshooting commands on this page. Attach this to a support request.">
+                    <button type="button" class="btn btn-outline-secondary btn-sm"
+                        onclick="DownloadZip('Logs', this, 'Generating Support Bundle…');"
+                        title="Downloads a zip containing FPP logs, configuration and the output of the troubleshooting commands on this page. Attach this to a support request. Takes around 10 seconds to build.">
                         <i class="fas fa-file-archive me-1"></i>Download Support Bundle (Logs / Config / Troubleshooting)
                     </button>
                 </div>
