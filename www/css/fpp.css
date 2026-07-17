@@ -4417,6 +4417,66 @@ a.api-anchor {
 	max-height: 180px;
 }
 
+/* Plugin icon / initials avatar */
+.pluginIconWrap {
+	width: 3.5rem;
+	height: 3.5rem;
+	flex-shrink: 0;
+	border-radius: 0.75rem;
+	overflow: hidden;
+	background: var(--fpp-bg-card, #e9ecef);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+.pluginIcon {
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	display: block;
+}
+.pluginIconFallback {
+	width: 100%;
+	height: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-weight: 600;
+	font-size: 1rem;
+	color: var(--fpp-text-muted, #6c757d);
+	background: var(--fpp-bg-card, #f8f9fa);
+	border: 2px solid #000;
+	border-radius: inherit;
+	box-sizing: border-box;
+	user-select: none;
+}
+[data-bs-theme="dark"] .pluginIconFallback {
+	border-color: #fff;
+}
+/* Small variant for popular strip cards */
+.pluginIconWrapSm {
+	width: 2rem;
+	height: 2rem;
+	border-radius: 0.4rem;
+}
+.pluginIconFallbackSm {
+	font-size: 0.65rem;
+}
+
+/* Manual URL badge */
+.pluginManualBadge {
+	font-size: 0.7rem;
+	background: var(--fpp-danger-light, #fde8e8);
+	color: var(--fpp-danger-dark, #d92d2d);
+	padding: 0.1rem 0.45rem;
+	border-radius: 0.25rem;
+	white-space: nowrap;
+}
+/* Ensure the icon + title row doesn't overflow on narrow cards */
+.min-w-0 {
+	min-width: 0;
+}
+
 /* Plugin marketplace cards */
 .pluginCardInner {
 	cursor: pointer;

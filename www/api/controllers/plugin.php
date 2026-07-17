@@ -608,6 +608,31 @@ function GetPluginInfo()
 }
 
 /**
+ * Serve plugin icon
+ *
+ * Serves the icon.png from a plugin's directory if it exists.
+ *
+ * @route GET /api/plugin/{RepoName}/icon
+ * @response 200 PNG image data
+ * @response 404 No icon available
+ */
+function PluginServeIcon()
+{
+	global $settings;
+	$plugin = params('RepoName');
+	$file = $settings['pluginDirectory'] . '/' . $plugin . '/icon.png';
+	if (file_exists($file)) {
+		header('Content-Type: image/png');
+		header('Cache-Control: public, max-age=86400');
+		ob_clean();
+		flush();
+		readfile($file);
+		exit;
+	}
+	http_response_code(404);
+}
+
+/**
  * Uninstall plugin
  *
  * Uninstall plugin {RepoName}.
