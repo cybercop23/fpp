@@ -162,10 +162,11 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 			StringsChanged();
 		}
 
-		// 4-channel (RGBW) color orders end with 'W', 3-channel do not
+		// 4-channel (RGBW) color orders contain a 'W', 3-channel do not.
+		// val() can be null if the select was set to a value not in its list.
 		function ColorOrderIsRGBW() {
-			var colorOrder = $('#colorOrder').val();
-			return colorOrder.length >= 4 && colorOrder.endsWith('W');
+			var colorOrder = $('#colorOrder').val() || 'RGB';
+			return colorOrder.length >= 4 && colorOrder.indexOf('W') != -1;
 		}
 
 		// The White channel slider only applies to 4-channel (RGBW) color orders.
@@ -193,16 +194,22 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 				$('#testModeStartChannel').val(parseInt(parts[0]));
 				$('#testModeEndChannel').val(parseInt(parts[1]));
 				$('.stringRow').hide();
+				// Whole-house ranges span mixed pixel types; reset to plain RGB so a
+				// previously selected RGBW model doesn't leak its 4-channel stride.
+				$('#colorOrder').val('RGB');
 				$('#channelIncrement').val(3);
+				UpdateWhiteSliderState();
 				SetButtonIncrements();
 			} else {
 				var id = parseInt(val);
 				$('#testModeStartChannel').val(modelInfos[id].StartChannel);
 				$('#testModeEndChannel').val(modelInfos[id].EndChannel);
 
-				// Set color order from model
-				if (modelInfos[id].ColorOrder) {
-					$('#colorOrder').val(modelInfos[id].ColorOrder);
+				// Set color order from model, falling back to a value the select
+				// actually offers (e.g. "WRGB" or single-channel "W" are not listed)
+				$('#colorOrder').val(modelInfos[id].ColorOrder);
+				if ($('#colorOrder').val() == null) {
+					$('#colorOrder').val(modelInfos[id].ChannelCountPerNode == 4 ? 'RGBW' : 'RGB');
 				}
 				UpdateWhiteSliderState();
 
@@ -450,6 +457,9 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 						data["args"].push("Custom Chase");
 						data["args"].push(channelSet);
 						data["args"].push($('#testModeRGBCustomPattern').val());
+						if (ColorOrderIsRGBW()) {
+							data["args"].push("4");
+						}
 					} else {
 						data["args"].push("RGB Chase");
 						data["args"].push(channelSet);
@@ -476,6 +486,9 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 						data["args"].push("Custom Cycle");
 						data["args"].push(channelSet);
 						data["args"].push($('#testModeRGBCycleCustomPattern').val());
+						if (ColorOrderIsRGBW()) {
+							data["args"].push("4");
+						}
 					} else {
 						data["args"].push("RGB Cycle");
 						data["args"].push(channelSet);
@@ -628,6 +641,9 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 			var colorB = dec2hex(parseInt($('#testModeColorBText').html()));
 
 			var newTriplet = colorR + colorG + colorB;
+			if (ColorOrderIsRGBW()) {
+				newTriplet += dec2hex(parseInt($('#testModeColorWText').html()) || 0);
+			}
 
 			var currentValue = $('#testModeRGBCustomPattern').val();
 			$('#testModeRGBCustomPattern').val(currentValue + newTriplet);
@@ -642,6 +658,9 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 			var hexColor = $('#customPatternColorPicker').val();
 			// Remove the # from hex color
 			var colorTriplet = hexColor.substring(1).toUpperCase();
+			if (ColorOrderIsRGBW()) {
+				colorTriplet += '00'; // color picker has no W; keep pixels 4-channel aligned
+			}
 
 			var currentValue = $('#testModeRGBCycleCustomPattern').val();
 			$('#testModeRGBCycleCustomPattern').val(currentValue + colorTriplet);
@@ -658,6 +677,9 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 			var hexColor = $('#customChasePatternColorPicker').val();
 			// Remove the # from hex color
 			var colorTriplet = hexColor.substring(1).toUpperCase();
+			if (ColorOrderIsRGBW()) {
+				colorTriplet += '00'; // color picker has no W; keep pixels 4-channel aligned
+			}
 
 			var currentValue = $('#testModeRGBCustomPattern').val();
 			$('#testModeRGBCustomPattern').val(currentValue + colorTriplet);
@@ -1437,7 +1459,9 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 											</label>
 										</div>
 										<div class="col-md-6">
-											<div><b>Update Interval:</b>&nbsp;<small class="text-muted"><span id='testModeCycleMSText'>1000</span><span> ms</span></small></div>
+											<div><b>Update Interval:</b>&nbsp;<small class="text-muted"><span
+														id='testModeCycleMSText'>1000</span><span> ms</span></small>
+											</div>
 											<div>
 												<input id="testModeCycleMS" type="range" min="100" max="5000"
 													value="1000" step="100" />
@@ -1448,15 +1472,18 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 
 								<div class="row">
 									<div class="col-md-3">
-										
+
 										<!-- Model Testing Section -->
 										<div class="backdrop-dark">
 											<h4 class="mb-3">Model Testing</h4>
 											<div class="form-group">
 												<label for="modelName"><b>Model Name:</b></label>
-												<select class='form-control' onChange='UpdateStartEndFromModel();' id='modelName'>
-													<option value='1,<?= $testEndChannel ?>'>-- All Local Channels --</option>
-													<option value='1,<?= FPPD_MAX_CHANNELS ?>'>-- All Channels --</option>
+												<select class='form-control' onChange='UpdateStartEndFromModel();'
+													id='modelName'>
+													<option value='1,<?= $testEndChannel ?>'>-- All Local Channels --
+													</option>
+													<option value='1,<?= FPPD_MAX_CHANNELS ?>'>-- All Channels --
+													</option>
 												</select>
 											</div>
 
@@ -1496,7 +1523,7 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 										<!-- Channel Testing Section -->
 										<div class="backdrop-dark mt-3">
 											<h4 class="mb-3">Channel Testing</h4>
-											
+
 											<div class="mb-2"><b>Channel Range</b><small
 													class="form-text text-muted">(1-<? echo FPPD_MAX_CHANNELS; ?>)
 												</small></div>
@@ -1522,7 +1549,8 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 
 											<div class="form-group mt-2">
 												<label for="colorOrder"><b>Color Order:</b></label>
-												<select id='colorOrder' class='form-control' onChange='UpdateIncrementFromColorOrder(); SetTestMode();'>
+												<select id='colorOrder' class='form-control'
+													onChange='UpdateIncrementFromColorOrder(); SetTestMode();'>
 													<option>RGB</option>
 													<option>RBG</option>
 													<option>GRB</option>
@@ -1620,265 +1648,347 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 											<div class="tab-pane fade show active" id="rgb-patterns" role="tabpanel"
 												aria-labelledby="rgb-patterns-tab">
 												<div class="callout callout-primary">
-													<p><b>Note:</b> When using Pixel Overlay Models, the RGB test patterns will honor the model's Color Order setting (RGB, RGBW, etc.). For manual channel ranges, you can select the Color Order from the dropdown above. Color Order determines how Red, Green, and Blue values map to channel data, including support for 4-channel RGBW pixels.</p>
+													<p><b>Note:</b> Selecting a Pixel Overlay Model fills in its channel
+														range and automatically selects RGB or RGBW to match the model's
+														pixels. Outputs configured in FPP apply the physical wire color
+														order themselves, so test patterns display true colors on those
+														pixels — use the R-G-B-W patterns for 4-channel RGBW pixels. For
+														manual channel ranges driving hardware that FPP does not reorder
+														colors for, the Color Order dropdown on the left remaps the
+														Solid Color fill and sets the 3- or 4-channel pixel size.</p>
 												</div>
 												<div class="row">
 													<div class="col-md-6">
 														<div class="backdrop">
 															<h3>Chase Patterns</h3>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBChase-RGB' id='RGBChase-RGB'
-															onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBChase-RGB'>Chase:
-															R-G-B</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBChase-RGBW' id='RGBChase-RGBW'
-															onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBChase-RGBW'>Chase:
-															R-G-B-W</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBChase-RGBA' id='RGBChase-RGBA'
-															onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBChase-RGBA'>Chase:
-															R-G-B-All</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBChase-RGBWA' id='RGBChase-RGBWA'
-															onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBChase-RGBWA'>Chase:
-															R-G-B-W-All</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBChase-RGBN' id='RGBChase-RGBN'
-															onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBChase-RGBN'>Chase:
-															R-G-B-None</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBChase-RGBWN' id='RGBChase-RGBWN'
-															onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBChase-RGBWN'>Chase:
-															R-G-B-W-None</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBChase-RGBAN'
-															id='RGBChase-RGBAN' onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBChase-RGBAN'>Chase:
-															R-G-B-All-None</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBChase-RGBWAN'
-															id='RGBChase-RGBWAN' onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBChase-RGBWAN'>Chase:
-															R-G-B-W-All-None</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBChase-RGBCustom'
-															id='RGBChase-RGBCustom' onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBChase-RGBCustom'>Chase:
-															Custom Pattern: </label></div>
-													<div class="form-group">
-														<div class="mb-2">
-															<label for="customChasePatternColorPicker" class="form-label"><b>Add Color to Pattern:</b></label>
-															<div class="input-group" style="max-width: 300px;">
-																<input type="color" class="form-control form-control-color" id="customChasePatternColorPicker" value="#ff0000" title="Choose color">
-																<button type="button" class="btn btn-outline-secondary btn-sm" onclick="AppendColorPickerToCustomChase();">Add Color</button>
-																<button type="button" class="btn btn-outline-danger btn-sm" onclick="ClearCustomChasePattern();">Clear</button>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBChase-RGB'
+																	id='RGBChase-RGB' onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBChase-RGB'>Chase:
+																	R-G-B</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBChase-RGBW'
+																	id='RGBChase-RGBW' onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBChase-RGBW'>Chase:
+																	R-G-B-W</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBChase-RGBA'
+																	id='RGBChase-RGBA' onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBChase-RGBA'>Chase:
+																	R-G-B-All</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBChase-RGBWA'
+																	id='RGBChase-RGBWA' onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBChase-RGBWA'>Chase:
+																	R-G-B-W-All</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBChase-RGBN'
+																	id='RGBChase-RGBN' onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBChase-RGBN'>Chase:
+																	R-G-B-None</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBChase-RGBWN'
+																	id='RGBChase-RGBWN' onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBChase-RGBWN'>Chase:
+																	R-G-B-W-None</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBChase-RGBAN'
+																	id='RGBChase-RGBAN' onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBChase-RGBAN'>Chase:
+																	R-G-B-All-None</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBChase-RGBWAN'
+																	id='RGBChase-RGBWAN'
+																	onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBChase-RGBWAN'>Chase:
+																	R-G-B-W-All-None</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBChase-RGBCustom'
+																	id='RGBChase-RGBCustom'
+																	onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBChase-RGBCustom'>Chase:
+																	Custom Pattern: </label></div>
+															<div class="form-group">
+																<div class="mb-2">
+																	<label for="customChasePatternColorPicker"
+																		class="form-label"><b>Add Color to
+																			Pattern:</b></label>
+																	<div class="input-group" style="max-width: 300px;">
+																		<input type="color"
+																			class="form-control form-control-color"
+																			id="customChasePatternColorPicker"
+																			value="#ff0000" title="Choose color">
+																		<button type="button"
+																			class="btn btn-outline-secondary btn-sm"
+																			onclick="AppendColorPickerToCustomChase();">Add
+																			Color</button>
+																		<button type="button"
+																			class="btn btn-outline-danger btn-sm"
+																			onclick="ClearCustomChasePattern();">Clear</button>
+																	</div>
+																</div>
+
+																<input id='testModeRGBCustomPattern' size='36'
+																	maxlength='72' type="text"
+																	value='FF000000FF000000FF' onChange='SetTestMode();'
+																	onkeypress='this.onchange();'
+																	onpaste='this.onchange();'
+																	oninput='this.onchange();'>
+																<small class="form-text text-muted">(6 hex digits per
+																	RGB
+																	pixel, 8 per RGBW pixel)</small>
+															</div>
+
+														</div>
+													</div>
+													<div class="col-md-6">
+														<div class="backdrop ">
+															<h3>Cycle Patterns</h3>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBCycle-RGB'
+																	id='RGBCycle-RGB' checked
+																	onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBCycle-RGB'>Cycle:
+																	R-G-B</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBCycle-RGBW'
+																	id='RGBCycle-RGBW' onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBCycle-RGBW'>Cycle:
+																	R-G-B-W</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBCycle-RGBA'
+																	id='RGBCycle-RGBA' onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBCycle-RGBA'>Cycle:
+																	R-G-B-All</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBCycle-RGBWA'
+																	id='RGBCycle-RGBWA' onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBCycle-RGBWA'>Cycle:
+																	R-G-B-W-All</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBCycle-RGBN'
+																	id='RGBCycle-RGBN' onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBCycle-RGBN'>Cycle:
+																	R-G-B-None</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBCycle-RGBWN'
+																	id='RGBCycle-RGBWN' onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBCycle-RGBWN'>Cycle:
+																	R-G-B-W-None</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBCycle-RGBAN'
+																	id='RGBCycle-RGBAN' onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBCycle-RGBAN'>Cycle:
+																	R-G-B-All-None</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBCycle-RGBWAN'
+																	id='RGBCycle-RGBWAN'
+																	onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBCycle-RGBWAN'>Cycle:
+																	R-G-B-W-All-None</label></div>
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input type='radio' class="custom-control-input"
+																	name='testModeMode' value='RGBCycle-RGBCustom'
+																	id='RGBCycle-RGBCustom'
+																	onChange='SetTestMode();'><label
+																	class="custom-control-label"
+																	for='RGBCycle-RGBCustom'>Cycle:
+																	Custom Pattern: </label> </div>
+
+															<div class="form-group">
+																<div class="mb-2">
+																	<label for="customPatternColorPicker"
+																		class="form-label"><b>Add Color to
+																			Pattern:</b></label>
+																	<div class="input-group" style="max-width: 300px;">
+																		<input type="color"
+																			class="form-control form-control-color"
+																			id="customPatternColorPicker"
+																			value="#ff0000" title="Choose color">
+																		<button type="button"
+																			class="btn btn-outline-secondary"
+																			onclick="AppendColorPickerToCustom();">Add
+																			Color</button>
+																		<button type="button"
+																			class="btn btn-outline-danger"
+																			onclick="ClearCustomPattern();">Clear</button>
+																	</div>
+																</div>
+
+																<input id='testModeRGBCycleCustomPattern' size='36'
+																	maxlength='72' type="text"
+																	value='FF000000FF000000FF' onChange='SetTestMode();'
+																	onkeypress='this.onchange();'
+																	onpaste='this.onchange();'
+																	oninput='this.onchange();'>
+																<small class="form-text text-muted">(6 hex digits per
+																	RGB
+																	pixel, 8 per RGBW pixel) </small>
 															</div>
 														</div>
-
-														<input id='testModeRGBCustomPattern' size='36' maxlength='72'
-															type="text" value='FF000000FF000000FF'
-															onChange='SetTestMode();' onkeypress='this.onchange();'
-															onpaste='this.onchange();' oninput='this.onchange();'>
-														<small class="form-text text-muted">(6 hex digits per RGB
-															triplet)</small>
-													</div>
-
-												</div>
-											</div>
-											<div class="col-md-6">
-												<div class="backdrop ">
-													<h3>Cycle Patterns</h3>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBCycle-RGB' id='RGBCycle-RGB'
-															checked onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBCycle-RGB'>Cycle:
-															R-G-B</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBCycle-RGBW' id='RGBCycle-RGBW'
-															onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBCycle-RGBW'>Cycle:
-															R-G-B-W</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBCycle-RGBA' id='RGBCycle-RGBA'
-															onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBCycle-RGBA'>Cycle:
-															R-G-B-All</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBCycle-RGBWA' id='RGBCycle-RGBWA'
-															onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBCycle-RGBWA'>Cycle:
-															R-G-B-W-All</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBCycle-RGBN' id='RGBCycle-RGBN'
-															onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBCycle-RGBN'>Cycle:
-															R-G-B-None</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBCycle-RGBWN' id='RGBCycle-RGBWN'
-															onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBCycle-RGBWN'>Cycle:
-															R-G-B-W-None</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBCycle-RGBAN'
-															id='RGBCycle-RGBAN' onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBCycle-RGBAN'>Cycle:
-															R-G-B-All-None</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-															type='radio' class="custom-control-input"
-															name='testModeMode' value='RGBCycle-RGBWAN'
-															id='RGBCycle-RGBWAN' onChange='SetTestMode();'><label
-															class="custom-control-label" for='RGBCycle-RGBWAN'>Cycle:
-															R-G-B-W-All-None</label></div>
-													<div class="testPatternOptionRow custom-control custom-radio"><input
-												type='radio' class="custom-control-input"
-												name='testModeMode' value='RGBCycle-RGBCustom'
-												id='RGBCycle-RGBCustom' onChange='SetTestMode();'><label
-												class="custom-control-label" for='RGBCycle-RGBCustom'>Cycle:
-												Custom Pattern: </label> </div>
-
-											<div class="form-group">
-												<div class="mb-2">
-													<label for="customPatternColorPicker" class="form-label"><b>Add Color to Pattern:</b></label>
-													<div class="input-group" style="max-width: 300px;">
-														<input type="color" class="form-control form-control-color" id="customPatternColorPicker" value="#ff0000" title="Choose color">
-														<button type="button" class="btn btn-outline-secondary" onclick="AppendColorPickerToCustom();">Add Color</button>
-														<button type="button" class="btn btn-outline-danger" onclick="ClearCustomPattern();">Clear</button>
 													</div>
 												</div>
-
-												<input id='testModeRGBCycleCustomPattern' size='36'
-													maxlength='72' type="text" value='FF000000FF000000FF'
-													onChange='SetTestMode();' onkeypress='this.onchange();'
-													onpaste='this.onchange();' oninput='this.onchange();'>
-												<small class="form-text text-muted">(6 hex digits per RGB
-													triplet) </small>
-											</div>												</div>
 											</div>
-										</div>
-									</div>
 
-									<!-- Solid Color Tab -->
-									<div class="tab-pane fade" id="solid-color" role="tabpanel"
-										aria-labelledby="solid-color-tab">
-										<div class="callout callout-primary">
-											<p><b>Note:</b> Select a specific color to fill all channels (respects Color Order setting above).</p>
-										</div>
-										<div class="backdrop mt-3">
-											<div class="row">
-												<div class="col-auto displayTestingFillOptionBoxHeader">
-													<div class="testPatternOptionRow custom-control custom-radio">
-														<input class="custom-control-input" type='radio'
-															name='testModeMode' value='RGBFill' id="RGBFill"
-															onChange='SetTestMode();'>
-														<label for="RGBFill" class="custom-control-label">
-															<h3>Fill Color:</h3>
-														</label>
-													</div>
-													<div class="color-box"></div>
+											<!-- Solid Color Tab -->
+											<div class="tab-pane fade" id="solid-color" role="tabpanel"
+												aria-labelledby="solid-color-tab">
+												<div class="callout callout-primary">
+													<p><b>Note:</b> Select a specific color to fill all channels
+														(respects Color Order setting above).</p>
 												</div>
-												<div class="col-auto ms-auto">
-													<input type=button class="buttons" onClick='AppendFillToCustom();'
-														value='Append Color To Custom Pattern'>
-
-												</div>
-											</div>
-											<div class="row">
-
-												<div class="col-sm-3 testModeColorRange"><span>R: </span><input
-														id="testModeColorR" type="range" min="0" max="255" value="255"
-														step="1" /> <span
-														id='testModeColorRText'>255</span><span></span></div>
-												<div class="col-sm-3 testModeColorRange"><span>G: </span><input
-														id="testModeColorG" type="range" min="0" max="255" value="0"
-														step="1" /> </span> <span
-														id='testModeColorGText'>0</span><span></span></div>
-												<div class="col-sm-3 testModeColorRange"><span>B: </span><input
-														id="testModeColorB" type="range" min="0" max="255" value="255"
-													step="1" /> <span
-													id='testModeColorBText'>255</span><span></span></div>
-											<div class="col-sm-3 testModeColorRange"><span>W: </span><input
-													id="testModeColorW" type="range" min="0" max="255" value="0"
-													step="1" /> <span
-													id='testModeColorWText'>0</span><span></span></div>
-
-										</div>
-									</div>
-								</div>
-
-								<!-- Single Channel Tab -->
-								<div class="tab-pane fade" id="single-channel" role="tabpanel"
-									aria-labelledby="single-channel-tab">
-									<div class="callout callout-primary">
-										<p><b>Note:</b> Test individual channels with chase or fill patterns.</p>
-									</div>
-									<div class="backdrop">
-											<span><b>&nbsp;Channel Data Value: </b></span>
-
-											<div><input id="testModeColorS" type="range" min="0" max="255" value="255"
-													step="1" /> </div>
-
-											<div><span id='testModeColorSText'>255</span></div>
-
-
-											<div class="row">
-												<div class="col-auto">
-													<div class="form-row">
-														<div class="testChannelOptionRow custom-control custom-radio">
-															<input class="custom-control-input" type='radio'
-																name='testModeMode' value='SingleChase' id='SingleChase'
-																onChange='SetTestMode();'>
-															<label for="SingleChase"
-																class="custom-control-label"><b>Chase</b></label>
+												<div class="backdrop mt-3">
+													<div class="row">
+														<div class="col-auto displayTestingFillOptionBoxHeader">
+															<div
+																class="testPatternOptionRow custom-control custom-radio">
+																<input class="custom-control-input" type='radio'
+																	name='testModeMode' value='RGBFill' id="RGBFill"
+																	onChange='SetTestMode();'>
+																<label for="RGBFill" class="custom-control-label">
+																	<h3>Fill Color:</h3>
+																</label>
+															</div>
+															<div class="color-box"></div>
 														</div>
-														<div class="form-col ms-2 pt-1">
+														<div class="col-auto ms-auto">
+															<input type=button class="buttons"
+																onClick='AppendFillToCustom();'
+																value='Append Color To Custom Pattern'>
 
-															Chase Size:
-															<select id='testModeChaseSize' onChange='SetTestMode();'>
-																<option value='2'>2</option>
-																<option value='3'>3</option>
-																<option value='4'>4</option>
-																<option value='5'>5</option>
-																<option value='6'>6</option>
-															</select>
 														</div>
 													</div>
+													<div class="row">
 
+														<div class="col-sm-3 testModeColorRange"><span>R: </span><input
+																id="testModeColorR" type="range" min="0" max="255"
+																value="255" step="1" /> <span
+																id='testModeColorRText'>255</span><span></span></div>
+														<div class="col-sm-3 testModeColorRange"><span>G: </span><input
+																id="testModeColorG" type="range" min="0" max="255"
+																value="0" step="1" /> </span> <span
+																id='testModeColorGText'>0</span><span></span></div>
+														<div class="col-sm-3 testModeColorRange"><span>B: </span><input
+																id="testModeColorB" type="range" min="0" max="255"
+																value="255" step="1" /> <span
+																id='testModeColorBText'>255</span><span></span></div>
+														<div class="col-sm-3 testModeColorRange"><span>W: </span><input
+																id="testModeColorW" type="range" min="0" max="255"
+																value="0" step="1" /> <span
+																id='testModeColorWText'>0</span><span></span></div>
 
-												</div>
-												<div class="col-auto">
-													<div class="testChannelOptionRow custom-control custom-radio">
-														<input class="custom-control-input" type='radio'
-															name='testModeMode' value='SingleFill' id='SingleFill'
-															onChange='SetTestMode();'>
-														<label for="SingleFill"
-															class="custom-control-label"><b>Fill</b></label>
 													</div>
 												</div>
 											</div>
-										</div>
-									</div>
+
+											<!-- Single Channel Tab -->
+											<div class="tab-pane fade" id="single-channel" role="tabpanel"
+												aria-labelledby="single-channel-tab">
+												<div class="callout callout-primary">
+													<p><b>Note:</b> Test individual channels with chase or fill
+														patterns.</p>
+												</div>
+												<div class="backdrop">
+													<span><b>&nbsp;Channel Data Value: </b></span>
+
+													<div><input id="testModeColorS" type="range" min="0" max="255"
+															value="255" step="1" /> </div>
+
+													<div><span id='testModeColorSText'>255</span></div>
+
+
+													<div class="row">
+														<div class="col-auto">
+															<div class="form-row">
+																<div
+																	class="testChannelOptionRow custom-control custom-radio">
+																	<input class="custom-control-input" type='radio'
+																		name='testModeMode' value='SingleChase'
+																		id='SingleChase' onChange='SetTestMode();'>
+																	<label for="SingleChase"
+																		class="custom-control-label"><b>Chase</b></label>
+																</div>
+																<div class="form-col ms-2 pt-1">
+
+																	Chase Size:
+																	<select id='testModeChaseSize'
+																		onChange='SetTestMode();'>
+																		<option value='2'>2</option>
+																		<option value='3'>3</option>
+																		<option value='4'>4</option>
+																		<option value='5'>5</option>
+																		<option value='6'>6</option>
+																	</select>
+																</div>
+															</div>
+
+
+														</div>
+														<div class="col-auto">
+															<div
+																class="testChannelOptionRow custom-control custom-radio">
+																<input class="custom-control-input" type='radio'
+																	name='testModeMode' value='SingleFill'
+																	id='SingleFill' onChange='SetTestMode();'>
+																<label for="SingleFill"
+																	class="custom-control-label"><b>Fill</b></label>
+															</div>
+														</div>
+													</div>
+												</div>
+											</div>
 
 
 
@@ -1962,7 +2072,8 @@ if (file_exists($mediaDirectory . "/fpp-info.json")) {
 												pixels, and other devices. Adjust each slider (0-255) to set the
 												value for that channel. Channel numbers shown are absolute FPP
 												channel numbers starting at the configured Start Channel. Fixtures
-												defined in <i>Input/Output Setup->Pixel Overlay Models</i> are highlighted with a
+												defined in <i>Input/Output Setup->Pixel Overlay Models</i> are
+												highlighted with a
 												coloured bar and show their name plus the channel position within
 												the fixture (e.g. <i>Ch&nbsp;3 / 16</i>) so you can identify which
 												function a given absolute channel maps to.

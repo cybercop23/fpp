@@ -640,8 +640,6 @@ void PixelString::AutoCreateOverlayModels(const std::vector<PixelString*>& strin
             uint32_t channelsPerNode = 0;
             std::string orientation = "H";
             std::string startLocation = "BL";
-            std::string colorOrder = "RGB"; // Default color order
-            bool colorOrderSet = false;
             uint32_t strings = vs.size();
             uint32_t strands = 1;
             uint32_t maxChan = 0;
@@ -652,15 +650,13 @@ void PixelString::AutoCreateOverlayModels(const std::vector<PixelString*>& strin
                     maxChan = a->startChannel + (a->pixelCount * a->channelsPerNode() / (a->groupCount ? a->groupCount : 1));
                     channelsPerNode = std::max(channelsPerNode, (uint32_t)a->channelsPerNode());
                     rn = std::max(rn, a->receiverNum);
-                    // Use the color order from the first valid virtual string
-                    if (!colorOrderSet) {
-                        colorOrder = ColorOrderToString(a->colorOrder);
-                        colorOrderSet = true;
-                    }
                 } else {
                     --strings;
                 }
             }
+            // Channel data is always in R,G,B[,W] order; the output driver remaps to the
+            // hardware wire order.  The model's ColorOrder describes the channel data.
+            std::string colorOrder = (channelsPerNode >= 4) ? "RGBW" : "RGB";
             int32_t channelCount = maxChan - startChannel;
 
             if (name.find("Tree") != std::string::npos || name.find("TREE") != std::string::npos || name.find("tree") != std::string::npos || name.find("Vert") != std::string::npos || name.find("vert") != std::string::npos) {

@@ -1251,10 +1251,19 @@ public:
             if (state != "Don't Set") {
                 m->setState(PixelOverlayState(state));
             }
-            unsigned int x = PixelOverlayManager::mapColor(color);
-            m->fillOverlayBuffer((x >> 16) & 0xFF,
-                                 (x >> 8) & 0xFF,
-                                 x & 0xFF);
+            if (color.size() == 9 && color[0] == '#') {
+                // #RRGGBBWW - explicit white channel for RGBW models
+                uint32_t x = (uint32_t)std::stoul(color.substr(1), nullptr, 16);
+                m->fillOverlayBuffer((x >> 24) & 0xFF,
+                                     (x >> 16) & 0xFF,
+                                     (x >> 8) & 0xFF,
+                                     x & 0xFF);
+            } else {
+                unsigned int x = PixelOverlayManager::mapColor(color);
+                m->fillOverlayBuffer((x >> 16) & 0xFF,
+                                     (x >> 8) & 0xFF,
+                                     x & 0xFF);
+            }
             m->flushOverlayBuffer();
         }
         return std::make_unique<Command::Result>("Models Filled");

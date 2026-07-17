@@ -83,6 +83,13 @@ int TestPatternRGBChase::SetupTest(void) {
     while (m_colorPattern.size() < stride || m_colorPattern.size() % stride)
         m_colorPattern.push_back(0);
 
+    // Need at least two pixels for a chase; bump before filling so the whole
+    // (possibly expanded) range gets initialized
+    if (m_channelCount < (2 * stride)) {
+        m_channelCount = 2 * stride;
+        bzero(m_testData, m_channelCount);
+    }
+
     char* c = m_testData;
     int offset = 0;
     for (int i = 0; i + stride <= m_channelCount; i += stride) {
@@ -92,9 +99,6 @@ int TestPatternRGBChase::SetupTest(void) {
         if (offset >= m_colorPattern.size())
             offset = 0;
     }
-
-    if (m_channelCount < (2 * stride))
-        m_channelCount = 2 * stride;
 
     m_patternOffset = 0;
     m_colorPatternSize = m_colorPattern.size() / stride;

@@ -987,6 +987,38 @@ if (($settings['Platform'] == "Linux") && (file_exists('/usr/include/X11/Xlib.h'
                     DisableButtonClass('btnDelete');
                 }
             });
+
+            // Keep Ch./Node consistent with the selected Color Order: RGBW orders are
+            // 4 channels per node, RGB orders 3.  Leave 1/2-channel models alone when
+            // a plain RGB order is selected since color order doesn't apply to them.
+            $('#channelMemMaps').on('change', 'select.colorOrder', function () {
+                var cpnInput = $(this).closest('tr').find('input.cpn');
+                if (cpnInput.length == 0) {
+                    return;
+                }
+                var isRGBW = $(this).val().indexOf('W') != -1;
+                if (isRGBW) {
+                    cpnInput.val(4);
+                } else if (parseInt(cpnInput.val()) == 4) {
+                    cpnInput.val(3);
+                }
+            });
+
+            // And the reverse: dropping Ch./Node below 4 on an RGBW model reverts the
+            // Color Order to a 3-channel one, raising it to 4 selects RGBW.
+            $('#channelMemMaps').on('change', 'input.cpn', function () {
+                var orderSelect = $(this).closest('tr').find('select.colorOrder');
+                if (orderSelect.length == 0) {
+                    return;
+                }
+                var order = orderSelect.val() || 'RGB';
+                var isRGBW = order.indexOf('W') != -1;
+                if (parseInt($(this).val()) == 4 && !isRGBW) {
+                    orderSelect.val(order + 'W');
+                } else if (parseInt($(this).val()) != 4 && isRGBW) {
+                    orderSelect.val(order.replace('W', ''));
+                }
+            });
         }
 
     </script>
