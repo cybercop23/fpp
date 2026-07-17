@@ -16,6 +16,7 @@
         var pluginInfos = [];
         var pluginInfoURLs = [];
         var pluginInfoUseCredentials = {};
+        var manuallyLoadedPlugins = {};
         // --- Plugin categories (Phase 1) ---
         var pluginCategoryList = [];      // [{name,longName,slug,icon}] from pluginCategories.json
         var pluginCategoryBySlug = {};
@@ -166,6 +167,25 @@
             } catch (e) {
                 return '';
             }
+        }
+
+        // Compute a 1-2 character initial from a plugin name.
+        // "FPP Brightness" -> "FB", "MatrixTools" -> "M", "a test plugin" -> "AT"
+        function GetInitials(name) {
+            if (!name) return '?';
+            var words = name.replace(/[^a-zA-Z0-9\s-]/g, '').split(/[\s-]+/).filter(function (w) { return w.length > 0; });
+            if (words.length === 0) return name.charAt(0).toUpperCase() || '?';
+            if (words.length === 1) return words[0].charAt(0).toUpperCase();
+            return (words[0].charAt(0) + words[1].charAt(0)).toUpperCase();
+        }
+
+        // Get the plugin icon URL. Always routes through the same-origin API to
+        // avoid CSP restrictions on external image hosts (raw.githubusercontent.com
+        // is only allow-listed in connect-src, not img-src).
+        function GetIconUrl(data, installed) {
+            if (installed) return 'api/plugin/' + data.repoName + '/icon';
+            if (data.iconURL) return 'api/plugin/fetchImage?url=' + encodeURIComponent(data.iconURL);
+            return null;
         }
 
         function BuildCategoryPills() {
@@ -1017,7 +1037,22 @@
             // Wraps (no truncation) so long category names show in full on the narrow card.
             $body.append('<div class="small text-secondary mb-1" title="' + (cat.obj.longName || cat.name) +
                 '"><i class="' + cat.obj.icon + '"></i> ' + cat.name + '</div>');
-            $body.append($('<div class="card-title fw-semibold small mb-1 pluginPopularTitle pluginTitle"></div>').text(data.name));
+            // Icon + title row
+            var $titleRow = $('<div class="d-flex align-items-center gap-2 mb-1"></div>');
+            var iconUrl = GetIconUrl(data, false);
+            var initials = GetInitials(data.name);
+            if (iconUrl) {
+                var $iconWrap = $('<div class="pluginIconWrap pluginIconWrapSm flex-shrink-0"></div>');
+                var $img = $('<img class="pluginIcon pluginIconSm" src="' + iconUrl + '" alt="" loading="lazy">');
+                var $fb = $('<div class="pluginIconFallback pluginIconFallbackSm" style="display:none;">' + initials + '</div>');
+                $img.on('error', function () { $img.hide(); $fb.show(); });
+                $iconWrap.append($img).append($fb);
+                $titleRow.append($iconWrap);
+            } else {
+                $titleRow.append($('<div class="pluginIconWrap pluginIconWrapSm flex-shrink-0"><div class="pluginIconFallback pluginIconFallbackSm">' + initials + '</div></div>'));
+            }
+            $titleRow.append($('<div class="card-title fw-semibold small mb-0 pluginPopularTitle pluginTitle min-w-0"></div>').text(data.name));
+            $body.append($titleRow);
             // Bottom line: install count over the past year. Shares PopularityBadgeHtml
             // with the grid cards so the two can't drift apart.
             var $act = $('<div class="mt-auto d-flex align-items-center gap-2"></div>');
@@ -1112,6 +1147,21 @@
             var installed = PluginIsInstalled(repo);
             var sel = SelectPluginVersionIndices(data);
             var compatibleVersion = sel.compatible, untestedVersion = sel.untested;
+
+            // Small icon to the left of the title
+            var iconUrl = GetIconUrl(data, installed);
+            var initials = GetInitials(data.name);
+            var titleIcon = '';
+            if (iconUrl) {
+                titleIcon += '<div class="pluginIconWrap" style="width:2rem;height:2rem;border-radius:0.4rem;display:inline-flex;vertical-align:middle;margin-right:0.5rem;">';
+                titleIcon += '<img class="pluginIcon" src="' + iconUrl + '" alt="" loading="lazy"';
+                titleIcon += ' onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\';">';
+                titleIcon += '<div class="pluginIconFallback" style="display:none;font-size:0.65rem;">' + initials + '</div>';
+                titleIcon += '</div>';
+            } else {
+                titleIcon += '<div class="pluginIconWrap" style="width:2rem;height:2rem;border-radius:0.4rem;display:inline-flex;vertical-align:middle;margin-right:0.5rem;"><div class="pluginIconFallback" style="font-size:0.65rem;">' + initials + '</div></div>';
+            }
+
             var body = '';
             body += '<div class="mb-2">' + PluginBadgesHtml(data, true) + '</div>';
             var authorHtml = PluginAuthorHtml(data);
@@ -1149,7 +1199,7 @@
             }
             buttons['Close'] = function () { CloseModalDialog('pluginDetailDialog'); };
 
-            DoModalDialog({ id: 'pluginDetailDialog', class: 'modal-lg', title: data.name, body: body, backdrop: true, keyboard: true, buttons: buttons });
+            DoModalDialog({ id: 'pluginDetailDialog', class: 'modal-lg', title: titleIcon + data.name, body: body, backdrop: true, keyboard: true, buttons: buttons });
         }
 
         // Category name/icon for a plugin, validated against the loaded taxonomy so
@@ -1248,12 +1298,36 @@
                 actions += "<button class='btn btn-sm " + btnClass + "' onclick='event.stopPropagation();ConfirmAndInstall(\"" + data.repoName + "\", \"" + data.versions[idx].branch + "\", \"" + data.versions[idx].sha + "\");'><i class='far fa-arrow-alt-circle-down'></i> " + installText + "</button>";
             }
 
+            // Plugin icon / initials avatar
+            var iconUrl = GetIconUrl(data, installed);
+            var initials = GetInitials(data.name);
+            var iconHtml = '';
+            if (iconUrl) {
+                iconHtml += '<div class="pluginIconWrap">';
+                iconHtml += '<img class="pluginIcon" src="' + iconUrl + '" alt="" loading="lazy"';
+                iconHtml += ' onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\';">';
+                iconHtml += '<div class="pluginIconFallback" style="display:none;">' + initials + '</div>';
+                iconHtml += '</div>';
+            } else {
+                iconHtml += '<div class="pluginIconWrap"><div class="pluginIconFallback">' + initials + '</div></div>';
+            }
+
             var html = '';
-            html += '<div id="row-' + data.repoName + '" class="col pluginCard" data-category-slug="' + pcatObj.slug + '" data-sort-rank="' + sortRank + '">';
+            html += '<div id="row-' + data.repoName + '" class="col pluginCard" data-category-slug="' + pcatObj.slug + '" data-sort-rank="' + sortRank + '"';
+            if (manuallyLoadedPlugins[data.repoName]) html += ' data-manual="1"';
+            html += '>';
             html += '<div class="card h-100 pluginCardInner" role="button" tabindex="0" onclick="ShowPluginDetail(\'' + data.repoName + '\');">';
             html += '<div class="card-body d-flex flex-column">';
+            html += '<div class="d-flex align-items-start gap-3 mb-1">';
+            html += iconHtml;
+            html += '<div class="min-w-0 flex-grow-1">';
             html += '<h5 class="card-title pluginTitle mb-1">' + data.name + '</h5>';
-            html += '<div class="pluginCardBadges mb-2">' + badges + '</div>';
+			html += '<div class="pluginCardBadges">' + badges;
+            if (manuallyLoadedPlugins[data.repoName]) {
+                html += '<span class="fpp-tag gap-1 pluginManualBadge"><i class="fas fa-link"></i> Manual URL</span>';
+            }
+            html += '</div>';
+            html += '</div></div>';
             var cardAuthorHtml = PluginAuthorHtml(data);
             if (cardAuthorHtml) html += '<div class="text-secondary small mb-1 pluginAuthor"><i class="fas fa-user"></i> ' + cardAuthorHtml + '</div>';
             html += '<p class="card-text pluginCardDesc small flex-grow-1">' + data.description + '</p>';
@@ -1352,6 +1426,7 @@
                 var onSuccess = function (data, viaProxy) {
                     $('html,body').css('cursor', 'auto');
                     pluginInfoURLs[data.repoName] = url;
+                    manuallyLoadedPlugins[data.repoName] = 1;
                     if (viaProxy) {
                         // Loaded via the credentialed proxy => treat as private
                         // for subsequent install/upgrade operations.

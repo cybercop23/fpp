@@ -608,6 +608,54 @@ function GetPluginInfo()
 }
 
 /**
+ * Serve plugin icon
+ *
+ * Serves the plugin icon. First checks for a local icon.png in the plugin
+ * directory. If not found, checks the plugin's pluginInfo.json for an
+ * iconURL field and proxies it (same-origin, avoids CSP restrictions on
+ * external image hosts).
+ *
+ * @route GET /api/plugin/{RepoName}/icon
+ * @response 200 PNG image data
+ * @response 404 No icon available
+ */
+function PluginServeIcon()
+{
+	global $settings;
+	$plugin = params('RepoName');
+	$pluginDir = $settings['pluginDirectory'] . '/' . $plugin;
+
+	// Check for local icon.png
+	$file = $pluginDir . '/icon.png';
+	if (file_exists($file)) {
+		header('Content-Type: image/png');
+		header('Cache-Control: public, max-age=86400');
+		ob_clean();
+		flush();
+		readfile($file);
+		exit;
+	}
+
+	// Check pluginInfo.json for iconURL and proxy it
+	$infoFile = $pluginDir . '/pluginInfo.json';
+	if (file_exists($infoFile)) {
+		$info = json_decode(file_get_contents($infoFile), true);
+		if (!empty($info['iconURL'])) {
+			$ctx = stream_context_create(['http' => ['timeout' => 10, 'follow_location' => 1, 'user_agent' => 'FPP']]);
+			$data = @file_get_contents($info['iconURL'], false, $ctx);
+			if ($data !== false) {
+				header('Content-Type: image/png');
+				header('Cache-Control: public, max-age=86400');
+				echo $data;
+				exit;
+			}
+		}
+	}
+
+	http_response_code(404);
+}
+
+/**
  * Uninstall plugin
  *
  * Uninstall plugin {RepoName}.
@@ -1032,6 +1080,52 @@ function GetPluginPopularity()
 		}
 	}
 	return json(array('period' => PLUGIN_POPULARITY_PERIOD, 'counts' => new stdClass(), 'source' => 'unavailable'));
+}
+
+/**
+ * Proxy-fetch a plugin icon image
+ *
+ * Fetches an image from an external URL and serves it with the correct
+ * content-type. Used to bypass CSP restrictions that block loading
+ * images from external hosts (e.g. raw.githubusercontent.com) directly
+ * in `<img>` tags.
+ *
+ * @route GET /api/plugin/fetchImage?url=...
+ * @response 200 Image data
+ * @response 400 Missing or invalid URL
+ */
+function PluginFetchImage()
+{
+	$url = isset($_GET['url']) ? $_GET['url'] : '';
+	if ($url === '' || !preg_match('#^https?://#i', $url)) {
+		http_response_code(400);
+		echo 'Missing or invalid url parameter';
+		exit;
+	}
+
+	$ctx = stream_context_create(['http' => ['timeout' => 10, 'follow_location' => 1, 'user_agent' => 'FPP']]);
+	$data = @file_get_contents($url, false, $ctx);
+	if ($data === false) {
+		http_response_code(404);
+		exit;
+	}
+
+	// Determine content type from the URL extension
+	$ext = strtolower(pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_EXTENSION));
+	switch ($ext) {
+		case 'png':  $ct = 'image/png'; break;
+		case 'jpg':
+		case 'jpeg': $ct = 'image/jpeg'; break;
+		case 'gif':  $ct = 'image/gif'; break;
+		case 'svg':  $ct = 'image/svg+xml'; break;
+		case 'webp': $ct = 'image/webp'; break;
+		default:     $ct = 'image/png';
+	}
+
+	header('Content-Type: ' . $ct);
+	header('Cache-Control: public, max-age=86400');
+	echo $data;
+	exit;
 }
 
 function FetchPluginInfoProxy()
