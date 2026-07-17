@@ -7512,7 +7512,10 @@ function ViewImage (file) {
 function ViewFile (dir, file) {
 	var url =
 		'api/file/' + dir + '/' + encodeURIComponent(file).replaceAll('%2F', '/');
-	ViewFileImpl(url, file);
+	// Logs read newest-last, so open at the end -- the top of a rotated log can
+	// be weeks old. Scripts and Config (the other tabs with a View button) are
+	// read from the top, so they keep the default.
+	ViewFileImpl(url, file, '', { scrollToBottom: dir == 'Logs' });
 }
 function TailFile (dir, file, lines) {
 	var url =
@@ -7523,7 +7526,10 @@ function TailFile (dir, file, lines) {
 		'?tail=' +
 		lines;
 	// console.log(url);
-	ViewFileImpl(url, file);
+	ViewFileImpl(url, file, '', {
+		title: 'Tail (last ' + lines + ' lines)',
+		scrollToBottom: true
+	});
 }
 
 var tailFollowEventSource = null;
@@ -7541,8 +7547,11 @@ function TailFollowFile (dir, file, lines = 50) {
 	var options = {
 		id: 'tailFollowDialog',
 		title: 'Tail Follow: ' + file,
-		body: "<pre id='tailFollowText' class='fileText' style='margin: 0; padding: 10px; background: #000; color: #0f0; max-height: 65vh; overflow-y: auto; overflow-anchor: none; font-family: monospace; white-space: pre-wrap; word-wrap: break-word;'></pre>",
-		class: 'modal-xl',
+		// No max-height/overflow here: the scrollable modal body is the single
+		// scroller. Giving the pre its own 65vh box made it a second one, and
+		// pushed the dialog past short viewports so the modal root scrolled too.
+		body: "<pre id='tailFollowText' class='fileText' style='margin: 0; padding: 10px; background: #000; color: #0f0; overflow-anchor: none; font-family: monospace; white-space: pre-wrap; word-wrap: break-word;'></pre>",
+		class: 'modal-xl modal-dialog-scrollable',
 		keyboard: false,
 		backdrop: 'static',
 		buttons: {
@@ -7635,9 +7644,11 @@ function startTailFollowStream (url) {
 				lineCount = TAIL_FOLLOW_MAX_LINES;
 			}
 
-			// Auto-scroll to bottom (deferred for cross-platform reliability)
+			// Auto-scroll to bottom (deferred for cross-platform reliability).
+			// The scrollable modal body is the scroller, not the pre.
 			requestAnimationFrame(function () {
-				outputArea.scrollTop = outputArea.scrollHeight;
+				var scroller = outputArea.closest('.modal-body') || outputArea;
+				scroller.scrollTop = scroller.scrollHeight;
 			});
 		}
 	};
@@ -7657,10 +7668,13 @@ function startTailFollowStream (url) {
 	};
 }
 
-function ViewFileImpl (url, file, html = '') {
+// opts.title overrides the dialog heading; opts.scrollToBottom starts the view
+// at the newest content, which is what a tail wants (its last line is the most
+// recent one) while a whole-file view still starts at the top.
+function ViewFileImpl (url, file, html = '', opts = {}) {
 	var options = {
 		id: 'fileViewerDialog',
-		title: 'File Viewer: ' + file,
+		title: (opts.title || 'File Viewer') + ': ' + file,
 		body: "<div id='fileViewerText' class='fileText'>Loading...</div>",
 		class: 'modal-dialog-scrollable',
 		keyboard: true,
@@ -7676,13 +7690,32 @@ function ViewFileImpl (url, file, html = '') {
 		}
 	};
 	DoModalDialog(options);
+	// The modal body is the scroller, not the pre inside it. Scrolling only
+	// sticks once the dialog is visible AND the text is laid out -- until then
+	// scrollHeight equals clientHeight and scrollTop silently clamps to 0. The
+	// fetch can finish either side of the show animation, so run it on both and
+	// let whichever lands last win.
+	var scrollToNewest = function () {
+		if (!opts.scrollToBottom) return;
+		var body = document.querySelector('#fileViewerDialog .modal-body');
+		if (body) body.scrollTop = body.scrollHeight;
+	};
+	if (opts.scrollToBottom) {
+		$('#fileViewerDialog').off('shown.bs.modal.viewer').on('shown.bs.modal.viewer', scrollToNewest);
+	}
 	if (html == '') {
 		$.get(url, function (text) {
 			var ext = file.split('.').pop();
-			if (ext != 'html')
+			if (ext != 'html') {
 				$('#fileViewerText').html(
 					'<pre>' + text.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>'
 				);
+				// Double rAF: the first yields to style, the second runs after
+				// layout, when scrollHeight reflects the inserted text.
+				requestAnimationFrame(function () {
+					requestAnimationFrame(scrollToNewest);
+				});
+			}
 		});
 	} else {
 		$('#fileViewerText').html(html);

@@ -2083,11 +2083,6 @@ table.fppStickyTheadTable thead.Zebra_Pin td {
 /* = File Manager = */
 /* ================== */
 
-.fileManagerDivData {
-	position: relative;
-	overflow-x: auto;
-}
-
 .fileDetails.selectedEntry td:first-child {
 	border-radius: 5px 0 0 5px;
 }
@@ -2124,6 +2119,7 @@ table.fppStickyTheadTable thead.Zebra_Pin td {
 }
 
 .fileManagerDivData {
+	position: relative;
 	background-color: #ececec;
 	border-radius: 8px;
 	padding: 0.65em;
@@ -2205,8 +2201,11 @@ table.fppStickyTheadTable thead.Zebra_Pin td {
 }
 
 .fileText pre {
-	height: calc(100vh - 182px);
 	margin-bottom: 0;
+	/* The scrollable modal body is the vertical scroller; a fixed height here
+	   would make the pre a second, nested one. Long log lines still scroll
+	   horizontally. */
+	overflow-y: visible;
 }
 
 #storageText {
@@ -3062,7 +3061,11 @@ table#fppSystemsTable > thead > tr:last-child > td {
 }
 
 .modal-dialog-scrollable .modal-dialog {
-	height: 100%;
+	/* Must subtract the dialog's own margins: 70px clears the fixed top nav
+	   (.modal-dialog in fpp-bootstrap-5-3.scss), the bottom one is Bootstrap's.
+	   A plain height:100% overflows the modal root by exactly those margins,
+	   which paints a second, vestigial scrollbar alongside the real one. */
+	height: calc(100% - 70px - var(--bs-modal-margin));
 }
 
 .modal-header .close {
