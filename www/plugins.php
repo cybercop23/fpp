@@ -1247,7 +1247,7 @@
             html += '<h5 class="card-title pluginTitle mb-1">' + data.name + '</h5>';
             html += '<div class="pluginCardBadges mb-2">' + badges + '</div>';
             var cardAuthorHtml = PluginAuthorHtml(data);
-            if (cardAuthorHtml) html += '<div class="text-secondary small mb-1"><i class="fas fa-user"></i> ' + cardAuthorHtml + '</div>';
+            if (cardAuthorHtml) html += '<div class="text-secondary small mb-1 pluginAuthor"><i class="fas fa-user"></i> ' + cardAuthorHtml + '</div>';
             html += '<p class="card-text pluginCardDesc small flex-grow-1">' + data.description + '</p>';
             html += '<div class="pluginCardActions mt-2" onclick="event.stopPropagation();">' + actions + '</div>';
             html += '</div></div></div>';
@@ -1424,8 +1424,12 @@
             $('#pluginGrid').children('.pluginCard').each(function () {
                 var slug = $(this).attr('data-category-slug') || 'other';
                 counts[slug] = (counts[slug] || 0) + 1; total++;
-                var title = $('.pluginTitle', this).text().toLowerCase();
-                var matchesSearch = isUrl || value === '' || title.indexOf(value) > -1;
+                var searchText = $('.pluginTitle', this).text().toLowerCase();
+                var authorTxt = $('.pluginAuthor', this).text().toLowerCase();
+                if (authorTxt) searchText += ' ' + authorTxt;
+                var descTxt = $('.pluginCardDesc', this).text().toLowerCase();
+                if (descTxt) searchText += ' ' + descTxt;
+                var matchesSearch = isUrl || value === '' || searchText.indexOf(value) > -1;
                 var matchesCat = searching || activeCategorySlug === 'all' || slug === activeCategorySlug;
                 var show = matchesSearch && matchesCat;
                 $(this).toggleClass('d-none', !show);
@@ -1435,8 +1439,12 @@
             // Installed cards: search filter; Updates tab shows only updatable ones.
             var installedVisible = 0, updateVisible = 0;
             $('#installedGrid').children('.pluginCard').each(function () {
-                var title = $('.pluginTitle', this).text().toLowerCase();
-                var matchesSearch = isUrl || value === '' || title.indexOf(value) > -1;
+                var searchText = $('.pluginTitle', this).text().toLowerCase();
+                var authorTxt = $('.pluginAuthor', this).text().toLowerCase();
+                if (authorTxt) searchText += ' ' + authorTxt;
+                var descTxt = $('.pluginCardDesc', this).text().toLowerCase();
+                if (descTxt) searchText += ' ' + descTxt;
+                var matchesSearch = isUrl || value === '' || searchText.indexOf(value) > -1;
                 var hasUpdate = $(this).hasClass('fppHasUpdate');
                 if (hasUpdate) updateVisible++;
                 var matchesTab = (activeTopTab !== 'updates') || hasUpdate;
