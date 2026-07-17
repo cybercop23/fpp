@@ -14,7 +14,9 @@ fi
 # Get the remote name, default to 'origin'
 REMOTE=${2:-origin}
 
-teeOutput
+# Unified upgrade logging -> logs/fpp_system_upgrades.log (switching branch is an
+# upgrade path; it ends in a rebuild and a nested upgrade_config).
+startUpgradeLog "fpp-branch-switch" "${REMOTE}/$1"
 
 # Same safe.directory hardening as git_pull -- /opt/fpp is owned by fpp:fpp,
 # so root running git via sudo (which keeps HOME=/home/fpp) trips the

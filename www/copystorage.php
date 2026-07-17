@@ -1,6 +1,7 @@
 <?php
 $skipJSsettings = 1;
 require_once "common.php";
+require_once "common/oplog.inc.php";
 // Ignore user aborts and allow the script to continue running
 session_write_close();
 ignore_user_abort(true);
@@ -53,6 +54,18 @@ file_put_contents($tee_log_file, $output_header_start);
 
 $command = "sudo stdbuf --output=L " . __DIR__ . "/../scripts/copy_settings_to_storage.sh " . escapeshellcmd($_GET['storageLocation']) . " " . $path . " " . escapeshellcmd($_GET['direction']) . " " . $remote_storage . " " . $compress . " " . $delete . " " . escapeshellcmd($_GET['flags']);
 
+// Breadcrumb the backup into the fppd.log timeline, like every other operation.
+//
+// fpp_backup_filecopy.log has to keep its name and location for the duration of
+// the run: it is not a log but a live progress FEED, polled once a second by
+// backup.php (api/file/Logs/...) -- the ONE file under logs/ with a live reader.
+// It only needs to exist FOR the run though, so the tail of this script writes
+// the content into fppd.log and removes it. backup.php already relies on the
+// file disappearing to detect completion (see CopyTimeoutError: "we rely on logs
+// api returning a file not found error to signify the copy process ending").
+$backupTarget = escapeshellcmd($_GET['direction']) . ' ' . escapeshellcmd($_GET['storageLocation']);
+FppdLogLine('copystorage.php', 'Backup', 'backup START: ' . $backupTarget . ' (detail: logs/fpp_backup_filecopy.log, live)');
+
 $output_command = "Command: " . htmlspecialchars($command) . "\n";
 echo $output_command;
 file_put_contents($tee_log_file, $output_command, FILE_APPEND);
@@ -61,14 +74,28 @@ $output_header_end = "----------------------------------------------------------
 echo $output_header_end;
 file_put_contents($tee_log_file, $output_header_end, FILE_APPEND);
 
-system($command . " 2>&1 | tee -a " . $tee_log_file);
+system($command . " 2>&1 | tee -a " . $tee_log_file, $backupRc);
 echo "\n";
 
 sleep(2);
 
-#finally rename the log file since we're done
-$new_filename = str_replace(".log", "_last.log", $tee_log_file);
-rename($tee_log_file, $new_filename);
+// The run's output goes into the fppd.log timeline, and the progress file is
+// then removed rather than kept as fpp_backup_filecopy_last.log.
+//
+// fpp_backup_filecopy.log is a live progress FEED, not a log: it is deleted at
+// the start of every run and polled once a second by backup.php while the copy
+// runs (api/file/Logs/...), which is why it has to keep its name and location.
+// But it only ever needed to exist FOR the run. Renaming it to _last.log left a
+// permanent file in logs/ holding exactly one backup -- the previous one was
+// overwritten every time -- so it was simultaneously clutter AND a bad archive.
+// fppd.log keeps every backup, is rotated, and is already in the Support Zip.
+// A run is ~70 lines of rsync summaries (not per-file listings), so this costs
+// the timeline very little.
+if (is_readable($tee_log_file)) {
+    FppdLogLine('copystorage.php', 'Backup', file_get_contents($tee_log_file));
+    unlink($tee_log_file);
+}
+FppdLogLine('copystorage.php', 'Backup', 'backup FINISH: ' . $backupTarget . ' (rc=' . $backupRc . ')');
 if (!$wrapped) {
     ?>
 

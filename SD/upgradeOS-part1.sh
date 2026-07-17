@@ -10,6 +10,63 @@ logStage() {
     echo "===== $1 ====="
 }
 
+# Unified upgrade logging -> logs/fpp_system_upgrades.log, a local equivalent of
+# startUpgradeLog/startOpLog in scripts/common (not sourced here, per above).
+#
+# This tee is the ONLY on-disk record of the copy itself, and it has to live in
+# THIS script specifically:
+#   - upgradeOS-part2.sh does the actual work but runs under `chroot /mnt`, where
+#     the media tree is not mounted (part1 bind-mounts only /, boot, dev, proc
+#     into /mnt) -- it cannot reach logs/ to write there itself. Its output flows
+#     up this script's stdout, so tee'ing here captures part2 as well.
+#   - part1 runs before the reboot on the still-intact system, and /home is never
+#     touched by part2's rsync (bin etc lib opt root sbin usr var only), so the
+#     log survives the image swap and lands in the next Support Zip.
+#
+# Best-effort: if logs/ is not writable the upgrade must still proceed, so fall
+# back to plain stdout rather than failing a flash over a log file.
+LOGFILE=/home/fpp/media/logs/fpp_system_upgrades.log
+FPPDLOG=/home/fpp/media/logs/fppd.log
+OPTARGET=$(/usr/bin/basename $1)
+LOGGING=false
+if [ -d /home/fpp/media/logs ] && [ -w /home/fpp/media/logs ]; then
+    LOGGING=true
+    exec > >(tee >(while IFS= read -r __line || [ -n "${__line}" ]; do printf '%(%Y-%m-%d %H:%M:%S)T [os-upgrade %s] %s\n' -1 "${OPTARGET}" "${__line}" >> "${LOGFILE}"; done))
+    exec 2>&1
+fi
+
+# fppdLogLine <facility> <message...>: append one breadcrumb to fppd.log in
+# fppd's own line shape. A local mirror of the helper in scripts/common, for the
+# same reason logStage is duplicated above -- this script cannot source common.
+# fppd.log is the timeline; an OS upgrade is the most disruptive thing that can
+# happen to a box, so "the OS was reflashed at 21:44, rc=0" belongs in the spine
+# even though the blow-by-blow lives in fpp_system_upgrades.log. Like the log above this
+# survives the image swap: part2's rsync never touches /home.
+# Best-effort by the same rule as LOGGING -- never fail a flash over a log line.
+fppdLogLine() {
+    local __fac="$1"
+    shift
+    local __now=${EPOCHREALTIME}
+    local __usec=${__now#*.}
+    printf '%(%Y-%m-%d %H:%M:%S)T.%s %s(%s) [%s] %s\n' "${__now%.*}" "${__usec:0:3}" \
+        "$(/usr/bin/basename $0)" "$$" "${__fac}" "$*" >> "${FPPDLOG}" 2>/dev/null
+}
+
+# The FINISH marker is appended straight to the log rather than echoed through
+# the tee: this script deliberately closes stdout/stderr before it exits (see the
+# end of the file), so by the time an EXIT trap runs there is no stdout left to
+# echo to and the marker -- including the rc of a failed flash, the single most
+# useful line in the file -- would be silently dropped. Writing direct also means
+# the early `exit 1` verification failures above are recorded identically.
+if [ "${LOGGING}" = "true" ]; then
+    OPDETAIL="detail: logs/fpp_system_upgrades.log"
+else
+    OPDETAIL="detail: console (logs/ not writable, not logged)"
+fi
+fppdLogLine "Upgrade" "os-upgrade START: ${OPTARGET} (${OPDETAIL})"
+echo "===== os-upgrade START: ${OPTARGET} ====="
+trap '__rc=$?; if [ "${LOGGING}" = "true" ]; then printf "%(%Y-%m-%d %H:%M:%S)T [os-upgrade %s] ===== os-upgrade FINISH: %s (rc=%s) =====\n" -1 "${OPTARGET}" "${OPTARGET}" "${__rc}" >> "${LOGFILE}" 2>/dev/null; fi; fppdLogLine "Upgrade" "os-upgrade FINISH: ${OPTARGET} (rc=${__rc}) (${OPDETAIL})"' EXIT
+
 logStage "Verifying image"
 
 FPPOS=`/usr/bin/basename $1`

@@ -57,7 +57,7 @@ runPluginInstallScript() {
 #   the plugin's declared dependencies first, then calls back here for this
 #   deferred phase. Going through this wrapper (rather than exec'ing the script
 #   straight from PHP) is what gets the phase logged: startPluginLog streams it
-#   to the caller unchanged AND appends a copy to ${LOGDIR}/plugin.log, tagged
+#   to the caller unchanged AND appends a copy to ${LOGDIR}/fpp_plugin_manager.log, tagged
 #   "install" like the clone phase above it. Otherwise the bulk of an install --
 #   a plugin script can build or fetch for minutes -- only ever reached the
 #   browser progress dialog and was lost when it closed.

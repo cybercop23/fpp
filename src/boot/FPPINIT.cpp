@@ -18,6 +18,7 @@
 #include <ctime>
 #include <dirent.h>
 #include <memory>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <systemd/sd-daemon.h>
 #include <thread>
@@ -25,13 +26,40 @@
 
 #include "FPPINIT.h"
 
-void teeOutput(const std::string& log) {
-    std::string cmd = "tee -a ";
-    cmd += log;
-    mkdir("/home/fpp/media/", 0775);
-    mkdir("/home/fpp/media/logs", 0775);
+// Redirect our stdout (and everything we fork, which is why this dup2's the fd
+// rather than just wrapping printf) into logs/fppd.log, prefixing every line
+// with fppd's own line shape: "<date time.ms> <program>(<pid>) [<facility>] ".
+//
+// fppd.log is the merged, sequential record of the system: boot -> init -> fppd
+// -> restarts -> operations, in one file, in time order. Init used to write its
+// own fpp_init.log / fpp_boot.log, which could not be interleaved with fppd's
+// log after the fact -- exactly the problem this arc exists to fix.
+//
+// The prefixing is done by bash rather than in C++ because the point of the
+// dup2 is to capture child output too: the filter has to live on the far side of
+// the pipe, where tee used to sit. printf '%(...)T' and EPOCHREALTIME are bash
+// builtins (hence /bin/bash explicitly -- popen uses /bin/sh, which is dash on
+// Debian and has neither), so this forks nothing per line. Appending per line
+// rather than holding the file open is what makes it survive a logrotate rename.
+//
+// `|| [ -n "$__l" ]` keeps a final line that has no trailing newline: read
+// returns false at EOF, and that unterminated line is what a process killed
+// mid-write leaves behind -- the output most worth having.
+void teeOutput(const std::string& log, const std::string& program, const std::string& facility, pid_t pid) {
+    mkdir(FPP_MEDIA_DIR.c_str(), 0775);
+    mkdir((FPP_MEDIA_DIR + "/logs").c_str(), 0775);
+
+    std::string cmd = "/bin/bash -c 'while IFS= read -r __l || [ -n \"$__l\" ]; do "
+                      "__now=${EPOCHREALTIME}; __us=${__now#*.}; "
+                      "printf \"%(%Y-%m-%d %H:%M:%S)T.%s " +
+                      program + "(" + std::to_string(pid) + ") [" + facility + "] %s\\n\" " +
+                      "\"${__now%.*}\" \"${__us:0:3}\" \"$__l\" >> " + log + "; done'";
 
     FILE* f = popen(cmd.c_str(), "w");
+    if (!f) {
+        printf("Couldn't start the log writer\n");
+        return;
+    }
     if (dup2(fileno(f), STDOUT_FILENO) < 0) {
         printf("Couldn't redirect output to log file\n");
     }
@@ -142,20 +170,56 @@ int main(int argc, char* argv[]) {
     if (argc > 1) {
         action = argv[1];
     }
-    FILE* f = fopen((FPP_MEDIA_DIR + "/logs/fpp_init.log").c_str(), "a+");
+    // Both actions now log to the shared fppd.log (was fpp_init.log /
+    // fpp_boot.log); the facility keeps them apart within the file. Same
+    // directory as before, so the retry below still covers the same failure --
+    // media/logs not yet mounted or writable on a first/degraded boot.
+    std::string logFile = FPP_MEDIA_DIR + "/logs/fppd.log";
+    FILE* f = fopen(logFile.c_str(), "a+");
     int sleepCount = 0;
     while (!f && sleepCount < 30) {
         printf("Could not open log\n");
         sleepCount++;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        f = fopen((FPP_MEDIA_DIR + "/logs/fpp_init.log").c_str(), "a+");
+        f = fopen(logFile.c_str(), "a+");
     }
     if (f) {
+        // This fopen is the first thing to touch fppd.log on a box where it does
+        // not exist -- fppinit bootPre is fppd.service's ExecStartPre, so it gets
+        // there before fppd itself -- and we run as root, so the file would be
+        // left root:root 0644 in an fpp-owned directory. fppd.log is no longer
+        // fppd's alone: the fppd_start/stop/restart scripts append to it, and so
+        // do the PHP breadcrumbs (backup, mp3gain) which run as Apache/fpp. Their
+        // writes are error-suppressed best-effort, so they would fail SILENTLY.
+        // Whoever creates the file owns making it writable by fpp; here, that is
+        // us. (log.cpp does the same for the case where fppd creates it first,
+        // and logrotate's `create 0664 fpp fpp` covers the rotation case.)
+        struct passwd* pw = getpwnam("fpp");
+        if (pw) {
+            if (fchown(fileno(f), pw->pw_uid, pw->pw_gid) == 0) {
+                fchmod(fileno(f), 0664);
+            }
+        }
         fclose(f);
+        // Every fppinit invocation that produces output goes to fppd.log. The
+        // facility names the phase (fppinit is the program field, so the phase is
+        // the only thing distinguishing one invocation from another); they are
+        // deliberately NOT fppd facilities from log.h -- fppinit is not fppd.
+        //
+        // bootPre/bootPost are fppd.service's ExecStartPre/ExecStartPost. They
+        // were the last FPP output still escaping to journald -- the boot banners,
+        // cape/eeprom detection and sysctl settings, which teeOutput's dup2 picks
+        // up because they come from processes fppinit forks. That output is real
+        // diagnostic content and journald here is RAM-only (/run/log/journal), so
+        // it died at reboot and never reached a Support Zip.
         if (action == "start") {
-            teeOutput(FPP_MEDIA_DIR + "/logs/fpp_init.log");
+            teeOutput(logFile, "fppinit", "Startup", getpid());
         } else if (action == "postNetwork") {
-            teeOutput(FPP_MEDIA_DIR + "/logs/fpp_boot.log");
+            teeOutput(logFile, "fppinit", "Boot", getpid());
+        } else if (action == "bootPre") {
+            teeOutput(logFile, "fppinit", "BootPre", getpid());
+        } else if (action == "bootPost") {
+            teeOutput(logFile, "fppinit", "BootPost", getpid());
         }
     } else {
         printf("Could not too output to log.  Directory might not be writable or maybe full.\n");

@@ -523,14 +523,15 @@ void usage(char* appname) {
            "fppd is the Falcon Player daemon.\n"
            "\n"
            "Options:\n"
-           "  -f, --foreground              - Don't daemonize the application.  In the\n"
-           "                                  foreground, all logging will be on the\n"
-           "                                  console instead of the log file\n"
+           "  -f, --foreground              - Don't daemonize the application.  Logging is\n"
+           "                                  unaffected: it still goes to the log file.\n"
+           "                                  Use \"-l stdout\" to log to the console.\n"
            "  -d, --daemonize               - Daemonize even if the config file says not to.\n"
            "  -v, --volume VOLUME           - Set a volume (over-written by config file)\n"
            "  -m, --mode MODE               - Set the mode: \"player\", \"bridge\",\n"
            "                                  \"master\", or \"remote\"\n"
-           "  -l, --log-file FILENAME       - Set the log file\n"
+           "  -l, --log-file FILENAME       - Set the log file.  Use \"stdout\" or \"stderr\"\n"
+           "                                  to log to the console instead of a file.\n"
            "  -H  --detect-hardware         - Detect Falcon hardware on SPI port\n"
            "  -C  --configure-hardware      - Configure detected Falcon hardware on SPI\n"
            "  -h, --help                    - This menu.\n"
@@ -635,6 +636,11 @@ int parseArguments(int argc, char** argv) {
         }
     }
 
+    // toStdOut is now only reachable when no real log file is set: once a line
+    // lands in the log file, log.cpp suppresses the stdout copy (see the comment
+    // there). Kept as-is because "-f" is how systemd runs fppd, so !daemonize is
+    // true in normal operation and this argument would otherwise duplicate every
+    // line into journald.
     SetLogFile(getSetting("logFile").c_str(), !getSettingInt("daemonize"));
 
     return 0;

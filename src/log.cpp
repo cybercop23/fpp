@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
+#include <pwd.h>
 #include <sys/types.h>
 #include <chrono>
 #include <mutex>
@@ -37,6 +38,19 @@ FPPLogger FPPLogger::INSTANCE = FPPLogger();
 
 char logFileName[1024] = "";
 bool logToStdOut = true;
+
+// Program name for the syslog-style program field. fppd.log is a merged,
+// sequential record -- fppd itself, the fppd_start/stop/restart scripts, and
+// operation breadcrumbs all append to it -- so every line has to say who wrote
+// it. The [facility] field cannot carry this: it is a subsystem *within* fppd
+// (General/ChannelOut/Playlist/...), not a program.
+static const char* logProgramName() {
+#ifdef PLATFORM_OSX
+    return getprogname();
+#else
+    return program_invocation_short_name;
+#endif
+}
 // char logLevelStr[16];
 // char logMaskStr[1024];
 
@@ -53,6 +67,28 @@ bool logToStdOut = true;
 // handler calls LogErr and may re-enter on the same thread; timed so that if
 // another thread is wedged inside a write (e.g. stalled storage) a crashing
 // thread gives up and falls back to stderr instead of hanging the process.
+// Owner the log file should end up with, resolved once. Looked up rather than
+// hardcoded to a uid, and returns false where there is no such user (macOS runs
+// as the developer's own account, not fpp) so the chown is simply skipped there.
+static bool logFileOwner(uid_t& uid, gid_t& gid) {
+    static bool resolved = false;
+    static bool haveOwner = false;
+    static uid_t cachedUid = 0;
+    static gid_t cachedGid = 0;
+    if (!resolved) {
+        resolved = true;
+        struct passwd* pw = getpwnam("fpp");
+        if (pw) {
+            cachedUid = pw->pw_uid;
+            cachedGid = pw->pw_gid;
+            haveOwner = true;
+        }
+    }
+    uid = cachedUid;
+    gid = cachedGid;
+    return haveOwner;
+}
+
 static std::recursive_timed_mutex logFileLock;
 static FILE* persistentLogFile = nullptr;
 static ino_t persistentLogIno = 0;
@@ -84,11 +120,34 @@ static FILE* getPersistentLogFile(time_t now) {
         }
     }
     if (!persistentLogFile) {
+        bool existed = (access(logFileName, F_OK) == 0);
         persistentLogFile = fopen(logFileName, "a");
         if (persistentLogFile) {
             // Line buffered: each log line still hits the kernel immediately
             // (matching the old open/write/close behavior) but as one write().
             setvbuf(persistentLogFile, nullptr, _IOLBF, 8192);
+            if (!existed) {
+                // We just created the log, and fppd runs as root (fppd.service
+                // sets no User=), so it would be root:root 0644 in an fpp-owned
+                // directory -- locking out every writer that is not root. That
+                // matters because fppd is no longer the only one: the
+                // fppd_start/stop/restart scripts append here, and so do the PHP
+                // breadcrumbs (backup, mp3gain) which run as Apache/fpp. Their
+                // writes are best-effort and error-suppressed, so they would fail
+                // SILENTLY.
+                //
+                // logrotate's `create 0664 fpp fpp` normally gets here first, but
+                // it cannot cover every case: resetConfig.php deletes logs/*, and
+                // a fresh install writes here before FPPINIT's setFileOwnership
+                // runs. Whoever creates the file has to set the ownership, so do
+                // it here too. Best-effort: as non-root the chown simply fails,
+                // which is the case where we are already the right owner.
+                uid_t uid;
+                gid_t gid;
+                if (logFileOwner(uid, gid) && fchown(fileno(persistentLogFile), uid, gid) == 0) {
+                    fchmod(fileno(persistentLogFile), 0664);
+                }
+            }
             struct stat st;
             if (fstat(fileno(persistentLogFile), &st) == 0) {
                 persistentLogIno = st.st_ino;
@@ -243,6 +302,38 @@ void _LogWrite(const char* file, int line, int level, FPPLoggerInstance& facilit
     _LogWrite(file, line, level, facility, str.c_str());
 }
 
+// Append msg to out, applying prefix to EVERY physical line.
+//
+// The prefix used to be snprintf'd together with the caller's format string and
+// handed to vfprintf, which applied it once per LogX() call rather than per
+// line: any message containing \n produced several physical lines with only the
+// first one identifying itself. That was survivable while fppd owned this file
+// outright, but fppd.log is now a merged, sequential record -- fppd, the
+// fppd_start/stop/restart scripts and the operation breadcrumbs all append to it
+// -- and an unlabelled line there is an unattributable line.
+//
+// A message that does not end in \n gets one; previously it left the line open
+// and the next log call concatenated onto it.
+static void formatLogLines(std::string& out, const char* prefix, const char* msg) {
+    if (!*msg) {
+        out.append(prefix);
+        out.append("\n");
+        return;
+    }
+    const char* p = msg;
+    while (*p) {
+        const char* nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        out.append(prefix);
+        out.append(p, len);
+        out.append("\n");
+        if (!nl) {
+            break;
+        }
+        p = nl + 1;
+    }
+}
+
 void _LogWrite(const char* file, int line, int level, FPPLoggerInstance& facility, const char* format, ...) {
     // Don't log if we're not concerned about anything at this level
     if (!(WillLog(level, facility)))
@@ -254,8 +345,6 @@ void _LogWrite(const char* file, int line, int level, FPPLoggerInstance& facilit
     gettimeofday(&tv, nullptr);
 
     struct tm tm;
-    char timeStr[512];
-
     localtime_r(&tv.tv_sec, &tm);
     int ms = tv.tv_usec / 1000;
 
@@ -265,55 +354,83 @@ void _LogWrite(const char* file, int line, int level, FPPLoggerInstance& facilit
 #else
     tid = gettid();
 #endif
-    int size = snprintf(timeStr, sizeof(timeStr),
-                        "%4d-%.2d-%.2d %.2d:%.2d:%.2d.%.3d (%llu) [%s] %s:%d: %s",
-                        1900 + tm.tm_year,
-                        tm.tm_mon + 1,
-                        tm.tm_mday,
-                        tm.tm_hour,
-                        tm.tm_min,
-                        tm.tm_sec,
-                        ms,
-                        tid, facility.name.c_str(), file, line, format);
 
+    char prefix[512];
+    snprintf(prefix, sizeof(prefix),
+             "%4d-%.2d-%.2d %.2d:%.2d:%.2d.%.3d %s(%llu) [%s] %s:%d: ",
+             1900 + tm.tm_year,
+             tm.tm_mon + 1,
+             tm.tm_mday,
+             tm.tm_hour,
+             tm.tm_min,
+             tm.tm_sec,
+             ms,
+             logProgramName(), tid, facility.name.c_str(), file, line);
+
+    // Render the caller's message first so it can be split on newlines. The
+    // stack buffer covers essentially every real log line; the heap path exists
+    // so a long one (a dumped config blob) is not silently truncated.
+    char stackBuf[1024];
+    va_start(arg, format);
+    int msgLen = vsnprintf(stackBuf, sizeof(stackBuf), format, arg);
+    va_end(arg);
+
+    const char* msg = stackBuf;
+    std::string heapBuf;
+    if (msgLen >= (int)sizeof(stackBuf)) {
+        heapBuf.resize(msgLen + 1);
+        va_start(arg, format);
+        vsnprintf(&heapBuf[0], msgLen + 1, format, arg);
+        va_end(arg);
+        msg = heapBuf.c_str();
+    }
+
+    std::string out;
+    out.reserve((msgLen > 0 ? (size_t)msgLen : 0) + 128);
+    formatLogLines(out, prefix, msg);
+
+    // One fwrite per log call: it keeps the whole (possibly multi-line) message
+    // contiguous, which matters now that shell writers append to this same file.
+    bool wroteLogFile = false;
     if (logFileName[0]) {
         if (!strcmp(logFileName, "stderr")) {
-            va_start(arg, format);
-            vfprintf(stderr, timeStr, arg);
-            va_end(arg);
+            fwrite(out.data(), 1, out.size(), stderr);
         } else if (!strcmp(logFileName, "stdout")) {
-            va_start(arg, format);
-            vfprintf(stdout, timeStr, arg);
-            va_end(arg);
+            fwrite(out.data(), 1, out.size(), stdout);
         } else {
             std::unique_lock<std::recursive_timed_mutex> lock(logFileLock, std::defer_lock);
             if (lock.try_lock_for(std::chrono::seconds(2))) {
                 FILE* logFile = getPersistentLogFile(tv.tv_sec);
                 if (logFile) {
-                    va_start(arg, format);
-                    vfprintf(logFile, timeStr, arg);
-                    va_end(arg);
+                    fwrite(out.data(), 1, out.size(), logFile);
+                    wroteLogFile = true;
                 } else {
                     fprintf(stderr, "Error: Unable to open log file for writing!\n");
-                    va_start(arg, format);
-                    vfprintf(stderr, timeStr, arg);
-                    va_end(arg);
+                    fwrite(out.data(), 1, out.size(), stderr);
                     return;
                 }
             } else {
                 // Could not get the log file lock (holder likely wedged on
                 // stalled storage); don't hang here - emit to stderr instead.
-                va_start(arg, format);
-                vfprintf(stderr, timeStr, arg);
-                va_end(arg);
+                fwrite(out.data(), 1, out.size(), stderr);
                 return;
             }
         }
     }
-    if (strcmp(logFileName, "stdout") && logToStdOut) {
-        va_start(arg, format);
-        vfprintf(stdout, timeStr, arg);
-        va_end(arg);
+    // Once the line is in a real log file, a second copy on stdout is a pure
+    // duplicate: fppd runs as `fppd -f` under systemd, so logToStdOut stays set
+    // and journald captured every line a second time -- doubling the volume for
+    // a copy that does not outlive the boot, while fppd.log is what the Support
+    // Zip ships and what users are asked for. Suppress it at the source, here.
+    //
+    // Do NOT instead mute the stream in fppd.service: fppd's stdout is inherited
+    // by every child it forks (cape detection, plugin callbacks), so muting it
+    // there discards their output too. That was tried, and reverted.
+    //
+    // `fppd -l stdout` still logs to stdout, and nothing suppresses stdout when
+    // no real log file is in use (early startup, before SetLogFile).
+    if (strcmp(logFileName, "stdout") && logToStdOut && !wroteLogFile) {
+        fwrite(out.data(), 1, out.size(), stdout);
     }
 }
 

@@ -9,4 +9,19 @@
 	delaycompress
 	notifempty
 	sharedscripts
+	# Recreate the log immediately, owned by fpp.
+	#
+	# Without this, logrotate renames and creates nothing, so the file is made by
+	# whichever process logs next -- and for fppd.log that is fppd itself, which
+	# runs as root (fppd.service sets no User=) and fopen()s the path within a
+	# second (src/log.cpp reopens on inode change). The log came back as
+	# root:root 0644, in an fpp-owned directory, and every PHP writer -- the
+	# backup and mp3gain breadcrumbs, which run as Apache/fpp -- was then denied.
+	# Those writes are @-suppressed best-effort, so it failed SILENTLY, and stayed
+	# broken until the next reboot (FPPINIT's setFileOwnership) or fppd stop
+	# (ensureLogFile in scripts/common).
+	#
+	# create also closes the race: the file exists with the right ownership before
+	# any writer can make it, rather than depending on who gets there first.
+	create 0664 fpp fpp
 }

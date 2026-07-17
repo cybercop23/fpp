@@ -4,9 +4,13 @@
 // when installing/removing a plugin's declared package dependencies.
 require_once __DIR__ . '/../../common/packages.inc.php';
 
+// Shared operation logging (OpLog), the PHP half of scripts/common's startOpLog.
+require_once __DIR__ . '/../../common/oplog.inc.php';
+
 /**
- * Appends lines to the shared logs/plugin.log in the same syslog-style format
- * scripts/common's startPluginLog() writes: "<date time> [<op> <plugin>] <line>".
+ * Appends lines to the shared logs/fpp_plugin_manager.log in the same
+ * syslog-style format scripts/common's startPluginLog() writes:
+ * "<date time> [<op> <plugin>] <line>".
  *
  * The wrapper scripts log what they *ran*; this logs what the Plugin Manager
  * *decided*. Without it the decisions that never reach a script leave no trace
@@ -15,38 +19,18 @@ require_once __DIR__ . '/../../common/packages.inc.php';
  * Worse, a dependency failure aborts *after* a successful clone and deletes the
  * partial install (CleanupPartialPluginInstall) -- leaving a clean
  * "install FINISH (rc=0)" block in the log for a plugin no longer on disk.
- *
- * Safe to interleave with the scripts' own tee: each call is a single
- * line-sized O_APPEND write (LOCK_EX), and Apache runs as the same user that
- * owns the log (fpp), so no privilege escalation is needed. Best-effort by
- * design -- logging must never break an install, so failures are swallowed.
  */
 function PluginLog($op, $plugin, $msg)
 {
-	global $logDirectory;
-
-	$dir = isset($logDirectory) && $logDirectory != '' ? $logDirectory : '/home/fpp/media/logs';
-	$stamp = date('Y-m-d H:i:s') . ' [' . $op . ' ' . $plugin . '] ';
-	$out = '';
-	// The echoed messages are wrapped in blank lines for readability in the
-	// progress dialog; those carry no meaning in a timestamped log, so skip them
-	// rather than emit bare-prefix lines.
-	foreach (explode("\n", trim($msg, "\n")) as $line) {
-		if (trim($line) !== '') {
-			$out .= $stamp . $line . "\n";
-		}
-	}
-	if ($out !== '') {
-		@file_put_contents($dir . '/plugin.log', $out, FILE_APPEND | LOCK_EX);
-	}
+	OpLog('fpp_plugin_manager.log', $op, $plugin, $msg);
 }
 
 /**
  * Echo a message to the caller (the streaming progress dialog) exactly as
- * before AND record it in plugin.log. Echo behaviour is deliberately unchanged
- * -- including the fact that in NON-streaming mode these echoes still land in
- * the HTTP body ahead of the JSON response. That is a real, pre-existing wart
- * (it makes those responses unparseable as strict JSON) but it is a separate
+ * before AND record it in fpp_plugin_manager.log. Echo behaviour is deliberately
+ * unchanged -- including the fact that in NON-streaming mode these echoes still
+ * land in the HTTP body ahead of the JSON response. That is a real, pre-existing
+ * wart (it makes those responses unparseable as strict JSON) but it is a separate
  * bug from logging; fixing it here would silently change the API's output.
  */
 function PluginEchoLog($op, $plugin, $msg)
@@ -323,7 +307,7 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 	// install_plugin now that they are. That wrapper owns the mode normalization,
 	// the scripts/ -> repo-root resolution and the FPPDIR/SRCDIR invocation, so
 	// this phase runs identically to a non-deferred install -- and, because it goes
-	// through startPluginLog, its output lands in logs/plugin.log instead of only
+	// through startPluginLog, its output lands in logs/fpp_plugin_manager.log instead of only
 	// streaming to the browser dialog (a plugin script can build/fetch for minutes).
 	$runCmd = $envPrefix . escapeshellarg($fppDir . '/scripts/install_plugin')
 		. ' --run-install-script ' . escapeshellarg($plugin);
@@ -734,7 +718,7 @@ function UpgradePlugin()
 	// post-pull script (fpp_upgrade.sh, else fpp_install.sh -- for plugins
 	// whose artifacts live outside git, e.g. prebuilt release binaries) all run
 	// in scripts/upgrade_plugin. Like install_plugin / uninstall_plugin, that
-	// wrapper logs (via startPluginLog) to the shared logs/plugin.log, so a
+	// wrapper logs (via startPluginLog) to the shared logs/fpp_plugin_manager.log, so a
 	// failed upgrade is diagnosable from the log viewer / Support Zip instead of
 	// the git-pull output vanishing. PLUGINDIR/SUDO are exported to match the values PHP
 	// uses (the same way UninstallPlugin invokes uninstall_plugin).

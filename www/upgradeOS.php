@@ -35,6 +35,13 @@ if (!$wrapped) {
 
 $skipJSsettings = 1;
 require_once "common.php";
+// Shared operation logging -> logs/fpp_system_upgrades.log. The OS upgrade ends in a
+// reboot that replaces the whole root filesystem, so the streamed dialog is
+// otherwise the ONLY record of it: close the window (or lose the tab to the
+// reboot) and a failed flash leaves nothing behind to diagnose. logs/ lives on
+// the media tree, which upgradeOS-part2.sh's rsync never touches (it copies only
+// bin etc lib opt root sbin usr var), so this log survives the image swap.
+require_once "common/oplog.inc.php";
 
 DisableOutputBuffering();
 
@@ -46,7 +53,9 @@ DisableOutputBuffering();
 // machine-parsed progress marker (see ParseLastStageMarker() in www/js/fpp.js).
 function logStage($msg)
 {
+    global $baseFile;
     echo "===== $msg =====\n";
+    UpgradeLog('os-upgrade', $baseFile, "===== $msg =====");
 }
 
 function downloadImage($localFile): bool
@@ -123,27 +132,33 @@ if (preg_match('/^https?:/', $_GET['os'])) {
     foreach ($urls as $idx => $url) {
         if (count($urls) > 1) {
             if ($idx == 0) {
-                echo "Downloading from local FPP mirror ${upgradeSource}...\n";
+                UpgradeEchoLog('os-upgrade', $baseFile, "Downloading from local FPP mirror ${upgradeSource}...\n");
             } else {
-                echo "Mirror download failed, falling back to GitHub...\n";
+                UpgradeEchoLog('os-upgrade', $baseFile, "Mirror download failed, falling back to GitHub...\n");
             }
         }
         $command = "sudo wget -c --quiet --show-progress --progress=bar:force:noscroll " . $url . " -O /home/fpp/media/upload/$baseFile 2>&1";
         $retryCount = 0;
         while ($retryCount < 20 && $rc != 0) {
             echo "Running command: $command\n";
+            // The URL (not the \r-heavy progress bar that passthru streams to the
+            // browser) is what matters on disk: which mirror was used, and how many
+            // attempts it took. A 20-deep retry loop silently burning through
+            // attempts was previously indistinguishable from a first-try success.
+            UpgradeLog('os-upgrade', $baseFile, "Downloading " . $url . " (attempt " . ($retryCount + 1) . " of 20)");
             passthru($command, $rc);
             $retryCount++;
         }
+        UpgradeLog('os-upgrade', $baseFile, "wget rc=" . $rc . " after " . $retryCount . " attempt(s) from " . $url);
         if ($rc == 0) {
             break;
         }
     }
     if ($rc != 0) {
-        echo ("Download aborted!\n");
+        UpgradeEchoLog('os-upgrade', $baseFile, "Download aborted!\n");
         $applyUpdate = false;
     } else {
-        echo ("Download complete...\n");
+        UpgradeEchoLog('os-upgrade', $baseFile, "Download complete...\n");
     }
 
     /*
@@ -163,11 +178,13 @@ if (preg_match('/^https?:/', $_GET['os'])) {
 $full_fppos_path = "/home/fpp/media/upload/$baseFile";
 
 if (!file_exists($full_fppos_path)) {
-    echo ("File does not exist, aborting: $full_fppos_path\n");
+    UpgradeEchoLog('os-upgrade', $baseFile, "File does not exist, aborting: $full_fppos_path\n");
     $applyUpdate = false;
 } else if (filesize($full_fppos_path) == 0) {
-    echo ("File is empty, aborting: $full_fppos_path\n");
+    UpgradeEchoLog('os-upgrade', $baseFile, "File is empty, aborting: $full_fppos_path\n");
     $applyUpdate = false;
+} else {
+    UpgradeLog('os-upgrade', $baseFile, "Image ready: $full_fppos_path (" . filesize($full_fppos_path) . " bytes)");
 }
 
 if ($applyUpdate) {
@@ -191,12 +208,23 @@ if ($applyUpdate) {
     chmod($TMP_FILE, 0775);
     #system($SUDO . " stdbuf --output=L --error=L $TMP_FILE /home/fpp/media/upload/$baseFile");
     $return_code = 0;
+    // keepOptFPP decides whether the running /opt/fpp survives the image copy --
+    // the difference between "upgraded the OS" and "upgraded the OS and replaced
+    // FPP", which is the first thing worth knowing when a box comes back wrong.
+    UpgradeLog('os-upgrade', $baseFile, "Running upgradeOS-part1.sh (keepOptFPP=" . ($keepOptFPP ? "1" : "0") . ")");
+    // part1 installs its own tee onto fpp_system_upgrades.log and captures part2's
+    // chroot'd output too, so its lines are logged by the script side.
     system($SUDO . " $TMP_FILE /home/fpp/media/upload/$baseFile", $return_code);
+    UpgradeLog('os-upgrade', $baseFile, "upgradeOS-part1.sh rc=" . $return_code);
 } else {
-    echo ("Skipping update\n");
+    UpgradeEchoLog('os-upgrade', $baseFile, "Skipping update\n");
 }
 
 if (!$wrapped) {
+    // Non-streaming mode has no status line to drive, so log the outcome without
+    // echoing a stage marker into the HTML. Logged rather than inferred from the
+    // banner below, which announces "Rebooting" unconditionally.
+    UpgradeLog('os-upgrade', $baseFile, ($applyUpdate && ($return_code == 0)) ? "===== Rebooting =====" : "===== Upgrade Failed =====");
     ?></pre>
         ==========================================================================
         <b>Rebooting.....Close this window and refresh the screen. It might take a minute or so for FPP to reboot</b>
@@ -223,6 +251,23 @@ session_write_close();
 
 if ($applyUpdate && ($return_code == 0)) {
     sleep(3);
+
+    # Flush the log (and anything else still dirty) before the sysrq reboot
+    # below: "echo b" is an IMMEDIATE reset that does not sync, so without this
+    # the tail of fpp_system_upgrades.log -- exactly the part describing the reboot we
+    # are about to do -- can be lost from the page cache. part1 syncs before it
+    # returns, but the PHP-side lines are written after that.
+    #
+    # sysrq "s" (kernel-level sync), NOT system("sync"): part2 has just rsynced a
+    # new root filesystem over the running one, so /bin/sync and the libraries it
+    # needs may no longer be loadable. That is the whole reason 593cda7dd replaced
+    # `shutdown -r now` with the sysrq write below, and pre-chmods the trigger at
+    # the top of this block "whilst libraries are all good". "echo" is a shell
+    # builtin, so this needs no binary the reboot below does not already need, and
+    # it goes through the same trigger: sync is sysrq bit 16 and reboot is bit 128,
+    # both set in Debian's default kernel.sysrq of 438 -- if one is unavailable the
+    # reboot itself would not work either. Do NOT "simplify" this back to sync(1).
+    system("echo s > /proc/sysrq-trigger");
 
     # Force reboot the system, try a variety of methods
     # to see if one will properly trigger

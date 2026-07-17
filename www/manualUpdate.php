@@ -11,16 +11,33 @@ if (!$wrapped)
 
 $skipJSsettings = 1;
 require_once("common.php");
+// Shared operation logging -> logs/fpp_system_upgrades.log, the same file the scripts
+// this page drives (git_pull, and upgrade_config beneath it) append to.
+require_once("common/oplog.inc.php");
 
 DisableOutputBuffering();
+
+// Label this page's log lines with the branch, matching how scripts/git_pull
+// tags the run it is about to start, so the PHP-side phases and the script-side
+// output read as one "[fpp-update <branch>]" run. Best-effort: an unreadable or
+// detached checkout logs as "unknown" rather than holding up the update.
+$upgradeTarget = trim(@exec("git --git-dir=" . escapeshellarg($fppDir . "/.git") . " rev-parse --abbrev-ref HEAD 2>/dev/null"));
+if ($upgradeTarget === '') {
+  $upgradeTarget = 'unknown';
+}
 
 // Emit a "===== <message> =====" stage header, matching the shell helper
 // logStage() in scripts/common, so the streaming FPP Upgrade dialog can drive
 // its status line from PHP-side phases too (git_pull emits its own). Reads as a
 // section header in the log and doubles as the machine-parsed progress marker.
+// Also recorded in fpp_system_upgrades.log: these phases run entirely in PHP, after
+// git_pull has exited and its tee is gone, so without this the tail of an
+// upgrade -- including whether it actually succeeded -- left no trace on disk.
 function logStage($msg)
 {
+  global $upgradeTarget;
   echo "===== $msg =====\n";
+  UpgradeLog('fpp-update', $upgradeTarget, "===== $msg =====");
 }
 
 if (!$wrapped) {
@@ -40,6 +57,8 @@ if (!$wrapped) {
 ?>
 Pulling in updates...
 <?
+// git_pull installs its own tee onto fpp_system_upgrades.log, so its output is logged
+// by the script side; only the elapsed time and exit status are added here.
 $startTime = microtime(true);
 system("$fppDir/scripts/git_pull", $return_val);
 $endTime = microtime(true);
@@ -49,7 +68,9 @@ $h = floor($diffTime / 3600);
 $m = floor($diffTime % 3600 / 60);
 $s = floor($diffTime % 60);
 
-printf("----------------------\nElapsed Time: %02d:%02d:%02d\n", $h, $m, $s);
+$elapsed = sprintf("Elapsed Time: %02d:%02d:%02d", $h, $m, $s);
+printf("----------------------\n%s\n", $elapsed);
+UpgradeLog('fpp-update', $upgradeTarget, $elapsed . " (git_pull rc=" . $return_val . ")");
 ?>
 <?
 
@@ -69,11 +90,11 @@ if ($return_val === 0) {
   }
 
   if ($needCopy) {
-    echo "Updating Apache config...\n";
+    UpgradeEchoLog('fpp-update', $upgradeTarget, "Updating Apache config...\n");
     // Use sudo if needed for permissions
     system("$SUDO cp $srcConf $dstConf");
   } else {
-    echo "Apache config is already up to date.\n";
+    UpgradeEchoLog('fpp-update', $upgradeTarget, "Apache config is already up to date.\n");
   }
 
   touch("$mediaDirectory/tmp/fppd_restarted");
@@ -90,6 +111,10 @@ if ($return_val === 0) {
   if (file_exists($fppDir . "/src/fppd")) {
     logStage("Upgrade Complete");
   } else {
+    // git_pull returned 0 but the build produced no fppd binary. Record the
+    // reason: the banner below only shouts "FAILED" at the browser, and this is
+    // the one line that says why when it turns up in a Support Zip later.
+    UpgradeLog('fpp-update', $upgradeTarget, "ERROR: git_pull succeeded but " . $fppDir . "/src/fppd is missing -- build failed.");
     logStage("Upgrade Failed");
     print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
     print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
@@ -100,6 +125,7 @@ if ($return_val === 0) {
     print ("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
   }
 } else {
+  UpgradeLog('fpp-update', $upgradeTarget, "ERROR: git_pull exited rc=" . $return_val . "; not restarting FPP.");
   logStage("Upgrade Failed");
   print ("Upgrade FAILED. See above for details.\n");
 }
