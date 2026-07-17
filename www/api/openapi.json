@@ -6527,6 +6527,58 @@
         }
       }
     },
+    "/api/plugin/fetchImage": {
+      "get": {
+        "tags": [
+          "plugin"
+        ],
+        "summary": "Proxy-fetch plugin icon image",
+        "description": "Fetches a plugin icon image from an external URL and serves it with the correct content-type. Used to bypass CSP restrictions that block loading images from external hosts directly in `<img>` tags.",
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "URL of the icon image to proxy"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Image data",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/gif": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid url parameter"
+          },
+          "404": {
+            "description": "Failed to fetch image from URL"
+          }
+        }
+      }
+    },
     "/api/plugin/{RepoName}": {
       "parameters": [
         {
@@ -6592,6 +6644,41 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/plugin/{RepoName}/icon": {
+      "get": {
+        "tags": [
+          "plugin"
+        ],
+        "summary": "Serve plugin icon",
+        "description": "Serves the plugin icon. First checks for a local `icon.png` in the plugin directory. If not found, checks `pluginInfo.json` for an `iconURL` field and proxies it server-side. Always returns same-origin to avoid CSP restrictions on external image hosts.",
+        "parameters": [
+          {
+            "name": "RepoName",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PNG image data",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No icon available"
           }
         }
       }
