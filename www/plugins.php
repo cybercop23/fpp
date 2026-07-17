@@ -93,6 +93,9 @@
                 dataType: 'json',
                 success: function (data) {
                     LoadPlugins(data.pluginList);
+                    // Both of these need installedPlugins and pluginInfos loaded, so
+                    // they run here rather than in document.ready.
+                    RestoreTopTab();
                     // Deep-link from the post-FPPOS-upgrade warning's Fix button
                     // (plugins.php?action=reinstallAll): now that installedPlugins
                     // and pluginInfos are loaded, pop the Reinstall All confirm.
@@ -511,6 +514,10 @@
         }
 
         function ShowUninstallPluginPopup(plugin, pluginName) {
+            if (!pluginName) {
+                var pi = FindPluginInfo(plugin);
+                pluginName = (pi >= 0 && pluginInfos[pi].name) ? pluginInfos[pi].name : plugin;
+            }
             DoModalDialog({
                 id: "uninstallPluginDialog",
                 class: "modal-lg",
@@ -1229,6 +1236,7 @@
                     actions += "<button class='btn btn-sm btn-success' onclick='event.stopPropagation();UpgradePlugin(\"" + data.repoName + "\");'><i class='far fa-arrow-alt-circle-down'></i> Update</button>";
                     actions += "</span>";
                 }
+                actions += "<button class='btn btn-sm btn-outline-danger' onclick='event.stopPropagation();ShowUninstallPluginPopup(\"" + data.repoName + "\");'><i class='far fa-trash-alt'></i> Uninstall</button>";
             } else if (compatibleVersion >= 0 || untestedVersion >= 0) {
                 var idx = compatibleVersion < 0 ? untestedVersion : compatibleVersion;
                 var installText = 'Install';
@@ -1249,7 +1257,7 @@
             var cardAuthorHtml = PluginAuthorHtml(data);
             if (cardAuthorHtml) html += '<div class="text-secondary small mb-1 pluginAuthor"><i class="fas fa-user"></i> ' + cardAuthorHtml + '</div>';
             html += '<p class="card-text pluginCardDesc small flex-grow-1">' + data.description + '</p>';
-            html += '<div class="pluginCardActions mt-2" onclick="event.stopPropagation();">' + actions + '</div>';
+            html += '<div class="pluginCardActions d-flex flex-wrap gap-2 mt-2" onclick="event.stopPropagation();">' + actions + '</div>';
             html += '</div></div></div>';
 
             if (installed) {
@@ -1392,8 +1400,12 @@
                 alert('Invalid pluginInfo.json URL');
             }
         }
+        // Remembered across page loads: the progress dialogs (install/upgrade/
+        // uninstall) reload the page when closed, and landing back on Available
+        // after upgrading from the Updates tab loses the user's place.
         function ShowTopTab(name) {
             activeTopTab = name;
+            try { sessionStorage.setItem('pluginsTopTab', name); } catch (e) { }
             $('#pluginTopTabs .nav-link').removeClass('active');
             $('#pluginTopTabs .nav-link[data-top-tab="' + name + '"]').addClass('active');
             $('#pane-available').toggleClass('d-none', name !== 'available');
@@ -1404,6 +1416,15 @@
                 CheckAllPluginsForUpdates();
             }
             FilterPlugins();
+        }
+
+        // Re-select the tab the user was on before the last load. Called once the
+        // plugin data is in so the Updates tab can run its update check.
+        function RestoreTopTab() {
+            var saved = '';
+            try { saved = sessionStorage.getItem('pluginsTopTab') || ''; } catch (e) { }
+            if (saved === 'installed' || saved === 'updates')
+                ShowTopTab(saved);
         }
 
         function FilterPlugins() {
