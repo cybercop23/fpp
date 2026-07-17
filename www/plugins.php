@@ -179,17 +179,12 @@
             return (words[0].charAt(0) + words[1].charAt(0)).toUpperCase();
         }
 
-        // Derive the plugin icon URL. For installed plugins, uses the local API
-        // endpoint. For uninstalled plugins, derives from the pluginInfo.json URL.
+        // Get the plugin icon URL. Always routes through the same-origin API to
+        // avoid CSP restrictions on external image hosts (raw.githubusercontent.com
+        // is only allow-listed in connect-src, not img-src).
         function GetIconUrl(data, installed) {
-            var repo = data.repoName;
-            if (installed) return 'api/plugin/' + repo + '/icon';
-            var infoUrl = pluginInfoURLs[repo];
-            if (infoUrl) {
-                // Replace pluginInfo.json with icon.png in the URL
-                var idx = infoUrl.lastIndexOf('/');
-                if (idx >= 0) return infoUrl.substring(0, idx + 1) + 'icon.png';
-            }
+            if (installed) return 'api/plugin/' + data.repoName + '/icon';
+            if (data.iconURL) return 'api/plugin/fetchImage?url=' + encodeURIComponent(data.iconURL);
             return null;
         }
 
