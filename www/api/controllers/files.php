@@ -783,10 +783,24 @@ function GetZipDir()
 
     $zip->close();
 
-    $timestamp = gmdate('Ymd.Hi');
+    // "<HostName>_<what>_<date>_<time>.zip" -- the host name identifies the box a
+    // support bundle came from, and leads like backup.php's filenames do. It
+    // replaces the old "FPP_" prefix rather than joining it, since host names
+    // usually start with FPP already. The date/time separator is '_' so the
+    // extension is the only '.' in the name.
+    //
+    // HostName is user-settable and is NOT sanitized on the way in: PutSetting()
+    // writes the raw request body to the settings file and only cleans the copy
+    // it passes to the hostname command. Reduce it here to the charset FPP's own
+    // hostname rules allow before it reaches a response header.
+    $hostName = preg_replace('/[^-a-zA-Z0-9]/', '', GetSettingValue('HostName', ''));
+    if ($hostName == '') {
+        $hostName = 'FPP';
+    }
+    $timestamp = date('Ymd_Hi');
 
     header('Content-type: application/zip');
-    header('Content-disposition: attachment;filename=FPP_' . $zipName . '_' . $timestamp . '.zip');
+    header('Content-disposition: attachment;filename="' . $hostName . '_' . $zipName . '_' . $timestamp . '.zip"');
     ob_clean();
     flush();
     readfile($filename);
