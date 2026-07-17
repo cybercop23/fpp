@@ -611,6 +611,21 @@ apt-get remove -y --purge --autoremove \\
     linux-headers-rpi-v6 linux-headers-rpi-v7 linux-headers-rpi-v8 2>/dev/null || true
 rm -rf /usr/src/linux-*
 
+# FPP manages the kernels in /boot/firmware itself (kernel*.img from
+# rpi-update above, or the base image's copies on --skip-kernel-update), but
+# the stock linux-image-* dpkg packages stay installed while their module
+# trees / DTB dirs are stripped above. raspi-firmware's default KERNEL=auto
+# kernel hook would therefore either fail (breaking every later apt run on
+# the device, e.g. plugin installs) or overwrite /boot/firmware/kernel*.img
+# with a stock vmlinuz whose modules no longer exist. Any non-"auto" value
+# disables the kernel/DTB copy in /etc/kernel/postinst.d/z50-raspi-firmware.
+cat > /etc/default/raspi-firmware <<'RASPI_FW_EOF'
+# FPP manages its own kernels in /boot/firmware; "auto" would let
+# raspi-firmware overwrite them with a stock Debian kernel whose modules
+# are not present on this image.
+KERNEL=none
+RASPI_FW_EOF
+
 # Finalization (mirrors SD/README.RaspberryPi post-install cleanup)
 apt-get clean
 journalctl --flush --rotate --vacuum-time=1s || true
