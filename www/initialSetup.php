@@ -87,21 +87,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['restoreFile'])) {
         #restoreSection .btn, #restoreSection small {
             font-size: 0.875rem;
         }
-        .fpp-backup-action-loading::after {
-            content: '';
-            display: inline-block;
-            width: 1em;
-            height: 1em;
-            border: 2px solid rgba(0,0,0,0.1);
-            border-left-color: var(--fpp-primary, #0d6efd);
-            border-radius: 50%;
-            animation: fpp-spin 0.6s linear infinite;
-            vertical-align: middle;
-            margin-left: 0.25em;
-        }
-        @keyframes fpp-spin {
-            to { transform: rotate(360deg); }
-        }
         .fileCopyFields label { font-weight: 600; }
         #fcFlagsTable td { vertical-align: top; white-space: nowrap; }
     </style>
@@ -897,7 +882,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['restoreFile'])) {
                                 <tr class="fcHost" style="display: none;">
                                     <td class="pe-3 pb-2">Remote Host:</td>
                                     <td class="pb-2">
-                                        <select id="fcHost" class="form-select" onchange="GetBackupHostBackupDirs($('#fcRemoteStorage').val())">
+                                        <select id="fcHost" class="form-select" onchange="GetRemoteHostUSBStorage(); GetBackupHostBackupDirs($('#fcRemoteStorage').val())">
                                             <option value="">-- Select Remote Host --</option>
                                             <?php echo $hostOptions; ?>
                                         </select>

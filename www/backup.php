@@ -2230,6 +2230,7 @@ if ($skipHTMLCodeOutput === false) {
 
             function GetBackupHostBackupDirs(remoteStorageSelected) {
                 fppFileCopy.getBackupHostBackupDirs(remoteStorageSelected);
+                GetRemoteHostUSBStorage();
             }
 
             function PopulateBackupDirs(data, excludeRoot) {
