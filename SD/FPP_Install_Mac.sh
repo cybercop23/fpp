@@ -97,7 +97,7 @@ fi
 # detect GStreamer via pkg-config and GStreamerOut.cpp's DRM/kmssink path
 # decoupled behind a Linux guard plus a macOS video sink -- not just adding the
 # gstreamer brew packages here. See fpp_so.mk and src/mediaoutput/GStreamerOut.cpp.
-brew install php git httpd ccache make zstd wget taglib mosquitto jsoncpp drogon graphicsmagick libusb sdl3 ffmpeg
+brew install php git httpd ccache make zstd wget taglib mosquitto jsoncpp drogon graphicsmagick libusb sdl3 ffmpeg pipx
 echo ""
 ccache -M 350M
 ccache --set-config=temporary_dir=/tmp

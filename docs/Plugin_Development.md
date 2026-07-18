@@ -1,49 +1,46 @@
 # Developing a Plugin for FPP
 
-The FPP Master Plugin list JSON is downloaded the [FPP's github](https://github.com/FalconChristmas/fpp-pluginList/blob/master/pluginList.json).
+FPP's Plugin Manager reads its list from
+[`FalconChristmas/fpp-data/pluginList.json`](https://github.com/FalconChristmas/fpp-data/blob/master/pluginList.json).
+Each entry is `[displayName, pluginInfoURL, category]`; `pluginInfoURL` points at a
+`pluginInfo.json` in the plugin's own repository, which FPP fetches directly to list,
+version-check, and install the plugin.
 
-The Plugin's Repository needs to contain a 'pluginInfo.json' with all the Plugin's configuration information. This is read by FPP to setup the Plugin.
+**Everything about building a plugin lives in the
+[fpp-plugin-Template](https://github.com/FalconChristmas/fpp-plugin-Template)
+repository, not here:**
 
-#### Sample 'pluginInfo.json'
-```
-{
-	"repoName": "fpp-brightness",
-	"name": "Brightness Control Plugin for FPP",
-	"author": "Daniel Kulp (dkulp)",
-	"description": "This plugin allows dynamic/real time control of the brightness of the display.",
-	"homeURL": "https://github.com/FalconChristmas/fpp-brightness",
-	"srcURL": "https://github.com/FalconChristmas/fpp-brightness.git",
-	"bugURL": "https://github.com/FalconChristmas/fpp-brightness/issues",
-	"allowUpdates": 1,
-	"versions": [
-		{
-				"minFPPVersion": "5.0",
-				"maxFPPVersion": "0",
-				"branch": "master",
-				"sha": ""
-		}
-	]
-}
+- [`PLUGININFO_FORMAT.md`](https://github.com/FalconChristmas/fpp-plugin-Template/blob/master/PLUGININFO_FORMAT.md)
+  — the full `pluginInfo.json` field reference (required/optional fields, the
+  `versions[]` array, `platforms`, resource hints, the `dependencies` block).
+- [`PLUGIN_GUIDELINES.md`](https://github.com/FalconChristmas/fpp-plugin-Template/blob/master/PLUGIN_GUIDELINES.md)
+  — rules and conventions for a well-behaved plugin: logging, the install/uninstall
+  lifecycle, talking to FPP through its API instead of its internals, dependency
+  installation, and UI conventions.
+- the template plugin itself — a working skeleton to fork.
 
-```
-## Plugin Installation
+For getting your finished plugin **listed** (or later de-listed/retired) in FPP's
+Plugin Manager, see the
+[fpp-data README](https://github.com/FalconChristmas/fpp-data/blob/master/README.md)
+— it covers the submission process, the `pluginList.json` entry format, and how to
+request removal.
 
-FPP will GIT clone the 'srcURL' from the 'pluginInfo.json' file when the plugin is installed. 
-The "%PLUGIN_FOLDER%/scripts/fpp_install.sh" script will be run after the git clone to setup the plugin.
+Keep those as the source of truth; this page only covers the two things that are
+about *FPP itself* rather than about writing a plugin.
 
-## Plugin Types
-FPP supports Script and C++ based Plugins.
+## How FPP installs a plugin
 
-### Script Plugin
-Script based Plugin are PHP or bash(.sh) files that are called by FPP commands. 
-The "%PLUGIN_FOLDER%/commands/descriptions.json" contains the list of commands that will be added to FPP and what script to execute when the command is triggered.
+FPP `git clone`s the `srcURL` from `pluginInfo.json` into the plugin's directory,
+then runs `scripts/fpp_install.sh` to set it up. On uninstall it runs
+`scripts/fpp_uninstall.sh`.
 
-#### Sample Script Plugin: https://github.com/FalconChristmas/fpp-plugin-Template/
+## Plugin types
 
-### C++ Plugin
-C++ based Plugin are C++ libraries(.so files) that are linked into the FPPD daemon. 
-The plugins needs a makefile with the source code file locations and the 'fpp_install.sh' script need to run make to compile the plugin's '.so' file. 
-The '.so' file then be loaded by the FPPD daemon on restart. The "Plugin.h" file is the base class that each plugin must sub-class.
-
-#### Sample C++ Plugin: https://github.com/FalconChristmas/fpp-brightness
-
+- **Script plugin** — PHP or bash scripts invoked by FPP commands, wired up via
+  `commands/descriptions.json`. See the
+  [template plugin](https://github.com/FalconChristmas/fpp-plugin-Template/) for a
+  working example.
+- **C++ plugin** — a shared library (`.so`) linked into the `fppd` daemon at
+  runtime, subclassing the `Plugin.h` base class. See
+  [fpp-brightness](https://github.com/FalconChristmas/fpp-brightness) for a working
+  example.

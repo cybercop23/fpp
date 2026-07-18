@@ -7,6 +7,17 @@
     require_once('config.php');
     require_once('common.php');
 
+    // Device capability for the plugin resource-hint check (D14). Computed
+    // server-side so it is exact for this box: total RAM (MB) and CPU cores.
+    // Plugins may declare optional per-version resource requirements in
+    // pluginInfo.json; the UI compares them against these values.
+    $__pluginDevMem = get_server_memory_info();
+    $pluginDeviceMemMB = (int) round(($__pluginDevMem['total'] ?? 0) / 1048576);
+    $pluginDeviceCores = (int) trim(@shell_exec('nproc 2>/dev/null'));
+    if ($pluginDeviceCores < 1) {
+        $pluginDeviceCores = 1;
+    }
+
     writeFPPVersionJavascriptFunctions();
 
     include 'common/menuHead.inc';
@@ -48,6 +59,49 @@
         var pluginPopularity = {};        // repoName -> integer install count
         var popularityLoaded = false;
         var POPULARITY_URL = 'api/plugin/popularity';
+
+        // Device capability for the resource-hint check (D14), injected server-side
+        // (exact for this box). 0 means "unknown" -> the check degrades to no-op.
+        var DEVICE_MEM_MB = <?php echo $pluginDeviceMemMB; ?>;
+        var DEVICE_CORES  = <?php echo $pluginDeviceCores; ?>;
+
+        // Evaluate a plugin's optional resource requirements against this device.
+        // Fields (both optional, top-level on pluginInfo.json — plugin-wide, not
+        // per-version): minMemoryMB / minCpuCores (precise, self-reported).
+        // Returns { known, exceeds, badge, label, title }:
+        //   exceeds  - a precise minimum is not met by this device (drives hide-on-Basic
+        //              and an install confirmation on Advanced+), only when the device
+        //              value is known.
+        //   badge    - show a muted advisory tag (only when exceeds).
+        function EvalPluginResources(data) {
+            var r = { known: false, exceeds: false, badge: false, label: '', title: '' };
+            if (!data) return r;
+            var minMem = parseInt(data.minMemoryMB) || 0;
+            var minCores = parseInt(data.minCpuCores) || 0;
+            if (!minMem && !minCores) return r; // nothing declared
+            r.known = true;
+
+            var memShort = (minMem > 0 && DEVICE_MEM_MB > 0 && minMem > DEVICE_MEM_MB);
+            var coresShort = (minCores > 0 && DEVICE_CORES > 0 && minCores > DEVICE_CORES);
+            r.exceeds = memShort || coresShort;
+
+            if (r.exceeds) {
+                var parts = [];
+                if (memShort) parts.push('needs ' + minMem + ' MB RAM (this device has ' + DEVICE_MEM_MB + ' MB)');
+                if (coresShort) parts.push('needs ' + minCores + ' CPU cores (this device has ' + DEVICE_CORES + ')');
+                r.badge = true;
+                r.label = 'Not Enough RAM/CPU';
+                r.title = 'This plugin ' + parts.join('; ') + '. It may run poorly or not at all on this device.';
+            }
+            return r;
+        }
+
+        // Resource verdict for a plugin. Plugin-wide (not per-version), so this is a
+        // thin, stably-named wrapper over EvalPluginResources — kept so call sites
+        // don't need to know the fields moved off the versions[] entry.
+        function PluginResourceVerdict(data) {
+            return EvalPluginResources(data);
+        }
 
         function PluginIsInstalled(plugin) {
             for (var i = 0; i < installedPlugins.length; i++) {
@@ -492,20 +546,49 @@
         function ConfirmAndInstall(plugin, branch, sha) {
             var i = FindPluginInfo(plugin);
             var data = (i >= 0) ? pluginInfos[i] : null;
+            var res = data ? PluginResourceVerdict(data) : { exceeds: false };
+            // Resource warning is orthogonal to trust: it applies to Official plugins too.
+            var resWarn = '';
+            if (res.exceeds)
+                resWarn = '<div class="fpp-major-callout mb-2"><i class="fas fa-microchip"></i>' +
+                    '<span><b>Not enough RAM/CPU.</b> ' + res.title +
+                    ' Installing it anyway may degrade or disrupt your show.</span></div>';
             if (data && IsOfficialPlugin(data)) {
-                InstallPlugin(plugin, branch, sha);
+                // Official plugins install directly unless they exceed device resources.
+                if (!resWarn) {
+                    InstallPlugin(plugin, branch, sha);
+                    return;
+                }
+                DoModalDialog({
+                    id: "confirmInstallDialog",
+                    class: "modal-lg",
+                    title: "Install this plugin?",
+                    body: resWarn,
+                    backdrop: true,
+                    keyboard: true,
+                    buttons: {
+                        "Install anyway": function () {
+                            CloseModalDialog("confirmInstallDialog");
+                            InstallPlugin(plugin, branch, sha);
+                        },
+                        Cancel: function () {
+                            CloseModalDialog("confirmInstallDialog");
+                        }
+                    }
+                });
                 return;
             }
             var name = (data && data.name) ? data.name : plugin;
             var src = (data && data.srcURL) ? data.srcURL : '';
-            var body = '<div class="alert alert-warning text-warning-emphasis py-2 mb-2">' +
-                '<i class="fas fa-exclamation-triangle"></i> Installing <b>' + name + '</b> runs ' +
+            var body = resWarn +
+                '<div class="fpp-inline-warn mb-2"><i class="fas fa-exclamation-triangle"></i>' +
+                '<span>Installing <b>' + name + '</b> runs ' +
                 '<b>third-party, untrusted code</b> on your FPP. It has full access to this device <b>and to ' +
                 'anything else on the network FPP is connected to</b>. This is inherently dangerous unless you ' +
                 'trust the plugin\'s author. The FPP project <b>does not test, vet, or guarantee the quality or ' +
                 'safety</b> of plugins &mdash; install at your own risk, and only from authors you trust. The ' +
                 '<span class="badge text-bg-graceful"><i class="fas fa-certificate"></i> Official</span> badge marks ' +
-                'plugins maintained by the FPP team (this plugin is not one of them).</div>';
+                'plugins maintained by the FPP team (this plugin is not one of them).</span></div>';
             if (src) body += '<div class="small text-secondary"><i class="fas fa-code"></i> Source: ' +
                 '<a href="' + src + '" target="_blank" rel="noopener noreferrer">' + src + '</a></div>';
             DoModalDialog({
@@ -978,6 +1061,7 @@
             if (!$strip.length) return;
             popularStripHasCards = false;
             if (!popularityLoaded) { UpdatePopularStripVisibility(); return; }
+            var uiLevel = parseInt(settings["uiLevel"]) || 0;
             var ranked = [];
             for (var i = 0; i < pluginInfos.length; i++) {
                 var d = pluginInfos[i];
@@ -985,6 +1069,9 @@
                 if (PluginIsInstalled(d.repoName)) continue;   // exclude installed
                 var sel = SelectPluginVersionIndices(d);
                 if (sel.compatible < 0 && sel.untested < 0) continue;  // exclude uninstallable
+                // Basic UI: don't recommend a plugin this device doesn't meet the
+                // minimum memory/CPU for (matches the grid's hide-on-Basic rule).
+                if (uiLevel < 1 && PluginResourceVerdict(d).exceeds) continue;
                 if (activeCategorySlug !== 'all' &&
                     PluginCategoryInfo(d).obj.slug !== activeCategorySlug) continue;
                 var c = PopularityOf(d.repoName);
@@ -1171,9 +1258,11 @@
             if ((parseInt(settings["uiLevel"]) || 0) >= 1)
                 body += '<div class="mb-2 text-muted small"><i class="fas fa-info-circle"></i> Compatible FPP versions: <b>' + PluginVersionsText(data) + '</b></div>';
             if (!installed && compatibleVersion == -1 && untestedVersion >= 0)
-                body += '<div class="alert alert-warning text-warning-emphasis py-2"><i class="fas fa-exclamation-triangle"></i> This plugin has not been updated to work with your version of FPP (' + getFPPMajorVersion() + '). You can still install it, but it may not work correctly.</div>';
+                body += '<div class="fpp-inline-warn mb-2"><i class="fas fa-exclamation-triangle"></i>' +
+                    '<span>This plugin has not been updated to work with your version of FPP (' + getFPPMajorVersion() + '). You can still install it, but it may not work correctly.</span></div>';
             else if (!installed && compatibleVersion == -1)
-                body += '<div class="alert alert-danger py-2"><i class="fas fa-exclamation-triangle"></i> No version is compatible with your FPP version/platform.</div>';
+                body += '<div class="fpp-major-callout mb-2"><i class="fas fa-exclamation-triangle"></i>' +
+                    '<span>No version is compatible with your FPP version/platform.</span></div>';
             body += '<div class="d-flex flex-column gap-1 small">';
             if (data.homeURL) body += '<a href="' + data.homeURL + '" target="_blank" rel="noopener noreferrer"><i class="fas fa-home"></i> ' + data.homeURL + '</a>';
             // Omit "View Source" when srcURL just duplicates the home link (same repo),
@@ -1193,9 +1282,18 @@
             } else if (compatibleVersion >= 0 || untestedVersion >= 0) {
                 var idx = compatibleVersion < 0 ? untestedVersion : compatibleVersion;
                 // Match the card's wording: "Install anyway" when the only available
-                // version has not been updated for this FPP release.
-                var installLabel = (compatibleVersion < 0 && untestedVersion >= 0) ? 'Install anyway' : 'Install';
-                buttons[installLabel] = function () { CloseModalDialog('pluginDetailDialog'); ConfirmAndInstall(repo, data.versions[idx].branch, data.versions[idx].sha); };
+                // version has not been updated for this FPP release, OR it doesn't meet
+                // this device's declared minimums.
+                var installLabel = (compatibleVersion < 0 && untestedVersion >= 0) || PluginResourceVerdict(data).exceeds
+                    ? 'Install anyway' : 'Install';
+                var installClick = function () { CloseModalDialog('pluginDetailDialog'); ConfirmAndInstall(repo, data.versions[idx].branch, data.versions[idx].sha); };
+                // Match the card: doesn't meet this device's minimums wins regardless
+                // of compat/untested status.
+                if (PluginResourceVerdict(data).exceeds) {
+                    buttons[installLabel] = { click: installClick, class: 'btn-danger' };
+                } else {
+                    buttons[installLabel] = installClick;
+                }
             }
             buttons['Close'] = function () { CloseModalDialog('pluginDetailDialog'); };
 
@@ -1242,6 +1340,11 @@
                 h += '<span class="badge text-bg-warning me-1" title="This plugin has not been updated to work with your version of FPP. It may still install and work, but has not been confirmed for this release."><i class="fas fa-exclamation-triangle"></i> Not updated for FPP ' + getFPPMajorVersion() + '</span>';
             else if (!installed && sel.compatible == -1)
                 h += '<span class="badge text-bg-danger me-1" title="No version compatible with this FPP version/platform"><i class="fas fa-ban"></i> Incompatible</span>';
+            if (!installed) {
+                var res = PluginResourceVerdict(data);
+                if (res.badge)
+                    h += '<span class="fpp-tag fpp-tag--danger gap-1 me-1 pluginResourceBadge" title="' + res.title + '"><i class="fas fa-microchip"></i> ' + res.label + '</span>';
+            }
             h += PopularityBadgeHtml(PopularityOf(repo));
             if (includeCategory) {
                 var cat = PluginCategoryInfo(data);
@@ -1295,6 +1398,14 @@
                     installText = 'Install anyway';
                     btnClass = 'btn-warning';
                 }
+                // Doesn't meet this device's declared minimums wins regardless of
+                // compat/untested status -- a compatible-but-underpowered plugin still
+                // needs the red signal (and matching "anyway" wording), not just the
+                // untested+underpowered combo.
+                if (PluginResourceVerdict(data).exceeds) {
+                    installText = 'Install anyway';
+                    btnClass = 'btn-danger';
+                }
                 actions += "<button class='btn btn-sm " + btnClass + "' onclick='event.stopPropagation();ConfirmAndInstall(\"" + data.repoName + "\", \"" + data.versions[idx].branch + "\", \"" + data.versions[idx].sha + "\");'><i class='far fa-arrow-alt-circle-down'></i> " + installText + "</button>";
             }
 
@@ -1338,6 +1449,10 @@
                 InsertCardSorted('installedGrid', data.name, html, sortRank);
             } else {
                 var uiLevel = parseInt(settings["uiLevel"]) || 0;
+                // Basic hides plugins whose declared requirements exceed this device
+                // (D14). Advanced/Developer still see them, with an advisory badge and
+                // an install confirmation. Coarse "heavy" profiles never hide.
+                if (uiLevel < 1 && PluginResourceVerdict(data).exceeds) return;
                 if (data.repoName == 'fpp-plugin-Template') {
                     if (uiLevel < 3) return;
                 } else if (compatibleVersion != -1) {
@@ -1406,7 +1521,11 @@
                             if (d.statusText !== undefined) {
                                 d = d.statusText;
                             }
-                            alert('Error, failed to fetch ' + pluginList[index] + " - " + d);
+                            // A broken/unreachable pluginInfo.json is the plugin author's
+                            // problem, not the user's — fail soft (drop this one card) rather
+                            // than block every visitor with an alert(). The daily CI job in
+                            // fpp-data-ci is what actually catches and reports this upstream.
+                            console.warn('Skipping plugin ' + pluginList[index][0] + ' (' + url + '): ' + d);
                         }
                     });
                 }

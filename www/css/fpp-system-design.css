@@ -2100,6 +2100,13 @@
 	color: #000;
 }
 
+/* Resource-shortfall marker: red, this is the one quiet tag meant to alarm --
+   the device doesn't meet the plugin's declared minimum RAM/CPU. */
+.fpp-tag--danger {
+	background: var(--bs-danger);
+	color: #fff;
+}
+
 /* ==========================================================================
    MAJOR-VERSION CALLOUT
    Inline danger notice inside a card (e.g. "major version requires OS upgrade").
@@ -2117,7 +2124,7 @@
 	margin-bottom: var(--fpp-sp-md);
 }
 
-.fpp-major-callout i {
+.fpp-major-callout > i {
 	margin-top: 2px;
 	flex-shrink: 0;
 }
@@ -2139,7 +2146,7 @@
 	margin-bottom: var(--fpp-sp-md);
 }
 
-.fpp-inline-warn i {
+.fpp-inline-warn > i {
 	color: var(--fpp-warning-dark);
 	margin-top: 2px;
 	flex-shrink: 0;
