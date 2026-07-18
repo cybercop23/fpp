@@ -6330,7 +6330,13 @@ function hideRebootAlert () {
 
 function CheckRestartRebootFlags () {
 	if (typeof settings !== 'undefined') {
-		if (settings['disableUIWarnings'] == 1) {
+		// Suppress restart/reboot banners while the initial setup wizard hasn't
+		// completed yet (e.g. a reboot flagged by the automatic first-boot rootfs
+		// expansion) - it reads as caused by the user before they've done anything.
+		// Once initialSetup-02 flips to 1 (wizard finished or short-circuited by a
+		// restore), any still-pending flag is shown normally.
+		var setupIncomplete = settings['initialSetup-02'] != 1 && settings['initialSetup-02'] != '1';
+		if (settings['disableUIWarnings'] == 1 || setupIncomplete) {
 			setTopScrollText('Top');
 			hideRestartAlert();
 			hideRebootAlert();
