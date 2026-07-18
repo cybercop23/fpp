@@ -143,7 +143,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['restoreFile'])) {
         }
     }
     ?>
+    <script src="js/fpp-backup-filecopy.js"></script>
     <script>
+        fppFileCopy.config = {
+            direction: '#fileCopyDirection',
+            usbDevice: '#fcUSBDevice',
+            pathSelect: '#fcPathSelect',
+            host: '#fcHost',
+            remoteStorage: '#fcRemoteStorage',
+            deleteExtra: '#fcDeleteExtra',
+            copyText: '#fileCopyText',
+            showUSB: '.fcUSB',
+            showHost: '.fcHost',
+            showHostDevice: '.fcHostDevice',
+            showPathSelect: '.fcPathSelect',
+            showPath: '.fcPath',
+            showBackups: '.fcBackups',
+            showCompressed: '.fcCompressed',
+            popupModalId: 'fileCopyPopup_Modal',
+            popupCloseBtnId: 'fileCopyPopup_ModalCloseButton',
+            copyPopupBodyId: 'fileCopyPopup'
+        };
+
         // Store all pending setting changes
         var pendingSettings = {};
 
@@ -266,131 +287,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['restoreFile'])) {
 
         // File Copy Restore functions
         function fileCopyDirectionChanged() {
-            var direction = document.getElementById('fileCopyDirection').value;
-            $('.fcUSB').hide();
-            $('.fcHost').hide();
-            $('.fcHostDevice').hide();
-            $('.fcPathSelect').hide();
-            switch (direction) {
-                case 'FROMUSB':
-                    $('.fcUSB').show();
-                    $('.fcPathSelect').show();
-                    GetBackupDeviceDirectories();
-                    break;
-                case 'FROMLOCAL':
-                    $('.fcPathSelect').show();
-                    GetBackupDirsViaAPI(window.location.host, '', true);
-                    break;
-                case 'FROMREMOTE':
-                    $('.fcHost').show();
-                    $('.fcHostDevice').show();
-                    $('.fcPathSelect').show();
-                    if ($('#fcHost').val()) {
-                        GetRemoteHostUSBStorage();
-                    }
-                    break;
-            }
+            fppFileCopy.directionChanged();
         }
 
         function GetBackupDevices() {
-            $('#fcUSBDevice').html('<option>Loading...</option>');
-            $.get('api/backups/devices').done(function (data) {
-                var options = '';
-                for (var i = 0; i < data.length; i++) {
-                    var desc = data[i].name;
-                    if (data[i].vendor != '') desc += ' - ' + data[i].vendor;
-                    if (data[i].model != '') {
-                        if (data[i].vendor != '') desc += ' ';
-                        else desc += ' - ';
-                        desc += ' ' + data[i].model;
-                    }
-                    desc += ' - ' + data[i].size + 'GB';
-                    options += "<option value='" + data[i].name + "'>" + desc + "</option>";
-                }
-                $('#fcUSBDevice').html(options);
-            }).fail(function () {
-                $('#fcUSBDevice').html('');
-            });
+            fppFileCopy.getBackupDevices();
         }
 
         function GetBackupDeviceDirectories() {
-            var dev = $('#fcUSBDevice').val();
-            if (!dev) {
-                $('#fcPathSelect').html("<option value=''>No USB Device Selected</option>");
-                return;
-            }
-            $('#fcPathSelect').html('<option>Loading...</option>');
-            $.get('api/backups/list/' + dev).done(function (data) {
-                PopulateBackupDirs(data);
-            }).fail(function () {
-                $('#fcPathSelect').html('');
-            });
+            fppFileCopy.getBackupDeviceDirectories();
         }
 
         function USBDeviceChanged() {
-            var direction = document.getElementById('fileCopyDirection').value;
-            if (direction == 'FROMUSB') GetBackupDeviceDirectories();
+            fppFileCopy.usbDeviceChanged();
         }
 
         function GetBackupDirsViaAPI(host, remoteStorageSelected, excludeRoot) {
-            $('#fcPathSelect').html('<option>Loading...</option>');
-            var url = 'api/backups/list';
-            if (remoteStorageSelected && remoteStorageSelected !== 'none') {
-                url = 'api/backups/list/' + encodeURIComponent(remoteStorageSelected);
-            }
-            if (host && host !== window.location.host) {
-                url += (url.indexOf('?') === -1 ? '?' : '&') + 'ip=' + encodeURIComponent(host);
-            }
-            $.get(url).done(function (data) {
-                PopulateBackupDirs(data, excludeRoot);
-            }).fail(function () {
-                $('#fcPathSelect').html('');
-            });
+            fppFileCopy.getBackupDirsViaAPI(host, remoteStorageSelected, excludeRoot);
         }
 
         function GetBackupHostBackupDirs(remoteStorageSelected) {
-            var selStorage = (remoteStorageSelected && remoteStorageSelected !== 'none') ? remoteStorageSelected : '';
-            GetBackupDirsViaAPI($('#fcHost').val(), selStorage, true);
+            fppFileCopy.getBackupHostBackupDirs(remoteStorageSelected);
         }
 
         function GetRemoteHostUSBStorage() {
-            var host = $('#fcHost').val();
-            if (!host) return;
-            var requestUrl = 'api/backups/devices?ip=' + encodeURIComponent(host);
-            var defaultOption = "<option value='none'>Default FPP Storage</option>";
-            $('#fcRemoteStorage').parent().closest('td').addClass('fpp-backup-action-loading');
-            $.get(requestUrl).done(function (data) {
-                var options = '';
-                for (var i = 0; i < data.length; i++) {
-                    var desc = data[i].name;
-                    if (data[i].vendor != '') desc += ' - ' + data[i].vendor;
-                    if (data[i].model != '') {
-                        if (data[i].vendor != '') desc += ' ';
-                        else desc += ' - ';
-                        desc += ' ' + data[i].model;
-                    }
-                    desc += ' - ' + data[i].size + 'GB';
-                    options += "<option value='" + data[i].name + "'>" + desc + "</option>";
-                }
-                $('#fcRemoteStorage').html(defaultOption + options);
-                $('#fcRemoteStorage').parent().closest('td').removeClass('fpp-backup-action-loading');
-                if (options) GetBackupHostBackupDirs($('#fcRemoteStorage').val());
-            }).fail(function () {
-                $('#fcRemoteStorage').html(defaultOption);
-                $('#fcRemoteStorage').parent().closest('td').removeClass('fpp-backup-action-loading');
-            });
+            fppFileCopy.getRemoteHostUSBStorage();
         }
 
         function PopulateBackupDirs(data, excludeRoot) {
-            var options = '';
-            for (var i = 0; i < data.length; i++) {
-                if (excludeRoot && data[i] == '/') continue;
-                if (data[i].substring(0, 5) != 'ERROR')
-                    options += "<option value='" + data[i] + "'>" + data[i] + "</option>";
-                else
-                    options += "<option value=''>" + data[i] + "</option>";
-            }
-            $('#fcPathSelect').html(options);
+            fppFileCopy.populateBackupDirs(data, excludeRoot);
         }
 
         function GetFileCopyFlags() {
@@ -470,6 +395,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['restoreFile'])) {
                         class: 'btn-secondary',
                         click: function () {
                             CloseFileCopyDialog();
+                            window.location.href = '/';
                         }
                     }
                 }
@@ -481,36 +407,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['restoreFile'])) {
         }
 
         function CloseFileCopyDialog() {
-            CloseModalDialog('fileCopyPopup_Modal');
+            fppFileCopy.closeCopyDialog();
         }
 
         function FileCopyDone() {
-            EnableModalDialogCloseButton('fileCopyPopup_Modal');
+            fppFileCopy.copyDone();
         }
 
         function FileCopyTimeoutError() {
-            var logUrl = 'api/file/Logs/fpp_backup_filecopy.log';
-            var timeoutMsg = '!!! Attempting to track file copy process via its fallback log file...\n The file copy is still running in the background and will complete in due course.\n\n';
-            var lastLen = 0;
-
-            $('#fileCopyText').val(timeoutMsg);
-
-            var tailInterval = setInterval(function () {
-                $.get(logUrl, function (text) {
-                    if (text === 'File does not exist.') {
-                        clearInterval(tailInterval);
-                        FileCopyDone();
-                    } else {
-                        $('#fileCopyText').val(timeoutMsg + text);
-                        var el = $('#fileCopyText');
-                        el.scrollTop(el.prop('scrollHeight'));
-                        if (text.includes('unmounted from') || text.length === 0) {
-                            clearInterval(tailInterval);
-                            FileCopyDone();
-                        }
-                    }
-                });
-            }, 1000);
+            fppFileCopy.copyTimeoutError();
         }
 
         function showSetupProgress(msg) {

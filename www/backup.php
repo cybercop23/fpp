@@ -2125,6 +2125,7 @@ if ($skipHTMLCodeOutput === false) {
         <title><?= $pageTitle ?></title>
         <!--    <script>var helpPage = "help/backup.php";</script>-->
         <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+        <script src="js/fpp-backup-filecopy.js"></script>
 
         <?php
         $backupHosts = getKnownFPPSystems();
@@ -2162,6 +2163,97 @@ if ($skipHTMLCodeOutput === false) {
             }
             else {
                 helpPage = "help/" + helpPage;
+            }
+
+            fppFileCopy.config = {
+                direction: '#backup\\.Direction',
+                usbDevice: '#backup\\.USBDevice',
+                pathSelect: '#backup\\.PathSelect',
+                host: '#backup\\.Host',
+                remoteStorage: '#backup\\.RemoteStorage',
+                deleteExtra: '#backup\\.DeleteExtra',
+                copyText: '#copyText',
+                showUSB: '.copyUSB',
+                showHost: '.copyHost',
+                showHostDevice: '.copyHostDevice',
+                showPathSelect: '.copyPathSelect',
+                showPath: '.copyPath',
+                showBackups: '.copyBackups',
+                showCompressed: '.sendCompressed',
+                popupModalId: 'copyPopup_Modal',
+                popupCloseBtnId: 'copyPopup_ModalCloseButton',
+                copyPopupBodyId: 'copyPopup'
+            };
+
+            function BackupDirectionChanged() {
+                fppFileCopy.directionChanged();
+            }
+
+            function GetBackupDevices() {
+                $('#jsonConfigbackup\\.USBDevice').parent().closest('div').addClass('fpp-backup-action-loading');
+                fppFileCopy.getBackupDevices();
+            }
+
+            fppFileCopy.config.onDevicesLoaded = function (data) {
+                $('#jsonConfigbackup\\.USBDevice').parent().closest('div').removeClass('fpp-backup-action-loading');
+                var defaultOption = "<option value='none' selected>None</option>";
+                var options = '';
+                for (var i = 0; i < data.length; i++) {
+                    var desc = data[i].name;
+                    if (data[i].vendor != '') desc += ' - ' + data[i].vendor;
+                    if (data[i].model != '') {
+                        desc += (data[i].vendor != '') ? ' ' : ' - ';
+                        desc += ' ' + data[i].model;
+                    }
+                    desc += ' - ' + data[i].size + 'GB';
+                    options += "<option value='" + data[i].name + "'>" + desc + "</option>";
+                }
+                $('#jsonConfigbackup\\.USBDevice').html(defaultOption + options);
+                GetJSONConfigBackupDevice();
+            };
+
+            function GetBackupDeviceDirectories() {
+                fppFileCopy.getBackupDeviceDirectories();
+            }
+
+            function GetRestoreDeviceDirectories() {
+                fppFileCopy.getRestoreDeviceDirectories();
+            }
+
+            function USBDeviceChanged(toFromRemote) {
+                fppFileCopy.usbDeviceChanged();
+            }
+
+            function GetBackupDirsViaAPI(host, remoteStorageSelected, excludeRoot) {
+                fppFileCopy.getBackupDirsViaAPI(host, remoteStorageSelected, excludeRoot);
+            }
+
+            function GetBackupHostBackupDirs(remoteStorageSelected) {
+                fppFileCopy.getBackupHostBackupDirs(remoteStorageSelected);
+            }
+
+            function PopulateBackupDirs(data, excludeRoot) {
+                fppFileCopy.populateBackupDirs(data, excludeRoot);
+            }
+
+            function CheckRemoteHasRsyncdEnabled(host) {
+                fppFileCopy.checkRemoteHasRsyncdEnabled(host);
+            }
+
+            function GetRemoteHostUSBStorage() {
+                fppFileCopy.getRemoteHostUSBStorage();
+            }
+
+            function CloseCopyDialog() {
+                fppFileCopy.closeCopyDialog();
+            }
+
+            function CopyDone() {
+                fppFileCopy.copyDone();
+            }
+
+            function CopyTimeoutError() {
+                fppFileCopy.copyTimeoutError();
             }
 
             function GetCopyFlags() {
@@ -2318,201 +2410,6 @@ if ($skipHTMLCodeOutput === false) {
 
                 StreamURL(url, 'copyText', 'CopyDone', 'CopyTimeoutError');
 
-            }
-
-            function CloseCopyDialog() {
-                var cd_remoteHost = settings['backup.Host'];
-                var cd_remoteStorage = settings['backup.RemoteStorage'];
-
-                if (typeof (cd_remoteHost) !== "undefined" && typeof (cd_remoteStorage) !== "undefined") {
-                    //Run a Unmount against the remote storage to make sure it's unmounted, this helps when there is a issue with the copy_settings_to_storeage.sh script and it doesn't unmount the specified device at the remote host
-                    //We don't do anything with the returned output. Proxied through
-                    //the local API (?ip=) so the browser stays same-origin.
-                    $.post("api/backups/devices/unmount/" + encodeURIComponent(cd_remoteStorage) + "/remote_filecopy?ip=" + encodeURIComponent(cd_remoteHost));
-
-                }
-
-                CloseModalDialog("copyPopup_Modal");
-            }
-
-            function CopyDone() {
-                EnableModalDialogCloseButton('copyPopup_Modal');
-            }
-
-            function CopyTimeoutError() {
-                var fpp_backup_filecopy_log_url = "api/file/Logs/fpp_backup_filecopy.log";
-                var timeoutErrorMessage = "!!! Attempting to track file copy process via it's fallback log file... \n" +
-                    " The file copy is still running in the background and will complete in due course. Progress updates will appear periodically. !!! \n\n ";
-                var noNewDataErrorMessage = "";
-                var iterations = 0;
-                var iterationsWithNoDataWarningsIssued = 1;
-                var noNewDataIterationCount = 600; // The interval is every second so 600 iterations = 10minutes
-                // var noNewDataIterationHardLimit = 900; // 15 minutes - Consider the process failed if no new log data received in 15 minutes
-                var last_response_len = 0;
-
-                //cache the reference to the element
-                var outputArea = $('#copyText');
-                outputArea.val('')
-                outputArea.val(timeoutErrorMessage);
-
-                //Every second read the alternative fpp_backup_filecopy.log
-                var tailLogInterval = setInterval(function () {
-
-                    $.get(fpp_backup_filecopy_log_url, function (text) {
-                        //This is also a nasty workaround, but we reply on logs api will returning a file not found error to signify the copy process ending
-                        //as the log file is deleted at the end of that process
-                        if (text === "File does not exist.") {
-                            //The file copy script has competed and removed the logfile
-                            //If the log file cannot be found anymore consider the process complete
-                            clearInterval(tailLogInterval);
-                            CopyDone();
-                        } else {
-                            //Track the number of interactions the response remained unchanged
-                            if (last_response_len === 0) {
-                                last_response_len = text.length;
-                            }
-
-                            if (last_response_len === text.length) {
-                                iterations += 1;
-                            } else {
-                                noNewDataErrorMessage = "";
-                                //Reset
-                                iterations = 0;
-                                //Store the new data length
-                                last_response_len = text.length;
-                            }
-
-                            //Check if it's been more than 10 minutes that the data has remained unchanged
-                            if (iterations === (noNewDataIterationCount * iterationsWithNoDataWarningsIssued)) {
-                                iterationsWithNoDataWarningsIssued += 1;
-                                //Some error occurred
-                                noNewDataErrorMessage = "!!! WARNING: No new log entries has been received in over " + Math.floor(iterations / 60) + " minutes, still waiting.... !!! \n\n";
-                            }
-                            // if (iterations >= noNewDataIterationHardLimit) {
-                            //     //Some error occurred
-                            //     noNewDataErrorMessage = "!!! ERROR: No new log entries has been received in over " + noNewDataIterationHardLimit + " seconds - File Copy Backup process has likely failed !!! \n\n";
-                            // }
-
-                            //This is a bit ugly, but put our error message first (just to inform the user), then the contents of the log file every time
-                            outputArea.val(timeoutErrorMessage + text + noNewDataErrorMessage);
-
-                            outputArea.scrollTop(outputArea.prop('scrollHeight'));
-                            outputArea.parent().scrollTop(outputArea.parent().prop('scrollHeight'));
-
-                            //Check for device unmounted text - if this exists then the process has completed... the file should be removed at the end
-                            //but this is just a failsafe in case it wasn't
-                            //exit if we hit the hard limit
-                            if (text.includes("unmounted from") || text.length === 0) {
-                                clearInterval(tailLogInterval);
-                                CopyDone();
-                            }
-                        }
-                    });
-                },
-                    1000);
-            }
-
-
-            function GetBackupDevices() {
-                $('#backup\\.USBDevice').html('<option>Loading...</option>');
-                //Add a loading spinner to show something is happening on the JSON Backup page dropdown list
-                $('#jsonConfigbackup\\.USBDevice').parent().closest('div').addClass('fpp-backup-action-loading');
-                //Also do the same for the file copy list these both use the same functions and deal with the same data
-                //Add a loading spinner to show something is happening
-                $('#backup\\.USBDevice').parent().closest('td').addClass('fpp-backup-action-loading');
-
-                $.get("api/backups/devices"
-                ).done(function (data) {
-                    var options = "";
-                    var default_none_selected_option = "<option value='none' selected>None</option>";
-
-                    for (var i = 0; i < data.length; i++) {
-                        var desc = data[i].name;
-                        if (data[i].vendor != '')
-                            desc += ' - ' + data[i].vendor;
-
-                        if (data[i].model != '') {
-                            if (data[i].vendor != '')
-                                desc += ' ';
-                            else
-                                desc += ' - ';
-
-                            desc += data[i].model;
-                        }
-
-                        desc += ' - ' + data[i].size + 'GB';
-                        options += "<option value='" + data[i].name + "'>" + desc + "</option>";
-                    }
-
-                    $('#backup\\.USBDevice').html(options);
-                    $('#jsonConfigbackup\\.USBDevice').html(default_none_selected_option + options);
-
-                    //Remove the loading spinner
-                    $('#jsonConfigbackup\\.USBDevice').parent().closest('div').removeClass('fpp-backup-action-loading');
-                    //Also do the same for the file copy list these both use the same functions and deal with the same data
-                    //Add a loading spinner to show something is happening
-                    $('#backup\\.USBDevice').parent().closest('td').removeClass('fpp-backup-action-loading');
-
-                    if (options != "") {
-                        if (document.getElementById("backup.Direction").value == 'FROMUSB')
-                            GetBackupDeviceDirectories();
-                        else if (document.getElementById("backup.Direction").value == 'TOUSB')
-                            GetRestoreDeviceDirectories();
-
-                        //Get the selected device setting and update the UI
-                        GetJSONConfigBackupDevice();
-                    }
-                }).fail(function () {
-                    $('#backup\\.USBDevice').html('');
-                });
-            }
-
-            function GetBackupDeviceDirectories() {
-                var dev = document.getElementById("backup.USBDevice").value;
-
-                if (dev == '') {
-                    $('#backup\\.PathSelect').html("<option value=''>No USB Device Selected</option>");
-                    return;
-                }
-
-                $('#backup\\.PathSelect').html('<option>Loading...</option>');
-                $.get("api/backups/list/" + dev
-                ).done(function (data) {
-                    PopulateBackupDirs(data);
-                }).fail(function () {
-                    $('#backup\\.PathSelect').html('');
-                });
-            }
-
-            function GetRestoreDeviceDirectories() {
-                var dev = document.getElementById("backup.USBDevice").value;
-
-                if (dev == '') {
-                    $('#backup\\.PathSelect').html("<option value=''>No USB Device Selected</option>");
-                    return;
-                }
-
-                $('#usbDirectories').html('');
-                $.get("api/backups/list/" + dev
-                ).done(function (data) {
-                    var options = '';
-                    for (i = 0; i < data.length; i++) {
-                        if (data[i].substring(0, 5) != 'ERROR')
-                            options += "<option value='" + data[i] + "'>" + data[i] + "</option>";
-                    }
-                    $('#usbDirectories').html(options);
-                });
-            }
-
-            function USBDeviceChanged(toFromRemote = false) {
-                var direction = document.getElementById("backup.Direction").value;
-                if (debug_mode == true) {
-                    alert('direction: ' + direction);
-                }
-                if (direction == 'FROMUSB')
-                    GetBackupDeviceDirectories();
-                else if (direction == 'TOUSB')
-                    GetRestoreDeviceDirectories();
             }
 
             function JSONConfigBackupUSBDeviceChanged() {
@@ -2837,226 +2734,6 @@ if ($skipHTMLCodeOutput === false) {
                 }
 
 
-            }
-
-            function PopulateBackupDirs(data, excludeRoot = false) {
-                var options = "";
-                for (var i = 0; i < data.length; i++) {
-                    // Remote File Copy backups always live in per-host subdirs under
-                    // media/backups/, so the top-level '/' is not a restorable snapshot -
-                    // selecting it would rsync every machine's backup folder into /media
-                    // (see issue #2714). Drop it for those restores.
-                    if (excludeRoot && data[i] == '/')
-                        continue;
-                    if (data[i].substring(0, 5) != 'ERROR')
-                        options += "<option value='" + data[i] + "'>" + data[i] + "</option>";
-                    else
-                        options += "<option value=''>" + data[i] + "</option>";
-                }
-                $('#backup\\.PathSelect').html(options);
-            }
-
-            function GetBackupDirsViaAPI(host, remoteStorageSelected = '', excludeRoot = false) {
-                $('#backup\\.PathSelect').html('<option>Loading...</option>');
-
-                //Build a different URL if a storage device has been specified
-                var url = "api/backups/list";
-                if (remoteStorageSelected !== '' && remoteStorageSelected !== false && remoteStorageSelected !== 'none') {
-                    url = "api/backups/list/" + encodeURIComponent(remoteStorageSelected);
-                }
-                // When a *remote* host is selected, proxy through the local API via
-                // ?ip= so the browser stays same-origin (no per-remote CSP entry).
-                // For this instance itself, call the local API directly.
-                if (host && host !== window.location.host) {
-                    url += (url.indexOf('?') === -1 ? '?' : '&') + "ip=" + encodeURIComponent(host);
-                }
-
-                //Add a loading spinner to show the user something is happening
-                $('#backup\\.PathSelect').parent().closest('td').addClass('fpp-backup-action-loading');
-
-                $.get(url
-                ).done(function (data) {
-                    PopulateBackupDirs(data, excludeRoot);
-                    $('#backup\\.PathSelect').parent().closest('td').removeClass('fpp-backup-action-loading');
-                }).fail(function () {
-                    $('#backup\\.PathSelect').html('');
-                    $('#backup\\.PathSelect').parent().closest('td').removeClass('fpp-backup-action-loading');
-                });
-            }
-
-            //Wrapper for GetBackupDirsViaAPI when quering folders on a remote hosts storage device
-            function GetBackupHostBackupDirs(remoteStorageSelected = false) {
-                if (remoteStorageSelected !== false) {
-                    //Get the value of the selected storage
-                    var selectedStorage = remoteStorageSelected;
-                    //ignore if the default of none is still selected
-                    if (selectedStorage == 'none') {
-                        selectedStorage = '';
-                    }
-                }
-
-                //Get the backup directories on the specified storage device.
-                //Exclude the top-level '/' - for remote restores it maps to the
-                //media/backups/ container (all machines' backups), not a single
-                //restorable snapshot (issue #2714).
-                GetBackupDirsViaAPI($('#backup\\.Host').val(), selectedStorage, true);
-            }
-
-            function BackupDirectionChanged() {
-                var direction = document.getElementById("backup.Direction").value;
-                var host = document.getElementById("backup.Host").value;
-
-                switch (direction) {
-                    case 'TOUSB':
-                        $('.copyUSB').show();
-                        $('.copyPath').show();
-                        $('.copyPathSelect').hide();
-                        $('.copyHost').hide();
-                        $('.copyHostDevice').hide();
-                        $('.copyBackups').show();
-                        GetRestoreDeviceDirectories();
-                        break;
-                    case 'FROMUSB':
-                        $('.copyUSB').show();
-                        $('.copyPath').hide();
-                        $('.copyPathSelect').show();
-                        $('.copyHost').hide();
-                        $('.copyHostDevice').hide();
-                        $('.copyBackups').hide();
-                        GetBackupDeviceDirectories();
-                        break;
-                    case 'TOLOCAL':
-                        $('.copyUSB').hide();
-                        $('.copyPath').show();
-                        $('.copyPathSelect').hide();
-                        $('.copyHost').hide();
-                        $('.copyHostDevice').hide();
-                        $('.copyBackups').hide();
-                        break;
-                    case 'FROMLOCAL':
-                        $('.copyUSB').hide();
-                        $('.copyPath').hide();
-                        $('.copyPathSelect').show();
-                        $('.copyHost').hide();
-                        $('.copyHostDevice').hide();
-                        $('.copyBackups').hide();
-                        // Exclude the top-level '/' - like remote restores it maps to
-                        // the media/backups/ container (all machines' backups), not a
-                        // single restorable snapshot (issue #2714).
-                        GetBackupDirsViaAPI('<?php echo $_SERVER['HTTP_HOST'] ?>', '', true);
-                        break;
-                    case 'TOREMOTE':
-                        $('.copyUSB').hide();
-                        $('.copyPath').show();
-                        $('.copyPathSelect').hide();
-                        $('.copyHost').show();
-                        $('.copyHostDevice').show();
-                        $('.copyBackups').hide();
-                        $('.sendCompressed').show();
-                        //Check if remote has rsynd enabled
-                        CheckRemoteHasRsyncdEnabled(host);
-                        //USB Device on remote
-                        GetRemoteHostUSBStorage();
-                        break;
-                    case 'FROMREMOTE':
-                        $('.copyUSB').hide();
-                        $('.copyPath').hide();
-                        $('.copyPathSelect').show();
-                        $('.copyHost').show();
-                        $('.copyHostDevice').show();
-                        $('.copyBackups').hide();
-                        $('.sendCompressed').show();
-                        GetBackupHostBackupDirs();
-                        //Check if remote has rsynd enabled
-                        CheckRemoteHasRsyncdEnabled(host);
-                        //USB device on remote
-                        GetRemoteHostUSBStorage();
-                        break;
-                }
-            }
-
-            function CheckRemoteHasRsyncdEnabled(host) {
-                //Read the setting value for whether the Rsync Daemon is enabled on the
-                //*remote* host (proxied through the local API via ?ip= so the browser
-                //stays same-origin). If it isn't, prompt the user that this needs to be
-                //enabled before copy TO or FROM the remote host can happen.
-                $.ajax({
-                    url: 'api/settings/Service_rsync?ip=' + encodeURIComponent(host),
-                    type: 'GET',
-                    success: function (data) {
-                        if (typeof (data) !== "undefined") {
-                            var rsyncd_setting_value = data['value'];
-                            if (rsyncd_setting_value === 0 || rsyncd_setting_value === '0') {
-                                //remove the warning text in case it's hanging around from a previous host
-                                $('.host_rsyncd_warning').remove();
-                                //Generate a URL by IP address to the affected host so the user can navigate easier
-                                var hostHref = "<a href='http://" + host + "/settings.php#settings-services' target='_blank'>" + host + "</a>";
-                                //rsynd is disabled on host, add a warning next to the selected host
-                                $('#backup\\.Host').after('<span class="host_rsyncd_warning"><b>WARNING!</b> Rsync server is disabled on remote host, please enable rsync under FPP Settings -> Services -> OS Services on ' + hostHref + ' </span');
-                                //<span><b>WARNING!</b> Rsync server is disabled on this host, please enable under FPP Settings -> System -> OS Services on *host*</span
-                            } else {
-                                //remove the warning text in case it's hanging around from a previous host
-                                $('.host_rsyncd_warning').remove();
-                            }
-                        } else {
-                            //something went wrong
-                            $.jGrowl('Error occurred reading the Service_rsync value from host - ' + host, { themeState: 'danger' });
-                        }
-                    },
-                    error: function (data) {
-                        //something went wrong
-                        $.jGrowl('Error occurred reading the Service_rsync value from host - ' + host, { themeState: 'danger' });
-                    }
-                });
-            }
-
-            //Retrieves a list of available backup devices on the selected remote host
-            function GetRemoteHostUSBStorage() {
-                //Very similar to GetBackupDevices() but adapted to collect storage info from a remote system
-                var host = document.getElementById("backup.Host").value;
-                // Proxy through the local API (?ip=) so the browser stays
-                // same-origin instead of calling the remote directly.
-                var requestUrl = "api/backups/devices?ip=" + encodeURIComponent(host);
-                var default_none_selected_option = "<option value='none' selected>Default FPP Storage</option>";
-
-                // $('#backup\\.USBDevice').html('<option>Loading...</option>');
-                //Add a loading spinner to show something is happening
-                $('#backup\\.RemoteStorage').parent().closest('td').addClass('fpp-backup-action-loading');
-
-                $.get(requestUrl
-                ).done(function (data) {
-                    var options = "";
-
-                    for (var i = 0; i < data.length; i++) {
-                        var desc = data[i].name;
-                        if (data[i].vendor != '')
-                            desc += ' - ' + data[i].vendor;
-
-                        if (data[i].model != '') {
-                            if (data[i].vendor != '')
-                                desc += ' ';
-                            else
-                                desc += ' - ';
-
-                            desc += data[i].model;
-                        }
-
-                        desc += ' - ' + data[i].size + 'GB';
-                        options += "<option value='" + data[i].name + "'>" + desc + "</option>";
-                    }
-                    //Populate the dropdown with the detected storage devices
-                    $('#backup\\.RemoteStorage').html(default_none_selected_option + options);
-
-                    //Remove the loading spinner
-                    $('#backup\\.RemoteStorage').parent().closest('td').removeClass('fpp-backup-action-loading');
-
-                    if (options !== "") {
-                        //After populating the list, Get the currently set remote host storage device
-                        GetBackupRemoteStorageDevice();
-                    }
-                }).fail(function () {
-                    $('#backup\\.RemoteStorage').html(default_none_selected_option);
-                });
             }
 
             //Save the selected remote backup storage device selection to settings
