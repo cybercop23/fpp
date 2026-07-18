@@ -11,7 +11,9 @@ then
     exit
 fi
 
-teeOutput
+# Unified upgrade logging -> logs/fpp_system_upgrades.log (a version checkout is an
+# upgrade path; it ends in a rebuild).
+startUpgradeLog "fpp-version-checkout" "$1"
 
 VERS=$1
 

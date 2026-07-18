@@ -5,7 +5,18 @@ BINDIR=$(cd $(dirname $0) && pwd)
 . ${BINDIR}/common
 . ${BINDIR}/functions
 
-logOutput
+# Deliberately NOT logged to a file of its own (was: logOutput -> git_fetch.log).
+# This is the background poll behind the pending-changes panel -- it re-runs on
+# page views (api/git/originLog from about.php; 174 runs on a single dev box) and
+# its per-submodule "Entering '<path>'" output dominated the file. That log had
+# no readers: the callers in www/api/controllers/git.php discard our output
+# (`exec(...); unset($log);`), and ZipLogs excluded git_fetch.log from the Support
+# Zip as noise -- so nobody, including support, ever read it. The one line in it
+# worth having is the "github unreachable" case below, which is now breadcrumbed
+# into the fppd.log timeline (and therefore into the Support Zip) on state change.
+#
+# The fetch that matters during an actual upgrade is NOT this script: git_pull
+# runs its own `git fetch` inline, and that output is captured in fpp_system_upgrades.log.
 
 # Ensure newfeatures remote exists
 cd ${FPPDIR}
@@ -30,7 +41,29 @@ if curl --silent --head https://github.com | grep -i "Content-Type: text/html; c
 		runGitLocked "cd ${FPPDIR} && sudo -u ${FPPUSER} git fetch -p -P && sudo -u ${FPPUSER} git submodule foreach git fetch -p -P"
 	fi
 
+	# Reachable again: only say so if we previously said it was not.
+	if [ -f "${MEDIADIR}/tmp/git_fetch_unreachable" ]
+	then
+		rm -f "${MEDIADIR}/tmp/git_fetch_unreachable"
+		fppdLogLine "Upgrade" "github reachable again, update checks working"
+	fi
 else
 	echo "Can not access github, unable to fetch git updates"
+	# Breadcrumb into the fppd.log timeline: this is the answer to the most common
+	# "why does my box say there are no updates?" question, and it is the only
+	# part of this script's output anyone ever needed.
+	#
+	# STATE CHANGES ONLY, via a marker file. This runs on page views (174 times on
+	# a single dev box), so logging every failure would add a line per page refresh
+	# for as long as github is down -- the same noise that made the old
+	# git_fetch.log worthless. Two lines per outage (down, then recovered) is the
+	# signal. The marker lives in tmp/, cleared on boot, so a reboot re-states the
+	# condition once -- correct, since it is news again after a restart.
+	if [ ! -f "${MEDIADIR}/tmp/git_fetch_unreachable" ]
+	then
+		mkdir -p "${MEDIADIR}/tmp" 2>/dev/null
+		touch "${MEDIADIR}/tmp/git_fetch_unreachable" 2>/dev/null
+		fppdLogLine "Upgrade" "github unreachable, cannot check for updates"
+	fi
 fi
 

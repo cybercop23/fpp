@@ -1,6 +1,112 @@
 // Global storage for file data to calculate total sizes
 var fileData = {};
 
+// Logs tab ordering: FPP's own logs first, third-party plugin logs after.
+//
+// This is deliberately a VIEW concern, solved in the view. The alternative --
+// relocating plugin logs to a subdirectory, or moving FPP's logs to a new one --
+// would touch ~19 files that hardcode media/logs, both logrotate configs,
+// rsyncd.conf, apache2.site, the SD image builders, and invalidate the 22
+// warning-helper pages that tell users to look at fppd.log. All to change the
+// order of one table.
+//
+// Ours is an allowlist rather than a pattern because plugin log names have no
+// pattern to match: they are chosen by third-party authors and look like
+// pulsemesh-connector.log, remote-falcon-listener.log, fpp-sms-control-too.log.
+// Worse, fpp-plugin-AdvancedStats.log and fpp_system_upgrades.log differ only by a
+// hyphen vs an underscore. FPP's own set, by contrast, is finite and known -- so
+// we name ours and let everything else sort below. That fails safe: a log we
+// forget to list just appears at the bottom.
+//
+// Only the logs FPP still WRITES are listed. The superseded ones (git_pull.log,
+// fppd_stop.log, plugin.log, install_plugin.log, ...) linger on a box that
+// upgraded into this version but are dead the moment it does, so letting them
+// sink to the bottom is right -- what belongs at the top is what is still being
+// written. This list is short only because the logs were consolidated into it.
+//
+// ORDER MATTERS: this array IS the display order for the group (see
+// SortLogFiles), which is why apache lives here too rather than in a tier of its
+// own -- it wants to sort above FPP's logs, and one ordered list expresses that
+// without a second tier or a prefix match. All three apache names are ones FPP
+// itself configures (etc/apache2.site, SD/FPP_Install.sh), so they are known and
+// finite, not a pattern to guess at.
+var FPP_OWN_LOGS = [
+	'apache2-access.log', // webserver
+	'apache2-base-error.log',
+	'apache2-error.log',
+	'fppd.log', // the timeline: fppd, init/boot, lifecycle, breadcrumbs
+	'fpp_system_upgrades.log', // FPP + fppos upgrades
+	'fpp_plugin_manager.log', // plugin install/upgrade/uninstall
+	'fpp_backup_filecopy.log' // transient: exists only during a backup
+];
+
+// logrotate leaves fppd.log.1 and fppd.log.2.gz next to fppd.log; those are the
+// same log and belong in the same group, so compare on the base name.
+function LogBaseName (name) {
+	return name.replace(/\.gz$/, '').replace(/\.\d+$/, '');
+}
+
+// How far back a rotation is: the live log (no numeric suffix) is -1 so it sorts
+// above its own history, then .1, .2.gz, ... in age order. Without this every
+// variant shares one FPP_OWN_LOGS index, the comparator returns 0, and they fall
+// back to the API's arbitrary order -- which put fppd.log BELOW fppd.log.1 and
+// fppd.log.2.gz, i.e. the live log buried under its own rotated copies.
+function LogRotationAge (name) {
+	var m = name.replace(/\.gz$/, '').match(/\.(\d+)$/);
+	return m ? parseInt(m[1], 10) : -1;
+}
+
+// Three tiers, in the order you want to read them:
+//   0 = FPP_OWN_LOGS -- apache then FPP's own, in that array's order
+//   1 = syslog       -- /var/log/syslog|messages, which the API appends as an
+//                       absolute path. Still useful, so above the third-party
+//                       noise, but below everything FPP owns.
+//   2 = third-party  -- plugin runtime logs and anything unrecognised. The
+//                       fallback, so an unknown name sinks rather than
+//                       displacing FPP's logs at the top.
+var LOG_TIER_FPP = 0;
+var LOG_TIER_SYSLOG = 1;
+var LOG_TIER_PLUGIN = 2;
+
+function LogTier (name) {
+	var base = LogBaseName(name);
+	if (FPP_OWN_LOGS.indexOf(base) !== -1) {
+		return LOG_TIER_FPP;
+	}
+	if (base.charAt(0) === '/') {
+		return LOG_TIER_SYSLOG;
+	}
+	return LOG_TIER_PLUGIN;
+}
+
+function IsFppOwnLog (name) {
+	return LogTier(name) === LOG_TIER_FPP;
+}
+
+// Within FPP's own tier, order by FPP_OWN_LOGS rather than alphabetically, so
+// fppd.log -- the timeline, and the one people actually open -- is first instead
+// of being sorted under fpp_plugin_manager.log. Other tiers are alphabetical.
+// Clicking a column header still re-sorts normally; this only sets the default.
+function SortLogFiles (files) {
+	return files.sort(function (a, b) {
+		var at = LogTier(a.name);
+		var bt = LogTier(b.name);
+		if (at !== bt) {
+			return at - bt;
+		}
+		var ab = LogBaseName(a.name);
+		var bb = LogBaseName(b.name);
+		if (ab !== bb) {
+			// Different logs: FPP's by list order, everything else alphabetical.
+			return at === LOG_TIER_FPP
+				? FPP_OWN_LOGS.indexOf(ab) - FPP_OWN_LOGS.indexOf(bb)
+				: ab.localeCompare(bb);
+		}
+		// Same log: live copy first, then its rotations oldest-last.
+		return LogRotationAge(a.name) - LogRotationAge(b.name);
+	});
+}
+
 function GetFiles (dir, extraParams) {
 	$.ajax({
 		dataType: 'json',
@@ -10,6 +116,12 @@ function GetFiles (dir, extraParams) {
 
 			// Store file data globally
 			fileData[dir] = data.files;
+
+			// FPP's own logs first, third-party plugin logs after. See
+			// SortLogFiles above for why this lives here and not on disk.
+			if (dir == 'Logs') {
+				SortLogFiles(data.files);
+			}
 
 			if (data.files.length > 0) {
 				$('#tbl' + dir)

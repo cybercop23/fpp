@@ -1,5 +1,4 @@
 #!/usr/bin/bash
-LOGFILE="/home/fpp/media/logs/start_kiosk.log"
 SETTINGS_FILE="/home/fpp/media/settings"
 XORG_FILE="/usr/share/X11/xorg.conf.d/40-libinput.conf"
 IDENTIFIER='Identifier "libinput touchscreen catchall"'
@@ -25,10 +24,10 @@ fi
 # primary, restoring the pre-Trixie behaviour where HDMI/DSI installs just work.
 KIOSK_OUTPUT=$(xrandr 2>/dev/null | awk '$2=="connected" && $1 !~ /^DPI/ {print $1; exit}')
 if [ -n "$KIOSK_OUTPUT" ]; then
-    echo "$(date) Using $KIOSK_OUTPUT as the kiosk display" >> "$LOGFILE"
+    fppdLogLine "Kiosk" "Using $KIOSK_OUTPUT as the kiosk display"
     xrandr --output "$KIOSK_OUTPUT" --auto --primary
 else
-    echo "$(date) WARNING: no non-DPI connected output found; leaving X default display" >> "$LOGFILE"
+    fppdLogLine "Kiosk" "WARNING: no non-DPI connected output found; leaving X default display"
 fi
 
 # Determine which chromium binary is available (Trixie+ uses 'chromium', older uses 'chromium-browser')
@@ -37,7 +36,7 @@ if command -v chromium > /dev/null 2>&1; then
 elif command -v chromium-browser > /dev/null 2>&1; then
     CHROMIUM_BIN="chromium-browser"
 else
-    echo "$(date) ERROR: Neither chromium nor chromium-browser found" >> "$LOGFILE"
+    fppdLogLine "Kiosk" "ERROR: Neither chromium nor chromium-browser found"
     exit 1
 fi
 
@@ -50,24 +49,24 @@ sed -i 's/"exited_cleanly":false/"exited_cleanly":true/; s/"exit_type":"[^"]\+"/
 # Rotate screen only if rotatescreen = "1"
 # Guard: Check to see if rotate screen disabled
 if ! grep -qE '^[[:space:]]*KioskRotate[[:space:]]*=[[:space:]]*"1"' "$SETTINGS_FILE"; then
-    echo "$(date) Rotate screen disabled – leaving display normal" >> "$LOGFILE"
+    fppdLogLine "Kiosk" "Rotate screen disabled – leaving display normal"
     $CHROMIUM_BIN --disable-infobars --kiosk 'http://localhost/'
     exit 0
 fi
 
-echo "$(date) Rotate screen is enabled" >> "$LOGFILE"
+fppdLogLine "Kiosk" "Rotate screen is enabled"
 
 # Guard: checks to see if TransformationMatrix already exists in the file, if not there then add it
 if sed -n "/$IDENTIFIER/,/EndSection/ {
         /Option[[:space:]]\+\"$OPTION_KEY\"/p
     }" "$XORG_FILE" | grep -q .; then
-    echo "$(date) TransformationMatrix already present – no changes to file made" >> "$LOGFILE"
+    fppdLogLine "Kiosk" "TransformationMatrix already present – no changes to file made"
     xrandr --output DSI-1 --mode 720x1280 --rate 60 --rotate right
     $CHROMIUM_BIN --disable-infobars --kiosk 'http://localhost/'
     exit 0
 else
 
-echo "$(date) Begin of touchscreen file edit" >> "$LOGFILE"
+fppdLogLine "Kiosk" "Begin of touchscreen file edit"
 #sudo sed -i '/Identifier "libinput touchscreen catchall"/,/EndSection/{
 #    /EndSection/i\        Option "TransformationMatrix" "0 1 0 -1 0 1 0 0 1"
 #}' /usr/share/X11/xorg.conf.d/40-libinput.conf
@@ -80,5 +79,5 @@ fi
 
 # Rotate display then launch Chromium
 xrandr --output DSI-1 --mode 720x1280 --rate 60 --rotate right
-echo "$(date) Last Launch Chromium Section after ediing touchscreen file" >> "$LOGFILE"
+fppdLogLine "Kiosk" "Last Launch Chromium Section after ediing touchscreen file"
 $CHROMIUM_BIN --disable-infobars --kiosk 'http://localhost/'

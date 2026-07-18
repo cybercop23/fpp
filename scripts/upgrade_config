@@ -4,8 +4,13 @@ BINDIR=$(cd $(dirname $0) && pwd)
 
 . ${BINDIR}/common
 
+# Unified upgrade logging -> logs/fpp_system_upgrades.log. Usually reached as a nested
+# step of git_pull / git_branch / upgrade_FPP, whose tee is already installed; the
+# FPP_OPLOG_ACTIVE guard in startOpLog keeps this from stacking a second one.
+# -notee (passed by SD/FPP_Install.sh at install time, when there is no parent op
+# and the media/logs tree may not exist yet) still opts out of logging entirely.
 if [ "$1" != "-notee" ]; then
-    teeOutput
+    startUpgradeLog "fpp-config-upgrade" "${FPPVERSION}"
 fi
 
 echo "Checking config version"

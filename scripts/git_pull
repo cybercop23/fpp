@@ -5,15 +5,20 @@ BINDIR=$(cd $(dirname $0) && pwd)
 . ${BINDIR}/common
 . ${BINDIR}/functions
 
-teeOutput
-
 # Ensure git's "dubious ownership" guard doesn't trip when running git as
 # root via sudo against /opt/fpp (owned by fpp:fpp). FPP_Install.sh sets
 # this system-wide already, but be defensive in case an old install is
 # missing it -- otherwise the very first git call below fails before we
 # get a chance to recover.
+# Kept ahead of startUpgradeLog so the branch lookup below cannot trip the same
+# guard; both lines are silenced anyway, so nothing is lost by not logging them.
 $SUDO git config --system --add safe.directory /opt/fpp 2>/dev/null || true
 $SUDO git config --system --add safe.directory '*' 2>/dev/null || true
+
+# Unified upgrade logging -> logs/fpp_system_upgrades.log. Labelling the run with the
+# branch is best-effort: a detached or unreadable checkout logs as "unknown"
+# rather than holding up the update.
+startUpgradeLog "fpp-update" "$(cd ${FPPDIR} 2>/dev/null && $SUDO git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 
 SOURCEIP=$(getSetting UpgradeSource)
 if [ "x${SOURCEIP}" == "x" ]; then

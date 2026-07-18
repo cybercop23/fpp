@@ -626,8 +626,8 @@
                                     <div class='form-actions'>
                                         <input onclick="ClearSelections('Logs');" class="buttons" type="button"
                                             value="Clear" />
-                                        <input onclick="DownloadZip('Logs');" class="buttons" type="button"
-                                            value="Zip" />
+                                        <input onclick="DownloadZip('Logs', this, 'Zipping…');" class="buttons"
+                                            type="button" value="Zip" />
                                         <input onclick="ButtonHandler('Logs', 'viewFile');"
                                             class="disableButtons noDirButton singleLogsButton" type="button"
                                             value="View" />

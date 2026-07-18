@@ -4,9 +4,13 @@
 // when installing/removing a plugin's declared package dependencies.
 require_once __DIR__ . '/../../common/packages.inc.php';
 
+// Shared operation logging (OpLog), the PHP half of scripts/common's startOpLog.
+require_once __DIR__ . '/../../common/oplog.inc.php';
+
 /**
- * Appends lines to the shared logs/plugin.log in the same syslog-style format
- * scripts/common's startPluginLog() writes: "<date time> [<op> <plugin>] <line>".
+ * Appends lines to the shared logs/fpp_plugin_manager.log in the same
+ * syslog-style format scripts/common's startPluginLog() writes:
+ * "<date time> [<op> <plugin>] <line>".
  *
  * The wrapper scripts log what they *ran*; this logs what the Plugin Manager
  * *decided*. Without it the decisions that never reach a script leave no trace
@@ -15,43 +19,31 @@ require_once __DIR__ . '/../../common/packages.inc.php';
  * Worse, a dependency failure aborts *after* a successful clone and deletes the
  * partial install (CleanupPartialPluginInstall) -- leaving a clean
  * "install FINISH (rc=0)" block in the log for a plugin no longer on disk.
- *
- * Safe to interleave with the scripts' own tee: each call is a single
- * line-sized O_APPEND write (LOCK_EX), and Apache runs as the same user that
- * owns the log (fpp), so no privilege escalation is needed. Best-effort by
- * design -- logging must never break an install, so failures are swallowed.
  */
 function PluginLog($op, $plugin, $msg)
 {
-	global $logDirectory;
+	OpLog('fpp_plugin_manager.log', $op, $plugin, $msg);
+}
 
-	$dir = isset($logDirectory) && $logDirectory != '' ? $logDirectory : '/home/fpp/media/logs';
-	$stamp = date('Y-m-d H:i:s') . ' [' . $op . ' ' . $plugin . '] ';
-	$out = '';
-	// The echoed messages are wrapped in blank lines for readability in the
-	// progress dialog; those carry no meaning in a timestamped log, so skip them
-	// rather than emit bare-prefix lines.
-	foreach (explode("\n", trim($msg, "\n")) as $line) {
-		if (trim($line) !== '') {
-			$out .= $stamp . $line . "\n";
-		}
-	}
-	if ($out !== '') {
-		@file_put_contents($dir . '/plugin.log', $out, FILE_APPEND | LOCK_EX);
-	}
+// True when the caller asked for streamed progress output (?stream=...).
+function PluginStreaming($stream)
+{
+	return isset($stream) && $stream != "false";
 }
 
 /**
- * Echo a message to the caller (the streaming progress dialog) exactly as
- * before AND record it in plugin.log. Echo behaviour is deliberately unchanged
- * -- including the fact that in NON-streaming mode these echoes still land in
- * the HTTP body ahead of the JSON response. That is a real, pre-existing wart
- * (it makes those responses unparseable as strict JSON) but it is a separate
- * bug from logging; fixing it here would silently change the API's output.
+ * Echo a message to the caller's streaming progress dialog AND record it in
+ * fpp_plugin_manager.log. The echo happens ONLY when streaming: a non-streaming
+ * caller gets a JSON body, and echoing into it produced output like
+ * "Installed plugin 'X'.\n{"Status":"OK"}" -- unparseable as strict JSON.
+ * The log write is unconditional; it is what makes a silent install failure
+ * diagnosable, so it must never depend on how the caller asked for output.
  */
-function PluginEchoLog($op, $plugin, $msg)
+function PluginEchoLog($op, $plugin, $msg, $stream)
 {
-	echo $msg;
+	if (PluginStreaming($stream)) {
+		echo $msg;
+	}
 	PluginLog($op, $plugin, $msg);
 }
 
@@ -147,7 +139,7 @@ function InstallPlugin()
 	}
 
 	$stream = isset($_REQUEST['stream']) ? $_REQUEST['stream'] : null;
-	$streaming = (isset($stream) && $stream != "false");
+	$streaming = PluginStreaming($stream);
 	$plugin = escapeshellcmd($pluginInfo['repoName']);
 
 	if (file_exists($settings['pluginDirectory'] . '/' . $plugin)) {
@@ -189,11 +181,11 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 {
 	global $settings, $fppDir, $SUDO;
 
-	$streaming = (isset($stream) && $stream != "false");
+	$streaming = PluginStreaming($stream);
 
 	if (!is_array($pluginInfo) || !isset($pluginInfo['repoName'])) {
 		// No repoName to tag the log line with -- that IS the error.
-		PluginEchoLog('install', 'unknown', "\nERROR: dependency plugin info missing repoName\n");
+		PluginEchoLog('install', 'unknown', "\nERROR: dependency plugin info missing repoName\n", $stream);
 		return false;
 	}
 	$repoName = $pluginInfo['repoName'];
@@ -206,13 +198,13 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 	$visited[$repoName] = true;
 
 	if ($depth > 8) {
-		PluginEchoLog('install', $repoName, "\nERROR: plugin dependency chain too deep at '$repoName'; aborting.\n");
+		PluginEchoLog('install', $repoName, "\nERROR: plugin dependency chain too deep at '$repoName'; aborting.\n", $stream);
 		return false;
 	}
 
 	// Already installed -> dependency is satisfied.
 	if (file_exists($settings['pluginDirectory'] . '/' . $plugin)) {
-		if ($depth > 0) {
+		if ($depth > 0 && $streaming) {
 			echo "\nDependency plugin '$plugin' is already installed.\n";
 		}
 		return true;
@@ -226,7 +218,7 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 	if (DepsRequirePackages(isset($pluginInfo['dependencies']) ? $pluginInfo['dependencies'] : null) && !AptAvailable()) {
 		$pkgs = implode(', ', $pluginInfo['dependencies']['packages']);
 		$plat = isset($settings['Platform']) ? $settings['Platform'] : 'this platform';
-		PluginEchoLog('install', $repoName, "\nERROR: '$repoName' requires system packages ($pkgs) but $plat does not support system packages. Refusing to install.\n");
+		PluginEchoLog('install', $repoName, "\nERROR: '$repoName' requires system packages ($pkgs) but $plat does not support system packages. Refusing to install.\n", $stream);
 		return false;
 	}
 
@@ -242,7 +234,7 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 	if ($injectedURL !== false) {
 		$srcURL = $injectedURL;
 	} else if ($useCredentials) {
-		PluginEchoLog('install', $repoName, "\nERROR: Use Credentials was selected but GitHub user name and/or Personal Access Token are not configured on the Developer settings page.\n");
+		PluginEchoLog('install', $repoName, "\nERROR: Use Credentials was selected but GitHub user name and/or Personal Access Token are not configured on the Developer settings page.\n", $stream);
 		return false;
 	}
 
@@ -258,7 +250,7 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 		unset($o);
 	}
 	if ($return_val != 0) {
-		PluginEchoLog('install', $repoName, "\nERROR: failed to clone plugin '$plugin'.\n");
+		PluginEchoLog('install', $repoName, "\nERROR: failed to clone plugin '$plugin'.\n", $stream);
 		return false;
 	}
 
@@ -289,7 +281,7 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 		// Logged, not just echoed: the clone above already wrote its own
 		// "install FINISH (rc=0)" block, so without this the log would show a
 		// clean install for a plugin this line is about to delete.
-		PluginEchoLog('install', $repoName, "\nERROR: '$repoName' requires system packages ($pkgs) but $plat does not support system packages. Refusing to install.\nRemoving the partial install of '$plugin'.\n");
+		PluginEchoLog('install', $repoName, "\nERROR: '$repoName' requires system packages ($pkgs) but $plat does not support system packages. Refusing to install.\nRemoving the partial install of '$plugin'.\n", $stream);
 		CleanupPartialPluginInstall($plugin);
 		return false;
 	}
@@ -312,7 +304,7 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 		if (!ResolvePluginDependencies($deps, $repoName, $visited, $stream, $depth)) {
 			// Same trap as the package gate above: the clone's own rc=0 block is
 			// already in the log, and the cleanup below removes the plugin. Say so.
-			PluginEchoLog('install', $repoName, "\nERROR: refusing to complete install of '$plugin' -- a required dependency could not be installed.\nRemoving the partial install of '$plugin'.\n");
+			PluginEchoLog('install', $repoName, "\nERROR: refusing to complete install of '$plugin' -- a required dependency could not be installed.\nRemoving the partial install of '$plugin'.\n", $stream);
 			CleanupPartialPluginInstall($plugin, $linkName);
 			return false;
 		}
@@ -323,7 +315,7 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 	// install_plugin now that they are. That wrapper owns the mode normalization,
 	// the scripts/ -> repo-root resolution and the FPPDIR/SRCDIR invocation, so
 	// this phase runs identically to a non-deferred install -- and, because it goes
-	// through startPluginLog, its output lands in logs/plugin.log instead of only
+	// through startPluginLog, its output lands in logs/fpp_plugin_manager.log instead of only
 	// streaming to the browser dialog (a plugin script can build/fetch for minutes).
 	$runCmd = $envPrefix . escapeshellarg($fppDir . '/scripts/install_plugin')
 		. ' --run-install-script ' . escapeshellarg($plugin);
@@ -336,7 +328,7 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 
 	// The only statement that the operation as a whole succeeded -- the wrapper
 	// scripts only ever report on their own phase.
-	PluginEchoLog('install', $repoName, "\nInstalled plugin '$plugin'.\n");
+	PluginEchoLog('install', $repoName, "\nInstalled plugin '$plugin'.\n", $stream);
 	return true;
 }
 
@@ -351,13 +343,15 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth)
 {
 	global $settings, $fppDir, $SUDO;
-	$streaming = (isset($stream) && $stream != "false");
+	$streaming = PluginStreaming($stream);
 	$ok = true;
 
 	// --- packages (apt) ---
 	if (isset($deps['packages']) && is_array($deps['packages']) && count($deps['packages'])) {
-		echo "\n=== Installing package dependencies for $ownerRepo ===\n";
-		flush();
+		if ($streaming) {
+			echo "\n=== Installing package dependencies for $ownerRepo ===\n";
+			flush();
+		}
 		// Refresh package lists once for the whole batch.
 		AptGetUpdate();
 		foreach ($deps['packages'] as $pkg) {
@@ -378,22 +372,26 @@ function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth
 
 	// --- scripts (script repository "Category/file") ---
 	if (isset($deps['scripts']) && is_array($deps['scripts']) && count($deps['scripts'])) {
-		echo "\n=== Installing script dependencies for $ownerRepo ===\n";
-		flush();
+		if ($streaming) {
+			echo "\n=== Installing script dependencies for $ownerRepo ===\n";
+			flush();
+		}
 		foreach ($deps['scripts'] as $entry) {
 			if (!is_string($entry) || strpos($entry, '/') === false) {
 				// A declared dependency silently not satisfied -- same class as the
 				// unresolvable-dependency-plugin case below, so log it too.
-				PluginEchoLog('install', $ownerRepo, "\nSkipping malformed script dependency '$entry' (expected 'Category/file').\n");
+				PluginEchoLog('install', $ownerRepo, "\nSkipping malformed script dependency '$entry' (expected 'Category/file').\n", $stream);
 				continue;
 			}
 			list($category, $file) = explode('/', $entry, 2);
 			if (!preg_match('#^[A-Za-z0-9._ -]+$#', $category) || !preg_match('#^[A-Za-z0-9._ /-]+$#', $file)) {
-				PluginEchoLog('install', $ownerRepo, "\nSkipping script dependency with unsafe characters: '$entry'.\n");
+				PluginEchoLog('install', $ownerRepo, "\nSkipping script dependency with unsafe characters: '$entry'.\n", $stream);
 				continue;
 			}
-			echo "\nInstalling script '$entry'...\n";
-			flush();
+			if ($streaming) {
+				echo "\nInstalling script '$entry'...\n";
+				flush();
+			}
 			$cmd = $SUDO . " $fppDir/scripts/installScript " . escapeshellarg($category) . " " . escapeshellarg($file);
 			if ($streaming) {
 				system($cmd);
@@ -406,8 +404,10 @@ function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth
 
 	// --- dependency plugins (transitive) ---
 	if (isset($deps['plugins']) && is_array($deps['plugins']) && count($deps['plugins'])) {
-		echo "\n=== Installing plugin dependencies for $ownerRepo ===\n";
-		flush();
+		if ($streaming) {
+			echo "\n=== Installing plugin dependencies for $ownerRepo ===\n";
+			flush();
+		}
 		foreach ($deps['plugins'] as $depName) {
 			if (!is_string($depName) || $depName === '') {
 				continue;
@@ -416,13 +416,15 @@ function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth
 				continue;
 			}
 			if (file_exists($settings['pluginDirectory'] . '/' . escapeshellcmd($depName))) {
-				echo "\nDependency plugin '$depName' is already installed.\n";
+				if ($streaming) {
+					echo "\nDependency plugin '$depName' is already installed.\n";
+				}
 				$visited[$depName] = true;
 				continue;
 			}
 			$depInfo = ResolvePluginInfoByName($depName);
 			if ($depInfo === null) {
-				PluginEchoLog('install', $ownerRepo, "\nERROR: could not resolve dependency plugin '$depName' from pluginList.json (skipping).\n");
+				PluginEchoLog('install', $ownerRepo, "\nERROR: could not resolve dependency plugin '$depName' from pluginList.json (skipping).\n", $stream);
 				continue;
 			}
 			$ver = SelectPluginVersion($depInfo);
@@ -431,7 +433,7 @@ function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth
 				$depInfo['sha'] = $ver['sha'];
 			}
 			if (!InstallPluginFromInfo($depInfo, $visited, $stream, $depth + 1)) {
-				PluginEchoLog('install', $ownerRepo, "\nERROR: dependency plugin '$depName' could not be installed.\n");
+				PluginEchoLog('install', $ownerRepo, "\nERROR: dependency plugin '$depName' could not be installed.\n", $stream);
 				$ok = false;
 			}
 		}
@@ -606,6 +608,54 @@ function GetPluginInfo()
 }
 
 /**
+ * Serve plugin icon
+ *
+ * Serves the plugin icon. First checks for a local icon.png in the plugin
+ * directory. If not found, checks the plugin's pluginInfo.json for an
+ * iconURL field and proxies it (same-origin, avoids CSP restrictions on
+ * external image hosts).
+ *
+ * @route GET /api/plugin/{RepoName}/icon
+ * @response 200 PNG image data
+ * @response 404 No icon available
+ */
+function PluginServeIcon()
+{
+	global $settings;
+	$plugin = params('RepoName');
+	$pluginDir = $settings['pluginDirectory'] . '/' . $plugin;
+
+	// Check for local icon.png
+	$file = $pluginDir . '/icon.png';
+	if (file_exists($file)) {
+		header('Content-Type: image/png');
+		header('Cache-Control: public, max-age=86400');
+		ob_clean();
+		flush();
+		readfile($file);
+		exit;
+	}
+
+	// Check pluginInfo.json for iconURL and proxy it
+	$infoFile = $pluginDir . '/pluginInfo.json';
+	if (file_exists($infoFile)) {
+		$info = json_decode(file_get_contents($infoFile), true);
+		if (!empty($info['iconURL'])) {
+			$ctx = stream_context_create(['http' => ['timeout' => 10, 'follow_location' => 1, 'user_agent' => 'FPP']]);
+			$data = @file_get_contents($info['iconURL'], false, $ctx);
+			if ($data !== false) {
+				header('Content-Type: image/png');
+				header('Cache-Control: public, max-age=86400');
+				echo $data;
+				exit;
+			}
+		}
+	}
+
+	http_response_code(404);
+}
+
+/**
  * Uninstall plugin
  *
  * Uninstall plugin {RepoName}.
@@ -734,7 +784,7 @@ function UpgradePlugin()
 	// post-pull script (fpp_upgrade.sh, else fpp_install.sh -- for plugins
 	// whose artifacts live outside git, e.g. prebuilt release binaries) all run
 	// in scripts/upgrade_plugin. Like install_plugin / uninstall_plugin, that
-	// wrapper logs (via startPluginLog) to the shared logs/plugin.log, so a
+	// wrapper logs (via startPluginLog) to the shared logs/fpp_plugin_manager.log, so a
 	// failed upgrade is diagnosable from the log viewer / Support Zip instead of
 	// the git-pull output vanishing. PLUGINDIR/SUDO are exported to match the values PHP
 	// uses (the same way UninstallPlugin invokes uninstall_plugin).
@@ -1030,6 +1080,52 @@ function GetPluginPopularity()
 		}
 	}
 	return json(array('period' => PLUGIN_POPULARITY_PERIOD, 'counts' => new stdClass(), 'source' => 'unavailable'));
+}
+
+/**
+ * Proxy-fetch a plugin icon image
+ *
+ * Fetches an image from an external URL and serves it with the correct
+ * content-type. Used to bypass CSP restrictions that block loading
+ * images from external hosts (e.g. raw.githubusercontent.com) directly
+ * in `<img>` tags.
+ *
+ * @route GET /api/plugin/fetchImage?url=...
+ * @response 200 Image data
+ * @response 400 Missing or invalid URL
+ */
+function PluginFetchImage()
+{
+	$url = isset($_GET['url']) ? $_GET['url'] : '';
+	if ($url === '' || !preg_match('#^https?://#i', $url)) {
+		http_response_code(400);
+		echo 'Missing or invalid url parameter';
+		exit;
+	}
+
+	$ctx = stream_context_create(['http' => ['timeout' => 10, 'follow_location' => 1, 'user_agent' => 'FPP']]);
+	$data = @file_get_contents($url, false, $ctx);
+	if ($data === false) {
+		http_response_code(404);
+		exit;
+	}
+
+	// Determine content type from the URL extension
+	$ext = strtolower(pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_EXTENSION));
+	switch ($ext) {
+		case 'png':  $ct = 'image/png'; break;
+		case 'jpg':
+		case 'jpeg': $ct = 'image/jpeg'; break;
+		case 'gif':  $ct = 'image/gif'; break;
+		case 'svg':  $ct = 'image/svg+xml'; break;
+		case 'webp': $ct = 'image/webp'; break;
+		default:     $ct = 'image/png';
+	}
+
+	header('Content-Type: ' . $ct);
+	header('Cache-Control: public, max-age=86400');
+	echo $data;
+	exit;
 }
 
 function FetchPluginInfoProxy()

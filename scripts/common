@@ -115,6 +115,43 @@ makeLogDir() {
 	fi
 }
 
+# ensureLogFile <path>
+#   Create <path> if needed and make sure ${FPPUSER} owns it.
+#
+#   Load-bearing, not hygiene. The logs are written by BOTH halves of an
+#   operation: the shell wrappers (run via sudo from the web UI, i.e. as root)
+#   and the PHP driver (Apache, i.e. as ${FPPUSER}) -- see www/common/oplog.inc.php.
+#   Whichever half touches the file first creates it and owns it, so when root
+#   got there first the file landed root:root 0644 and every subsequent PHP line
+#   was rejected. PHP's writes are @-suppressed best-effort, so that failure was
+#   SILENT: exactly the decisions the PHP half exists to record (the plugin
+#   install gates, the OS upgrade download/verify) vanished with no error
+#   anywhere. Root can always write regardless of owner, so normalising to
+#   ${FPPUSER} is what makes both halves work.
+#
+#   Best-effort: a chown we are not entitled to do just fails and is ignored (as
+#   ${FPPUSER} the file is already ours; that is the case we need).
+ensureLogFile() {
+	if [ ! -f "$1" ]
+	then
+		touch "$1" 2>/dev/null
+	fi
+	chown ${FPPUSER}:${FPPGROUP} "$1" 2>/dev/null
+	chmod 664 "$1" 2>/dev/null
+	return 0
+}
+
+# logOutput
+#   REDIRECTS stdout+stderr into ${LOGDIR}/$(basename $0).log -- one log file per
+#   script, and nothing on the caller's stdout. Unlike teeOutput below it does not
+#   tee, which is why it guards on a tty: it would otherwise swallow an
+#   interactive user's output entirely.
+#
+#   No longer used by FPP itself: fppd_start/stop/restart now write into fppd.log
+#   via startDaemonLog, the upgrade/plugin operations share an attributable log via
+#   startOpLog, and git_fetch dropped it (both callers discard its output). Kept
+#   for the same reason as teeOutput -- plugin scripts source this file and may
+#   still call it. Do not delete without checking the plugin ecosystem.
 logOutput() {
 	MYTTY=$(tty)
 	if [ "x${MYTTY}" = "x/dev/console" -o "x${MYTTY}" = "x" -o "x${MYTTY}" = "xnot a tty" ]
@@ -128,6 +165,11 @@ logOutput() {
 	fi
 }
 
+# teeOutput
+#   Streams output to the caller AND appends a copy to ${LOGDIR}/$(basename $0).log,
+#   i.e. one log file per script. No longer used by FPP itself -- the operations
+#   that used it now share a single attributable log via startOpLog below -- but
+#   kept because plugin scripts source this file and may still call it.
 teeOutput() {
 	MYTTY=$(tty)
 	if [ "x${MYTTY}" = "x/dev/console" -o "x${MYTTY}" = "x" -o "x${MYTTY}" = "xnot a tty" ]
@@ -142,34 +184,169 @@ teeOutput() {
 	fi
 }
 
-# startPluginLog <operation> <pluginName>
-#   Shared logging for the plugin install / uninstall / upgrade wrappers. The
-#   operation's combined stdout+stderr is streamed to the caller UNCHANGED (so
-#   the streaming web progress dialog -- and its logStage/ParseLastStageMarker
-#   parsing -- keeps working), while a SECOND, syslog-style copy is appended to
-#   ${LOGDIR}/plugin.log with every line prefixed "<date time> [<op> <plugin>]".
-#   The per-line prefix means that operations running concurrently (which can
-#   interleave in the single shared file) stay individually attributable. The
-#   run is bracketed with START / FINISH (with exit code) markers via an EXIT
-#   trap, so every exit path -- including early `exit 1` on failure -- is logged.
-#   No-op (plain stdout, no log) when invoked from a real interactive tty.
+# fppdLogLine <facility> <message...>
+#   Append ONE line to logs/fppd.log in fppd's own line shape. This is the
+#   breadcrumb writer: fppd.log is the timeline/spine ("something happened at
+#   10:28, and fppd restarted right after"), the per-operation logs hold the
+#   detail. A breadcrumb therefore names the log to go read, so nobody has to
+#   know which of the log files a given operation writes to.
+#
+#   Direct append, independent of stdout: callers are usually inside startOpLog,
+#   whose stdout is already redirected into the OP log -- an echo there would
+#   land in the wrong file. It also has to work from an EXIT trap, where stdout
+#   may already be gone.
+fppdLogLine() {
+	local __fac="$1"
+	shift
+	local __now=${EPOCHREALTIME}
+	local __usec=${__now#*.}
+	makeLogDir
+	ensureLogFile "${LOGDIR}/fppd.log"
+	printf '%(%Y-%m-%d %H:%M:%S)T.%s %s(%s) [%s] %s\n' "${__now%.*}" "${__usec:0:3}" \
+		"$(basename $0)" "$$" "${__fac}" "$*" >> "${LOGDIR}/fppd.log"
+}
+
+# startOpLog <operation> <target> <logFile> [<facility>]
+#   Shared logging for long-running operations driven from the web UI (plugin
+#   install/upgrade/uninstall, FPP upgrade, OS upgrade). The operation's combined
+#   stdout+stderr is streamed to the caller UNCHANGED (so the streaming web
+#   progress dialog -- and its logStage/ParseLastStageMarker parsing -- keeps
+#   working), while a SECOND, syslog-style copy is appended to ${LOGDIR}/<logFile>
+#   with every line prefixed "<date time> [<op> <target>]". The per-line prefix
+#   means that operations running concurrently (which can interleave in the single
+#   shared file) stay individually attributable. The run is bracketed with START /
+#   FINISH (with exit code) markers via an EXIT trap, so every exit path --
+#   including early `exit 1` on failure -- is logged.
 #
 #   Only tee's own stdout is left unprefixed (that is what reaches the browser);
-#   the copy piped into the prefixer loop is timestamped and lands in plugin.log.
+#   the copy piped into the prefixer loop is timestamped and lands in the log.
 #   printf '%(...)T' is a bash builtin, so the per-line timestamp forks nothing.
+#
+#   The prefixer appends per line rather than holding the log open for the whole
+#   operation: logrotate rotates by rename with no copytruncate and no signal, so
+#   a long-lived redirect follows the renamed inode -- the rest of the run then
+#   vanishes from the file support actually reads, and no fresh log appears until
+#   the next operation. Re-opening per line is what makes an op that straddles a
+#   rotation land in the right file, the same reason the PHP half appends per
+#   call (www/common/oplog.inc.php). These logs are low-rate (a slow git or apt
+#   operation), so the per-line open costs nothing that matters; fppd's own
+#   high-rate path deliberately does the opposite, see src/log.cpp.
+#
+#   Nesting: FPP_OPLOG_ACTIVE is exported once a tee is installed, so a script
+#   that invokes another op-logging script (upgrade_FPP -> upgrade_config) does
+#   not stack a second tee onto the same file -- the child's output already flows
+#   through the parent's, and a second one would duplicate every remaining line.
+#   The child still emits its START/FINISH markers (they travel down the parent's
+#   pipe and pick up the parent's prefix), which is what keeps a whole upgrade
+#   readable as one attributable run rather than several interleaved ones.
+#
+#   An interactive tty is deliberately NOT special-cased: an upgrade run by hand
+#   over SSH is logged exactly like one driven from the web UI. tee's own stdout
+#   still reaches the terminal, so the operator sees everything they saw before;
+#   the only cost is that stdout is now a pipe rather than a tty, so a child that
+#   probes isatty(3) (git progress meters, apt) drops colour/progress and buffers
+#   in blocks -- which is precisely how those children already behaved on the web
+#   path this same code has always taken. The alternative -- the run that is
+#   hardest to reconstruct afterwards being the one nobody recorded -- is worse.
+startOpLog() {
+	FPP_OP="$1"
+	FPP_OP_TARGET="$2"
+	FPP_OP_LOG="$3"
+	FPP_OP_FACILITY="${4:-Ops}"
+	if [ "x${FPP_OPLOG_ACTIVE}" = "x" ]
+	then
+		makeLogDir
+		ensureLogFile "${LOGDIR}/${FPP_OP_LOG}"
+
+		# Holds the log actually being written, not just a flag: a nested op's
+		# output flows through the PARENT's tee into the PARENT's file, so this
+		# is what the detail pointer below has to name.
+		export FPP_OPLOG_ACTIVE="${FPP_OP_LOG}"
+		exec > >(tee >(while IFS= read -r __line || [ -n "${__line}" ]; do printf '%(%Y-%m-%d %H:%M:%S)T [%s %s] %s\n' -1 "${FPP_OP}" "${FPP_OP_TARGET}" "${__line}" >> "${LOGDIR}/${FPP_OP_LOG}"; done))
+		exec 2>&1
+	fi
+	# Breadcrumbs into fppd.log, deliberately OUTSIDE the guard above so they fire
+	# even when this op is nested inside another: that gives a readable tree
+	# (fpp-upgrade START / fpp-config-upgrade START / ... FINISH / ... FINISH) for
+	# 2 lines.
+	FPP_OP_DETAIL="detail: logs/${FPP_OPLOG_ACTIVE}"
+	fppdLogLine "${FPP_OP_FACILITY}" "${FPP_OP} START: ${FPP_OP_TARGET} (${FPP_OP_DETAIL})"
+	echo "===== ${FPP_OP} START: ${FPP_OP_TARGET} ====="
+	trap '__rc=$?; echo "===== ${FPP_OP} FINISH: ${FPP_OP_TARGET} (rc=${__rc}) ====="; fppdLogLine "${FPP_OP_FACILITY}" "${FPP_OP} FINISH: ${FPP_OP_TARGET} (rc=${__rc}) (${FPP_OP_DETAIL})"' EXIT
+}
+
+# startPluginLog <operation> <pluginName>
+#   Plugin Manager operations -> logs/fpp_plugin_manager.log. Deliberately NOT
+#   named fpp_plugins.log: the logs a plugin writes for itself are already
+#   fpp-plugin-<Name>.log, and a name one underscore away from those would read
+#   as an aggregate of them rather than what it is -- the Plugin Manager's own
+#   install/upgrade/uninstall record.
+#   Facility "Plugin" is deliberate: it is one of fppd's own facilities
+#   (VB_PLUGIN, src/log.h), so a Plugin Manager breadcrumb and fppd's own plugin
+#   lines read as the same subsystem in the merged fppd.log.
 startPluginLog() {
-	PLUGIN_OP="$1"
-	PLUGIN_NAME="$2"
+	startOpLog "$1" "$2" "fpp_plugin_manager.log" "Plugin"
+}
+
+# startUpgradeLog <operation> <target>
+#   FPP-software and FPP OS upgrades -> logs/fpp_system_upgrades.log. Both kinds share
+#   one file on purpose: for support, "what happened when this user upgraded" is
+#   a single question, and the <op> prefix keeps the two apart within the file.
+startUpgradeLog() {
+	startOpLog "$1" "$2" "fpp_system_upgrades.log" "Upgrade"
+}
+
+# startDaemonLog [<facility>]
+#   Daemon-lifecycle scripts (fppd_start/fppd_stop/fppd_restart) -> logs/fppd.log,
+#   i.e. the SAME file fppd itself writes, so that "fppd was asked to stop, fppd
+#   shut down, fppd was started again" reads as one sequence instead of being
+#   split across three files that cannot be interleaved after the fact. Replaces
+#   logOutput for these scripts (same redirect semantics: the caller sees nothing,
+#   everything lands in the log).
+#
+#   Emits fppd's own line shape so the merged file stays uniform --
+#   "<date time.ms> <program>(<pid>) [<facility>] <line>" -- see LogWrite() in
+#   src/log.cpp. The program field is what makes a merged line attributable;
+#   fppd's [facility] slot is a subsystem-within-fppd (General/ChannelOut/...),
+#   NOT a program name, which is why the program gets its own field rather than
+#   reusing the brackets. Facility defaults to Startup for lifecycle events.
+#
+#   Concurrency: fppd is alive and logging its own shutdown while fppd_stop runs,
+#   so this genuinely races the daemon. Every line is a single O_APPEND write of
+#   one line, which the kernel keeps atomic below PIPE_BUF (4096) -- lines from
+#   the two writers interleave but never tear. Appending per line (rather than
+#   holding the log open) also means we follow a logrotate rename correctly, and
+#   it is what lets us write at all while fppd is down -- exactly the stop/start
+#   case. fppd's own high-rate path instead keeps a persistent FD and stat()s for
+#   an inode change once a second (src/log.cpp:75-99); both end up correct.
+#
+#   EPOCHREALTIME (bash 5) supplies real milliseconds -- seconds and ms are taken
+#   from the same read so they cannot disagree -- and forks nothing.
+#
+#   `|| [ -n "${__line}" ]` is load-bearing, not defensive noise: read returns
+#   false at EOF, so a final line with no trailing newline would otherwise be
+#   read into __line and then silently dropped. That is exactly what a script
+#   killed mid-write (or any bare printf) produces, i.e. the output most worth
+#   keeping. Same guard, same reason, in startOpLog above.
+startDaemonLog() {
+	FPP_PROG=$(basename $0)
+	FPP_PROG_PID=$$
+	FPP_PROG_FACILITY="${1:-Startup}"
 	MYTTY=$(tty)
 	if [ "x${MYTTY}" = "x/dev/console" -o "x${MYTTY}" = "x" -o "x${MYTTY}" = "xnot a tty" ]
 	then
 		makeLogDir
+		ensureLogFile "${LOGDIR}/fppd.log"
 
-		exec > >(tee >(while IFS= read -r __line; do printf '%(%Y-%m-%d %H:%M:%S)T [%s %s] %s\n' -1 "${PLUGIN_OP}" "${PLUGIN_NAME}" "${__line}"; done >> "${LOGDIR}/plugin.log"))
+		exec > >(while IFS= read -r __line || [ -n "${__line}" ]; do
+			__now=${EPOCHREALTIME}
+			__usec=${__now#*.}
+			printf '%(%Y-%m-%d %H:%M:%S)T.%s %s(%s) [%s] %s\n' "${__now%.*}" "${__usec:0:3}" \
+				"${FPP_PROG}" "${FPP_PROG_PID}" "${FPP_PROG_FACILITY}" "${__line}" \
+				>> "${LOGDIR}/fppd.log"
+		done)
 		exec 2>&1
 	fi
-	echo "===== ${PLUGIN_OP} START: ${PLUGIN_NAME} ====="
-	trap '__rc=$?; echo "===== ${PLUGIN_OP} FINISH: ${PLUGIN_NAME} (rc=${__rc}) ====="' EXIT
 }
 
 # logStage "<message>"

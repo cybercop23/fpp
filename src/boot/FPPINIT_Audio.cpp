@@ -448,6 +448,40 @@ void setupAudio() {
     bool runningInDocker = FileExists("/.dockerenv");
     const std::string audioEnvPath = "/run/fppd/fpp-audio.env";
     printf("FPP - Audio backend: %s\n", usePipeWireBackend ? "PipeWire" : "ALSA");
+
+    // AudioOutput is persisted as a stable ALSA card ID string (e.g. "S3",
+    // "bcm2835ALSA") rather than a card index, so a probe-order change (USB
+    // add/remove, slow-probing cape, kernel update) doesn't repoint us at the
+    // wrong device.
+    //   - empty/unset  -> first present card (index 0), as before
+    //   - all-digits   -> legacy index; used as-is and migrated to an ID below
+    //   - otherwise    -> card ID; matched against /proc/asound/cards
+    std::string audioOutputId;
+    getRawSetting("AudioOutput", audioOutputId);
+    TrimWhiteSpace(audioOutputId);
+    bool legacyNumeric = !audioOutputId.empty() && audioOutputId.find_first_not_of("0123456789") == std::string::npos;
+
+    // A card selected by ID may not have registered yet: cape modules are
+    // modprobed back at cape detect, but an ASoC card (e.g. the K32Max's
+    // CapeAudio-pcm5102a) binds asynchronously and can land after we get here.
+    // Wait for it before probing, otherwise the aplay snapshot below misses it,
+    // snd-dummy gets loaded in its place, and the selection resolves to Dummy.
+    // Only a selected-but-absent card waits, so a board with no selection (or
+    // one whose card is already up) pays nothing.
+    if (!audioOutputId.empty() && !legacyNumeric && getAlsaCardNumForId(audioOutputId) < 0) {
+        printf("FPP - Waiting for audio device '%s' to register...\n", audioOutputId.c_str());
+        int waited = 0;
+        while (waited < 100 && getAlsaCardNumForId(audioOutputId) < 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            ++waited;
+        }
+        if (getAlsaCardNumForId(audioOutputId) < 0) {
+            printf("FPP - Audio device '%s' did not appear after %d seconds\n", audioOutputId.c_str(), waited / 10);
+        } else {
+            printf("FPP - Audio device '%s' registered after %d.%d seconds\n", audioOutputId.c_str(), waited / 10, waited % 10);
+        }
+    }
+
     std::string aplay = execAndReturn("/usr/bin/aplay -l 2>&1");
     std::vector<std::string> lines = split(aplay, '\n');
     std::map<std::string, std::string> cards;
@@ -504,18 +538,14 @@ void setupAudio() {
         printf("FPP - No Soundcard Detected, loading snd-dummy\n");
         modprobe("snd-dummy");
     }
-    // AudioOutput is persisted as a stable ALSA card ID string (e.g. "S3",
-    // "bcm2835ALSA") rather than a card index, so a probe-order change (USB
-    // add/remove, slow-probing cape, kernel update) doesn't repoint us at the
-    // wrong device. Resolve it to the current card number here; everything
-    // below continues to work with the numeric index.
-    //   - empty/unset  -> first present card (index 0), as before
-    //   - all-digits   -> legacy index; used as-is and migrated to an ID below
-    //   - otherwise    -> card ID; matched against /proc/asound/cards
-    std::string audioOutputId;
-    getRawSetting("AudioOutput", audioOutputId);
-    TrimWhiteSpace(audioOutputId);
-    bool legacyNumeric = !audioOutputId.empty() && audioOutputId.find_first_not_of("0123456789") == std::string::npos;
+    // Resolve the selected card ID (read above) to the current card number;
+    // everything below continues to work with the numeric index.
+    // True when the selected card ID names a device that isn't present, so we
+    // are running this boot on a fallback card. The selection is the user's and
+    // the absence may be transient (a card still probing, a USB device
+    // unplugged for the evening), so a fallback must not be written back over
+    // it -- doing so silently loses the selection across a reboot.
+    bool selectedCardMissing = false;
     int card = 0;
     if (audioOutputId.empty()) {
         card = 0;
@@ -524,8 +554,9 @@ void setupAudio() {
     } else {
         card = getAlsaCardNumForId(audioOutputId);
         if (card < 0) {
-            printf("FPP - Audio device '%s' not currently present; falling back to card 0\n", audioOutputId.c_str());
+            printf("FPP - Audio device '%s' not currently present; falling back to card 0 for this boot\n", audioOutputId.c_str());
             card = 0;
+            selectedCardMissing = true;
         }
     }
     std::string cstr = "card " + std::to_string(card);
@@ -559,11 +590,15 @@ void setupAudio() {
             printf("FPP - Audio device %d has no HDMI connected, switching to card %d (%s)\n",
                    card, fallback, cards["card " + std::to_string(fallback)].c_str());
             card = fallback;
-            setRawSetting("AudioOutput", getAlsaCardId(card));
+            if (!selectedCardMissing) {
+                setRawSetting("AudioOutput", getAlsaCardId(card));
+            }
         } else {
             card = cards.size();
             found = true;
-            setRawSetting("AudioOutput", getAlsaCardId(card));
+            if (!selectedCardMissing) {
+                setRawSetting("AudioOutput", getAlsaCardId(card));
+            }
         }
     }
     while (!found && count < 50) {
@@ -578,13 +613,17 @@ void setupAudio() {
     if (!found) {
         printf("FPP - Could not find audio device %d, defaulting to device 0.\n", card);
         CopyFileContents("/opt/fpp/etc/asoundrc.plain", "/root/.asoundrc");
-        setRawSetting("AudioOutput", getAlsaCardId(0));
+        if (!selectedCardMissing) {
+            setRawSetting("AudioOutput", getAlsaCardId(0));
+        }
     } else {
         printf("FPP - Waited for %d seconds for audio device\n", (count / 5));
         // Persist the selection as the stable ALSA card ID. This migrates a
         // legacy numeric value and canonicalizes the stored ID so the next
-        // boot matches by name regardless of probe order.
-        std::string canonicalId = getAlsaCardId(card);
+        // boot matches by name regardless of probe order. Skipped when we're on
+        // a fallback card: that would overwrite the user's choice with whatever
+        // happened to be present (typically the synthetic Dummy).
+        std::string canonicalId = selectedCardMissing ? "" : getAlsaCardId(card);
         if (!canonicalId.empty() && canonicalId != audioOutputId) {
             printf("FPP - Persisting selected audio device as ID '%s'\n", canonicalId.c_str());
             setRawSetting("AudioOutput", canonicalId);

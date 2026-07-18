@@ -236,6 +236,14 @@
                 "all"
             ],
             "commands": {
+                "RegisteredCards": {
+                    "title": "Registered Sound Cards",
+                    "description": "All sound cards registered with ALSA, including capture-only devices that do not appear under Sound Cards.",
+                    "cmd": "cat /proc/asound/cards",
+                    "platforms": [
+                        "all"
+                    ]
+                },
                 "SoundCards": {
                     "title": "Sound Cards",
                     "description": "",

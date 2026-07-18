@@ -7491,8 +7491,93 @@ function DownloadFiles (dir, files) {
 	}
 }
 
-function DownloadZip (dir) {
-	location.href = 'api/files/zip/' + dir;
+/**
+ * Downloads a directory as a zip. Pass the triggering button to keep it in a
+ * busy state until the file actually arrives.
+ *
+ * The server builds the whole archive before sending a single byte, and for the
+ * Logs zip (the support bundle) that is ~11s of shell commands -- troubleshooting
+ * Text.php accounts for almost all of it. A location.href navigation gives the
+ * browser nothing to show for that wait and no event to tell us it ended, so the
+ * click looks like it did nothing and a second click starts the work over again.
+ * Fetching the zip instead lets us hold the busy state until the bytes are here,
+ * then hand the blob to the browser as a normal download.
+ *
+ * Buffering the archive in memory is fine for what both callers ask for (Logs,
+ * ~1MB). Without a button it falls back to the original streaming navigation,
+ * which is also what a much larger directory would want.
+ */
+function DownloadZip (dir, btn, busyText) {
+	if (!btn) {
+		location.href = 'api/files/zip/' + dir;
+		return;
+	}
+	// The file manager's Zip control is an <input type="button">, whose label is
+	// its value attribute -- it has no innerHTML to set (and so no room for a
+	// spinner element); the support bundle is a <button>.
+	var isInput = btn.tagName == 'INPUT';
+	var original = isInput ? btn.value : btn.innerHTML;
+	btn.disabled = true;
+	btn.setAttribute('aria-busy', 'true');
+	if (isInput) {
+		btn.value = busyText;
+	} else {
+		btn.innerHTML =
+			"<span class='spinner-border spinner-border-sm me-1' role='status' aria-hidden='true'></span>" +
+			busyText;
+	}
+
+	var restore = function () {
+		btn.disabled = false;
+		btn.removeAttribute('aria-busy');
+		if (isInput) {
+			btn.value = original;
+		} else {
+			btn.innerHTML = original;
+		}
+	};
+
+	// no-store: the archive is generated fresh per request (troubleshooting
+	// output, health check, current logs), so a cached copy is a stale bundle
+	// reporting a state the box is no longer in. It also has to be uncached for
+	// the busy state to mean anything -- a cache hit returns instantly and the
+	// user never sees the ~11s of work they are actually waiting on.
+	fetch('api/files/zip/' + dir, { cache: 'no-store' })
+		.then(function (response) {
+			if (!response.ok) {
+				throw new Error('HTTP ' + response.status);
+			}
+			// Prefer the name the server chose (it carries the host name and
+			// timestamp); fall back only if the header is somehow absent.
+			var name = 'FPP_' + dir + '.zip';
+			var cd = response.headers.get('Content-Disposition');
+			if (cd) {
+				var m = /filename="?([^";]+)"?/.exec(cd);
+				if (m) {
+					name = m[1];
+				}
+			}
+			return response.blob().then(function (blob) {
+				return { blob: blob, name: name };
+			});
+		})
+		.then(function (file) {
+			var url = URL.createObjectURL(file.blob);
+			var a = document.createElement('a');
+			a.href = url;
+			a.download = file.name;
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+			URL.revokeObjectURL(url);
+			restore();
+		})
+		.catch(function (err) {
+			restore();
+			$.jGrowl('Could not download ' + dir + ' zip: ' + err.message, {
+				themeState: 'danger'
+			});
+		});
 }
 
 function ViewImage (file) {
@@ -7512,7 +7597,10 @@ function ViewImage (file) {
 function ViewFile (dir, file) {
 	var url =
 		'api/file/' + dir + '/' + encodeURIComponent(file).replaceAll('%2F', '/');
-	ViewFileImpl(url, file);
+	// Logs read newest-last, so open at the end -- the top of a rotated log can
+	// be weeks old. Scripts and Config (the other tabs with a View button) are
+	// read from the top, so they keep the default.
+	ViewFileImpl(url, file, '', { scrollToBottom: dir == 'Logs' });
 }
 function TailFile (dir, file, lines) {
 	var url =
@@ -7523,7 +7611,10 @@ function TailFile (dir, file, lines) {
 		'?tail=' +
 		lines;
 	// console.log(url);
-	ViewFileImpl(url, file);
+	ViewFileImpl(url, file, '', {
+		title: 'Tail (last ' + lines + ' lines)',
+		scrollToBottom: true
+	});
 }
 
 var tailFollowEventSource = null;
@@ -7541,8 +7632,11 @@ function TailFollowFile (dir, file, lines = 50) {
 	var options = {
 		id: 'tailFollowDialog',
 		title: 'Tail Follow: ' + file,
-		body: "<pre id='tailFollowText' class='fileText' style='margin: 0; padding: 10px; background: #000; color: #0f0; max-height: 65vh; overflow-y: auto; overflow-anchor: none; font-family: monospace; white-space: pre-wrap; word-wrap: break-word;'></pre>",
-		class: 'modal-xl',
+		// No max-height/overflow here: the scrollable modal body is the single
+		// scroller. Giving the pre its own 65vh box made it a second one, and
+		// pushed the dialog past short viewports so the modal root scrolled too.
+		body: "<pre id='tailFollowText' class='fileText' style='margin: 0; padding: 10px; background: #000; color: #0f0; overflow-anchor: none; font-family: monospace; white-space: pre-wrap; word-wrap: break-word;'></pre>",
+		class: 'modal-xl modal-dialog-scrollable',
 		keyboard: false,
 		backdrop: 'static',
 		buttons: {
@@ -7635,9 +7729,11 @@ function startTailFollowStream (url) {
 				lineCount = TAIL_FOLLOW_MAX_LINES;
 			}
 
-			// Auto-scroll to bottom (deferred for cross-platform reliability)
+			// Auto-scroll to bottom (deferred for cross-platform reliability).
+			// The scrollable modal body is the scroller, not the pre.
 			requestAnimationFrame(function () {
-				outputArea.scrollTop = outputArea.scrollHeight;
+				var scroller = outputArea.closest('.modal-body') || outputArea;
+				scroller.scrollTop = scroller.scrollHeight;
 			});
 		}
 	};
@@ -7657,10 +7753,13 @@ function startTailFollowStream (url) {
 	};
 }
 
-function ViewFileImpl (url, file, html = '') {
+// opts.title overrides the dialog heading; opts.scrollToBottom starts the view
+// at the newest content, which is what a tail wants (its last line is the most
+// recent one) while a whole-file view still starts at the top.
+function ViewFileImpl (url, file, html = '', opts = {}) {
 	var options = {
 		id: 'fileViewerDialog',
-		title: 'File Viewer: ' + file,
+		title: (opts.title || 'File Viewer') + ': ' + file,
 		body: "<div id='fileViewerText' class='fileText'>Loading...</div>",
 		class: 'modal-dialog-scrollable',
 		keyboard: true,
@@ -7676,13 +7775,32 @@ function ViewFileImpl (url, file, html = '') {
 		}
 	};
 	DoModalDialog(options);
+	// The modal body is the scroller, not the pre inside it. Scrolling only
+	// sticks once the dialog is visible AND the text is laid out -- until then
+	// scrollHeight equals clientHeight and scrollTop silently clamps to 0. The
+	// fetch can finish either side of the show animation, so run it on both and
+	// let whichever lands last win.
+	var scrollToNewest = function () {
+		if (!opts.scrollToBottom) return;
+		var body = document.querySelector('#fileViewerDialog .modal-body');
+		if (body) body.scrollTop = body.scrollHeight;
+	};
+	if (opts.scrollToBottom) {
+		$('#fileViewerDialog').off('shown.bs.modal.viewer').on('shown.bs.modal.viewer', scrollToNewest);
+	}
 	if (html == '') {
 		$.get(url, function (text) {
 			var ext = file.split('.').pop();
-			if (ext != 'html')
+			if (ext != 'html') {
 				$('#fileViewerText').html(
 					'<pre>' + text.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>'
 				);
+				// Double rAF: the first yields to style, the second runs after
+				// layout, when scrollHeight reflects the inserted text.
+				requestAnimationFrame(function () {
+					requestAnimationFrame(scrollToNewest);
+				});
+			}
 		});
 	} else {
 		$('#fileViewerText').html(html);

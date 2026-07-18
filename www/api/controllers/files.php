@@ -783,10 +783,24 @@ function GetZipDir()
 
     $zip->close();
 
-    $timestamp = gmdate('Ymd.Hi');
+    // "<HostName>_<what>_<date>_<time>.zip" -- the host name identifies the box a
+    // support bundle came from, and leads like backup.php's filenames do. It
+    // replaces the old "FPP_" prefix rather than joining it, since host names
+    // usually start with FPP already. The date/time separator is '_' so the
+    // extension is the only '.' in the name.
+    //
+    // HostName is user-settable and is NOT sanitized on the way in: PutSetting()
+    // writes the raw request body to the settings file and only cleans the copy
+    // it passes to the hostname command. Reduce it here to the charset FPP's own
+    // hostname rules allow before it reaches a response header.
+    $hostName = preg_replace('/[^-a-zA-Z0-9]/', '', GetSettingValue('HostName', ''));
+    if ($hostName == '') {
+        $hostName = 'FPP';
+    }
+    $timestamp = date('Ymd_Hi');
 
     header('Content-type: application/zip');
-    header('Content-disposition: attachment;filename=FPP_' . $zipName . '_' . $timestamp . '.zip');
+    header('Content-disposition: attachment;filename="' . $hostName . '_' . $zipName . '_' . $timestamp . '.zip"');
     ob_clean();
     flush();
     readfile($filename);
@@ -810,16 +824,75 @@ function ZipLogs($zip)
 
     ZipConfigs($zip);
 
+    // Logs that are no longer generated at all. fppd.log has replaced them and is
+    // written continuously, so it always carries the current picture -- there is
+    // no "wait and see" case for these the way there is for the upgrade/plugin
+    // logs below. (git_fetch.log is no longer written either: scripts/git_fetch
+    // dropped logOutput, since both callers in git.php discard its output and it
+    // was excluded from this zip anyway; its one useful line, "github
+    // unreachable", is now a breadcrumb in fppd.log.)
     $ignore_files = array(
-        "git_branch.log", // No longer generated
-        "git_checkout_version.log", // No longer generated
-        "git_fetch.log", // No longer generated
+        "git_branch.log", // -> fpp_system_upgrades.log
+        "git_checkout_version.log", // -> fpp_system_upgrades.log
+        "git_fetch.log", // no longer written; was noise with no reader
+        "fppd_start.log", // -> fppd.log
+        "fppd_stop.log", // -> fppd.log
+        "fppd_restart.log", // -> fppd.log
+        "fpp_init.log", // -> fppd.log (FPPINIT start)
+        "fpp_boot.log", // -> fppd.log (FPPINIT postNetwork)
+        "start_kiosk.log", // -> fppd.log
+        "mp3gain.log", // -> fppd.log
+        "fpp_backup_filecopy_last.log", // -> fppd.log (feed is now unlinked, not renamed)
     );
 
-    // Gather troubleshooting commands output
-    $cmd = "php " . $settings['fppDir'] . "/www/troubleshootingText.php > " . $settings['mediaDirectory'] . "/logs/troubleshootingCommands.log";
-    exec($cmd, $output, $return_val);
-    unset($output);
+    // Superseded upgrade/plugin logs are dropped only ONCE their replacement has
+    // a run of its own. On a box that upgraded INTO this version, git_pull.log /
+    // upgrade_config.log / install_plugin.log still hold the history of that
+    // box's last upgrade, while fpp_system_upgrades.log and fpp_plugin_manager.log do
+    // not exist yet -- excluding them on sight would throw away the only copy of
+    // exactly what support asks for. Once the new file has content it is the
+    // better record and the old one is dead weight (git_pull.log alone runs to
+    // 4MB of submodule chatter). This makes the file itself decide, so no upgrade
+    // step has to migrate anything and no release has to "remember" to flip it.
+    $superseded = array(
+        "fpp_system_upgrades.log" => array("git_pull.log", "upgrade_config.log"),
+        "fpp_plugin_manager.log" => array("install_plugin.log", "uninstall_plugin.log", "upgrade_plugin.log", "plugin.log"),
+    );
+    foreach ($superseded as $replacement => $oldLogs) {
+        $rp = $logDirectory . '/' . $replacement;
+        if (file_exists($rp) && filesize($rp) > 0) {
+            $ignore_files = array_merge($ignore_files, $oldLogs);
+        }
+    }
+
+    // troubleshootingCommands.log and healthCheck.log are generated fresh for
+    // each zip -- they are artifacts OF the download, not logs of the system, and
+    // nothing reads them back. They used to be written into logs/ purely so the
+    // scandir below would pick them up, which left a permanently stale copy in
+    // the log directory (and in the Logs tab) between downloads --
+    // troubleshootingCommands.log alone runs to hundreds of KB. Generate them
+    // into tmp/ and add them to the zip by name instead: same zip contents, two
+    // fewer files pretending to be logs.
+    $genDir = $settings['mediaDirectory'] . "/tmp";
+    if (!is_dir($genDir)) {
+        mkdir($genDir, 0775, true);
+    }
+    $generated = array(
+        "troubleshootingCommands.log" => "php " . escapeshellarg($settings['fppDir'] . "/www/troubleshootingText.php"),
+        "healthCheck.log" => escapeshellarg($settings['fppDir'] . "/scripts/healthCheck"),
+    );
+    // Left in tmp/ rather than deleted here: addFile() only records the path,
+    // the bytes are read at $zip->close(), which happens in the caller after we
+    // return. media/tmp is FPP's scratch and is emptied on boot and on
+    // fppinit stop, so this is the same lifetime any other tmp file gets.
+    foreach ($generated as $name => $gcmd) {
+        $path = $genDir . "/" . $name;
+        exec($gcmd . " > " . escapeshellarg($path) . " 2>&1", $output, $return_val);
+        unset($output);
+        if (is_readable($path)) {
+            $zip->addFile($path, "logs/" . $name);
+        }
+    }
 
     foreach (scandir($logDirectory) as $file) {
         if ($file == "." || $file == ".." || in_array($file, $ignore_files)) {
@@ -835,14 +908,6 @@ function ZipLogs($zip)
     if (is_readable("/var/log/syslog")) {
         $zip->addFile("/var/log/syslog", "logs/syslog.log");
     }
-
-    exec("cat /proc/asound/cards", $output, $return_val);
-    if ($return_val != 0) {
-        error_log("Unable to read alsa cards");
-    } else {
-        $zip->addFromString("logs/asound/cards", implode("\n", $output) . "\n");
-    }
-    unset($output);
 
     exec("/usr/bin/git --work-tree=" . gitBaseDirectory() . "/ status", $output, $return_val);
     if ($return_val != 0) {

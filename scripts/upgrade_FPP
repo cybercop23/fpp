@@ -12,7 +12,10 @@ then
 	exit 1
 fi
 
-teeOutput
+# Unified upgrade logging -> logs/fpp_system_upgrades.log. This is the outermost script
+# of the version-switch path, so its tee is the one that captures the nested
+# upgrade_config (and anything else it shells out to) as a single run.
+startUpgradeLog "fpp-upgrade" "$1"
 
 echo "$0 Upgrading FPP version to $1"
 

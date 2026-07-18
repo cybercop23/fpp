@@ -29,9 +29,9 @@ VERSION="${VERSION:-}"                       # FPP version, e.g. 10.0
 OSVERSION="${OSVERSION:-$(date +%Y-%m)}"     # Tag embedded in .fppos name
 FPPBRANCH="${FPPBRANCH:-master}"
 # Raspberry Pi OS "Trixie" Lite base image. As of the 2026-06 release the
-# image ships Linux 6.18 LTS out of the box (kernel 6.18.34), which is the
-# kernel FPP10 requires -- so the rpi-update kernel step below is now disabled
-# by default (see SKIP_KERNEL_UPDATE).
+# image ships Linux 6.18 LTS out of the box (kernel 6.18.34), which meets the
+# kernel FPP10 requires, but the rpi-update kernel step below still runs by
+# default to pick up newer GPU/media fixes (see SKIP_KERNEL_UPDATE).
 #
 # Two dates are involved: Raspberry Pi dated the 2026-06 release's *directory*
 # (raspios_lite_*-2026-06-19) one day later than the date embedded in the
@@ -51,7 +51,7 @@ SKIP_ZIP="${SKIP_ZIP:-0}"                    # 1 => leave raw .img only, no zip
 USE_LOCAL_SRC="${USE_LOCAL_SRC:-0}"          # 1 => seed /opt/fpp from local tree
 FPP_SRC_DIR="${FPP_SRC_DIR:-$(readlink -f "$(dirname "$(readlink -f "$0")")/..")}"
 # Default OFF (don't skip) - need the latest fixes for various GPU/media issues
-SKIP_KERNEL_UPDATE="${SKIP_KERNEL_UPDATE:0}"    # 1 => skip rpi-update next
+SKIP_KERNEL_UPDATE="${SKIP_KERNEL_UPDATE:-0}"    # 1 => skip rpi-update next
 
 usage() {
     cat <<EOF
@@ -75,13 +75,15 @@ Options:
   --img-size-mb N          Raw output image size in MiB (default: 7200)
   --work-dir DIR           Scratch dir (default: ./build)
   --output-dir DIR         Artifact dir (default: ./output)
-  --skip-kernel-update     Skip rpi-update of the kernel. This is now the
-                           DEFAULT: the 2026-06 Trixie base image already
-                           ships Linux 6.18 LTS, the kernel FPP10 requires.
-                           Flag retained for explicitness / scripting.
-  --kernel-update          Force the rpi-update kernel step back ON. Needed
-                           in the future if RPi ships a base image whose stock
-                           kernel predates the next LTS that FPP requires.
+  --skip-kernel-update     Skip rpi-update of the kernel and ship the base
+                           image's stock kernel. The 2026-06 Trixie base
+                           already ships Linux 6.18 LTS, the kernel FPP10
+                           requires, so this produces a working image -- it
+                           just misses newer GPU/media fixes.
+  --kernel-update          Run the rpi-update kernel step. This is the
+                           DEFAULT: FPP wants the latest kernel/firmware for
+                           various GPU/media fixes. Flag retained for
+                           explicitness / scripting.
   --skip-fppos             Do not produce .fppos squashfs
   --skip-zip               Do not zip the raw .img (faster iteration when
                            you're flashing the raw image directly to an SD
@@ -402,11 +404,10 @@ if [ "$USE_LOCAL_SRC" = "1" ]; then
 fi
 
 # NOTE: This entire rpi-update kernel block (host pre-stage here + the in-chroot
-# step further down) is DISABLED BY DEFAULT as of the 2026-06 Trixie base, which
-# already ships Linux 6.18 LTS. It is deliberately retained, gated behind
-# SKIP_KERNEL_UPDATE, so it can be switched back on (--kernel-update) the next
-# time RPi lags behind a new LTS kernel that FPP requires. None of it runs while
-# SKIP_KERNEL_UPDATE=1 (the default).
+# step further down) runs by default: the 2026-06 Trixie base ships Linux 6.18
+# LTS, which is new enough for FPP10, but we want the latest kernel/firmware for
+# various GPU/media fixes. Pass --skip-kernel-update to gate all of it off and
+# ship the base image's stock kernel instead.
 #
 # Pre-stage a fresh rpi-update from upstream so the in-chroot run doesn't
 # need to TLS-fetch its own self-update (which hangs hard under qemu-arm).
@@ -609,6 +610,21 @@ rm -rf /lib/modules/*-2712 /lib/modules/*-16k*
 apt-get remove -y --purge --autoremove \\
     linux-headers-rpi-v6 linux-headers-rpi-v7 linux-headers-rpi-v8 2>/dev/null || true
 rm -rf /usr/src/linux-*
+
+# FPP manages the kernels in /boot/firmware itself (kernel*.img from
+# rpi-update above, or the base image's copies on --skip-kernel-update), but
+# the stock linux-image-* dpkg packages stay installed while their module
+# trees / DTB dirs are stripped above. raspi-firmware's default KERNEL=auto
+# kernel hook would therefore either fail (breaking every later apt run on
+# the device, e.g. plugin installs) or overwrite /boot/firmware/kernel*.img
+# with a stock vmlinuz whose modules no longer exist. Any non-"auto" value
+# disables the kernel/DTB copy in /etc/kernel/postinst.d/z50-raspi-firmware.
+cat > /etc/default/raspi-firmware <<'RASPI_FW_EOF'
+# FPP manages its own kernels in /boot/firmware; "auto" would let
+# raspi-firmware overwrite them with a stock Debian kernel whose modules
+# are not present on this image.
+KERNEL=none
+RASPI_FW_EOF
 
 # Finalization (mirrors SD/README.RaspberryPi post-install cleanup)
 apt-get clean

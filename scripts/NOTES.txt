@@ -31,7 +31,7 @@ start_kiosk.sh: /opt/fpp/SD/FPP_Kiosk.sh
 wifi_scan.sh: /opt/fpp/www/troubleshoot-commands.json
 uninstall_plugin: /opt/fpp/www/api/controllers/plugin.php
 upgradeCapeFirmware: /opt/fpp/www/upgradeCapeFirmware.php
-upgrade_config: git_branch, git_pull, upgrade_FPP, /opt/fpp/www/about.php
+upgrade_config: git_branch, git_pull, upgrade_FPP, /opt/fpp/SD/FPP_Install.sh
 upgrade_FPP: /opt/fpp/www/upgradefpp.php
 wifiscan: /opt/fpp/www/troubleshoot-commands.json
 

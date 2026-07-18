@@ -12,7 +12,7 @@ fi
 
 # startPluginLog streams the upgrade output to the caller (browser progress
 # dialog) unchanged AND appends a per-line-timestamped copy to the shared
-# ${LOGDIR}/plugin.log, tagged "[upgrade <plugin>]", alongside install/uninstall.
+# ${LOGDIR}/fpp_plugin_manager.log, tagged "[upgrade <plugin>]", alongside install/uninstall.
 startPluginLog upgrade "$1"
 
 PLUGIN="$1"
