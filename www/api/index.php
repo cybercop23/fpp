@@ -115,6 +115,7 @@ dispatch_get('/pipewire/audio/sinks', 'GetPipeWireSinks');
 dispatch_get('/pipewire/audio/cards', 'GetPipeWireAudioCards');
 dispatch_get('/pipewire/audio/usb-check', 'GetUsbAudioBandwidthCheck');
 dispatch_get('/pipewire/audio/sources', 'GetPipeWireAudioSources');
+dispatch_get('/pipewire/audio/plugin-sources', 'GetPipeWirePluginSources');
 dispatch_get('/pipewire/audio/input-groups', 'GetPipeWireInputGroups');
 dispatch_post('/pipewire/audio/input-groups', 'SavePipeWireInputGroups');
 dispatch_post('/pipewire/audio/input-groups/apply', 'ApplyPipeWireInputGroups');

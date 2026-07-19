@@ -3294,6 +3294,33 @@ function GetPipeWireAudioSources()
     return json($sources);
 }
 
+// GET /api/pipewire/audio/plugin-sources
+// Returns PipeWire Audio/Source nodes registered by plugins with fppd's
+// AudioSourceRegistry (via AudioSourceRegistry::INSTANCE.registerSource()).
+// Passthrough to fppd's HTTP server; returns an empty list when fppd is
+// not running.  The registry is in-fppd-memory only — saved input-group
+// members store the nodeName themselves, so nothing needs to persist here.
+function GetPipeWirePluginSources()
+{
+    $result = array("sources" => array());
+
+    $ch = curl_init("http://127.0.0.1:32322/pipewire/audio/plugin-sources");
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 1);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 3);
+    $raw = curl_exec($ch);
+    curl_close($ch);
+
+    if ($raw !== false) {
+        $data = json_decode($raw, true);
+        if (is_array($data) && isset($data['sources']) && is_array($data['sources'])) {
+            $result['sources'] = $data['sources'];
+        }
+    }
+
+    return json($result);
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // Helper: Resolve ALSA card ID to exact PipeWire capture node name
 // Queries pw-dump to find the Audio/Source node matching the given card ID.
