@@ -233,11 +233,17 @@
             return (words[0].charAt(0) + words[1].charAt(0)).toUpperCase();
         }
 
+        // Cache-busting nonce shared by all icon URLs loaded during this page
+        // session, so a plugin update with a new icon is visible immediately
+        // rather than showing a stale cached copy. The server sends 304 Not
+        // Modified when the icon file is unchanged, so the overhead is minimal.
+        var iconCacheNonce = Date.now();
+
         // Get the plugin icon URL. Always routes through the same-origin API to
         // avoid CSP restrictions on external image hosts (raw.githubusercontent.com
         // is only allow-listed in connect-src, not img-src).
         function GetIconUrl(data, installed) {
-            if (installed) return 'api/plugin/' + data.repoName + '/icon';
+            if (installed) return 'api/plugin/' + data.repoName + '/icon?_=' + iconCacheNonce;
             if (data.iconURL) return 'api/plugin/fetchImage?url=' + encodeURIComponent(data.iconURL);
             return null;
         }
@@ -250,7 +256,12 @@
             var pills = [];
             // "All" view shown at every UI level (D27) and is the default landing view.
             pills.push({ name: 'All', slug: 'all', icon: 'fas fa-border-all' });
-            for (var i = 0; i < pluginCategoryList.length; i++) pills.push(pluginCategoryList[i]);
+            for (var i = 0; i < pluginCategoryList.length; i++) {
+                // Drop any "Other" entry from the JSON so we only insert
+                // our canonical OTHER_CATEGORY below with the correct icon.
+                if (pluginCategoryList[i].name.localeCompare('Other', undefined, { sensitivity: 'base' }) === 0) continue;
+                pills.push(pluginCategoryList[i]);
+            }
             // Insert "Other" alphabetically among the known categories (skip index 0 which is "All")
             var insIdx = 1;
             while (insIdx < pills.length && pills[insIdx].name.localeCompare('Other', undefined, { sensitivity: 'base' }) < 0) insIdx++;
