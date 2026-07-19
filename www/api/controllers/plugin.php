@@ -435,7 +435,7 @@ function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth
 		}
 	}
 
-	// --- python packages (uv, isolated per-plugin venv) ---
+	// --- python packages (uv, system-wide) ---
 	if (isset($deps['python']) && is_array($deps['python']) && count($deps['python'])) {
 		$pyPkgs = array();
 		foreach ($deps['python'] as $pkg) {
@@ -448,20 +448,15 @@ function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth
 				echo "\n=== Installing Python package dependencies for $ownerRepo (uv) ===\n";
 				flush();
 			}
-			$pluginDir = $settings['pluginDirectory'] . '/' . escapeshellcmd($ownerRepo);
 			$args = implode(' ', array_map('escapeshellarg', $pyPkgs));
-			// 'uv add' requires an existing uv project (pyproject.toml) -- unlike
-			// some other uv subcommands, it does NOT implicitly create one, and
-			// errors "No `pyproject.toml` found" if run cold. So run 'uv init'
-			// first, but only if the plugin directory isn't already initialized
-			// (re-running 'uv init' on an existing project errors too -- this
-			// runs on every install/update, not just the first one). 'uv init'
-			// creates pyproject.toml + a stub main.py; 'uv add' then creates the
-			// venv (named ".venv" -- uv's own default, not author-chosen) and
-			// installs into it. The plugin's own scripts run against it via
-			// "$SCRIPT_DIR/.venv/bin/python3" (see PLUGIN_GUIDELINES.md #6.1).
-			$initCmd = "[ -f pyproject.toml ] || uv init --no-readme --vcs none";
-			$cmd = $SUDO . " sh -c " . escapeshellarg("cd " . $pluginDir . " && " . $initCmd . " && uv add " . $args);
+			// 'uv pip install --system' installs straight into FPP's system Python
+			// interpreter, PEP 668-safe (unlike bare 'pip install --break-system-packages',
+			// which corrupts it). No per-plugin venv/pyproject.toml to create or chown --
+			// plugin scripts just call the system "python3" (see PLUGIN_GUIDELINES.md #6.1).
+			// Packages are shared system-wide, not isolated per plugin: a version conflict
+			// between two plugins' declared deps will surface as a real install failure
+			// here, not silently coexist.
+			$cmd = $SUDO . " uv pip install --system " . $args;
 			$rc = 0;
 			if ($streaming) {
 				system($cmd, $rc);
@@ -470,16 +465,9 @@ function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth
 				unset($o);
 			}
 			if ($rc !== 0) {
-				PluginLog('install', $ownerRepo, "ERROR: 'uv add' failed for one or more Python package dependencies (exit $rc)");
+				PluginLog('install', $ownerRepo, "ERROR: 'uv pip install --system' failed for one or more Python package dependencies (exit $rc)");
 				$ok = false;
 			} else {
-				// uv ran privileged above (matching the apt install), so its
-				// venv/lock/project files land root-owned -- chown back to fpp so
-				// the plugin's own (non-root) tooling doesn't hit permission
-				// errors later, matching install_plugin's own post-clone chown.
-				if (!isset($settings['Platform']) || $settings['Platform'] !== 'MacOS') {
-					exec($SUDO . " chown -R fpp:fpp " . escapeshellarg($pluginDir));
-				}
 				PluginLog('install', $ownerRepo, "Installed Python package dependencies: " . implode(', ', $pyPkgs));
 			}
 		}
