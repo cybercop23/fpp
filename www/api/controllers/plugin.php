@@ -778,8 +778,18 @@ function PluginServeIcon()
 	// Check for local icon.png
 	$file = $pluginDir . '/icon.png';
 	if (file_exists($file)) {
+		$mtime = filemtime($file);
+		$lastModified = gmdate('D, d M Y H:i:s', $mtime) . ' GMT';
+
 		header('Content-Type: image/png');
-		header('Cache-Control: public, max-age=86400');
+		header('Cache-Control: public, max-age=0, must-revalidate');
+		header('Last-Modified: ' . $lastModified);
+
+		if (isset($_SERVER['HTTP_IF_MODIFIED_SINCE']) && strtotime($_SERVER['HTTP_IF_MODIFIED_SINCE']) >= $mtime) {
+			header('HTTP/1.1 304 Not Modified');
+			exit;
+		}
+
 		ob_clean();
 		flush();
 		readfile($file);
@@ -795,7 +805,7 @@ function PluginServeIcon()
 			$data = @file_get_contents($info['iconURL'], false, $ctx);
 			if ($data !== false) {
 				header('Content-Type: image/png');
-				header('Cache-Control: public, max-age=86400');
+				header('Cache-Control: public, no-cache');
 				echo $data;
 				exit;
 			}
