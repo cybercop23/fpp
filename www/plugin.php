@@ -117,7 +117,26 @@ if (!isset($_GET['nopage'])):
         <div id="bodyWrapper">
             <?php include 'menu.inc'; ?>
             <div class="mainContainer">
-                <h1 class="title"><? echo $pluginInfo['name']; ?></h1>
+                <?php
+                $pluginIconUrl = 'api/plugin/' . $pluginName . '/icon';
+                $pluginIconFile = $pluginDirectory . '/' . $pluginName . '/icon.png';
+                $pluginHasIcon = file_exists($pluginIconFile) || !empty($pluginInfo['iconURL']);
+                if ($pluginHasIcon) {
+                    if (file_exists($pluginIconFile)) {
+                        $pluginIconUrl .= '?t=' . filemtime($pluginIconFile);
+                    } else {
+                        $pluginIconUrl .= '?t=' . time();
+                    }
+                }
+                ?>
+                <h1 class="title d-flex align-items-center gap-2">
+                    <?php if ($pluginHasIcon): ?>
+                    <div class="pluginIconWrap" style="width:2rem;height:2rem;border-radius:0.4rem;flex-shrink:0;">
+                        <img class="pluginIcon" src="<?= $pluginIconUrl ?>" alt="">
+                    </div>
+                    <?php endif; ?>
+                    <?= $pluginInfo['name'] ?>
+                </h1>
                 <div class="pageContent">
 
 
