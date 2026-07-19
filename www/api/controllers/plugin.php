@@ -61,6 +61,37 @@ function DepsRequirePackages($deps)
 	return false;
 }
 
+// True if a dependencies block declares at least one non-empty Python (uv) package.
+function DepsRequirePython($deps)
+{
+	if (!is_array($deps) || !isset($deps['python']) || !is_array($deps['python'])) {
+		return false;
+	}
+	foreach ($deps['python'] as $p) {
+		if (is_string($p) && $p !== '') {
+			return true;
+		}
+	}
+	return false;
+}
+
+// True if the 'uv' tool is on PATH. FPP's own OS image provisions it via pipx
+// (see SD/FPP_Install.sh) specifically so plugins have a sanctioned, PEP
+// 668-safe way to install Python packages -- see PLUGIN_GUIDELINES.md #6.2 in
+// fpp-plugin-Template. Cached per-request; this is checked at most twice
+// (posted info, then the authoritative re-check after clone).
+function UvAvailable()
+{
+	static $available = null;
+	if ($available === null) {
+		$out = array();
+		$rc = 1;
+		exec('command -v uv 2>/dev/null', $out, $rc);
+		$available = ($rc === 0 && count($out) > 0);
+	}
+	return $available;
+}
+
 // Removes a partially-installed plugin directory (and any linkName symlink) so a
 // refused/failed install does not leave a half-installed plugin behind.
 function CleanupPartialPluginInstall($plugin, $linkName = null)
@@ -210,15 +241,33 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 		return true;
 	}
 
+	// Dependencies can be declared top-level (applies to every version) and/or
+	// on the specific versions[] entry that matches this system (additional to
+	// the top-level ones -- e.g. a package whose name differs between the FPP9
+	// and FPP10 image). Merge them once, up front.
+	$declaredDeps0 = MergePluginDependencies(
+		isset($pluginInfo['dependencies']) ? $pluginInfo['dependencies'] : null,
+		SelectPluginVersionEntry($pluginInfo)
+	);
+
 	// Refuse up front if the plugin declares required apt packages but this
 	// platform has no apt -- installing it would leave it broken. A plugin that
 	// genuinely needs packages should restrict itself with platforms[]; if the
 	// author forgot, we catch it here rather than half-installing. (Re-checked
 	// after clone against the repo's own pluginInfo.json, which is authoritative.)
-	if (DepsRequirePackages(isset($pluginInfo['dependencies']) ? $pluginInfo['dependencies'] : null) && !AptAvailable()) {
-		$pkgs = implode(', ', $pluginInfo['dependencies']['packages']);
+	if (DepsRequirePackages($declaredDeps0) && !AptAvailable()) {
+		$pkgs = implode(', ', $declaredDeps0['packages']);
 		$plat = isset($settings['Platform']) ? $settings['Platform'] : 'this platform';
 		PluginEchoLog('install', $repoName, "\nERROR: '$repoName' requires system packages ($pkgs) but $plat does not support system packages. Refusing to install.\n", $stream);
+		return false;
+	}
+
+	// Same idea for Python package dependencies: refuse up front rather than
+	// half-install if 'uv' isn't available. FPP's own OS image provisions it via
+	// pipx (SD/FPP_Install.sh) specifically for this, so its absence means a
+	// non-standard/unprovisioned system, not a normal per-platform gap.
+	if (DepsRequirePython($declaredDeps0) && !UvAvailable()) {
+		PluginEchoLog('install', $repoName, "\nERROR: '$repoName' requires Python package dependencies but 'uv' is not available on this system. Refusing to install.\n", $stream);
 		return false;
 	}
 
@@ -270,7 +319,14 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 	if (!is_array($data)) {
 		$data = $pluginInfo;
 	}
-	$deps = (isset($data['dependencies']) && is_array($data['dependencies'])) ? $data['dependencies'] : null;
+	// Authoritative dependency set: the cloned repo's own pluginInfo.json may
+	// declare deps the posted info did not, and this also re-selects the
+	// versions[] entry against the AUTHORITATIVE data (not the posted body),
+	// merging in that entry's own 'dependencies' block per MergePluginDependencies().
+	$deps = MergePluginDependencies(
+		isset($data['dependencies']) ? $data['dependencies'] : null,
+		SelectPluginVersionEntry($data)
+	);
 
 	// Authoritative package gate: the cloned repo's own pluginInfo.json may
 	// declare packages the posted info did not. Same rule -- refuse on a
@@ -282,6 +338,13 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 		// "install FINISH (rc=0)" block, so without this the log would show a
 		// clean install for a plugin this line is about to delete.
 		PluginEchoLog('install', $repoName, "\nERROR: '$repoName' requires system packages ($pkgs) but $plat does not support system packages. Refusing to install.\nRemoving the partial install of '$plugin'.\n", $stream);
+		CleanupPartialPluginInstall($plugin);
+		return false;
+	}
+
+	// Authoritative Python-dependency gate, same reasoning as the package gate above.
+	if (DepsRequirePython($deps) && !UvAvailable()) {
+		PluginEchoLog('install', $repoName, "\nERROR: '$repoName' requires Python package dependencies but 'uv' is not available on this system. Refusing to install.\nRemoving the partial install of '$plugin'.\n", $stream);
 		CleanupPartialPluginInstall($plugin);
 		return false;
 	}
@@ -334,11 +397,13 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 
 /**
  * Resolves a plugin's dependencies block: system packages (apt, ref-counted to
- * the owning plugin), script-repository scripts ("Category/file"), and other
- * plugins (installed transitively). Packages are installed first, then scripts,
- * then dependency plugins. Returns false if a *required* dependency (a declared
- * package, or a dependency plugin) could not be installed, so the caller can
- * refuse the whole install; script-repository entries are treated as soft.
+ * the owning plugin), Python packages (uv, into a venv in the plugin's own
+ * directory), script-repository scripts ("Category/file"), and other plugins
+ * (installed transitively). Packages are installed first, then Python
+ * packages, then scripts, then dependency plugins. Returns false if a
+ * *required* dependency (a declared package, Python package, or a dependency
+ * plugin) could not be installed, so the caller can refuse the whole install;
+ * script-repository entries are treated as soft.
  */
 function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth)
 {
@@ -366,6 +431,56 @@ function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth
 					PluginLog('install', $ownerRepo, "ERROR: failed to install required package '$pkg' (apt output above in the install dialog)");
 					$ok = false;
 				}
+			}
+		}
+	}
+
+	// --- python packages (uv, isolated per-plugin venv) ---
+	if (isset($deps['python']) && is_array($deps['python']) && count($deps['python'])) {
+		$pyPkgs = array();
+		foreach ($deps['python'] as $pkg) {
+			if (is_string($pkg) && $pkg !== '') {
+				$pyPkgs[] = $pkg;
+			}
+		}
+		if (count($pyPkgs)) {
+			if ($streaming) {
+				echo "\n=== Installing Python package dependencies for $ownerRepo (uv) ===\n";
+				flush();
+			}
+			$pluginDir = $settings['pluginDirectory'] . '/' . escapeshellcmd($ownerRepo);
+			$args = implode(' ', array_map('escapeshellarg', $pyPkgs));
+			// 'uv add' requires an existing uv project (pyproject.toml) -- unlike
+			// some other uv subcommands, it does NOT implicitly create one, and
+			// errors "No `pyproject.toml` found" if run cold. So run 'uv init'
+			// first, but only if the plugin directory isn't already initialized
+			// (re-running 'uv init' on an existing project errors too -- this
+			// runs on every install/update, not just the first one). 'uv init'
+			// creates pyproject.toml + a stub main.py; 'uv add' then creates the
+			// venv (named ".venv" -- uv's own default, not author-chosen) and
+			// installs into it. The plugin's own scripts run against it via
+			// "$SCRIPT_DIR/.venv/bin/python3" (see PLUGIN_GUIDELINES.md #6.1).
+			$initCmd = "[ -f pyproject.toml ] || uv init --no-readme --vcs none";
+			$cmd = $SUDO . " sh -c " . escapeshellarg("cd " . $pluginDir . " && " . $initCmd . " && uv add " . $args);
+			$rc = 0;
+			if ($streaming) {
+				system($cmd, $rc);
+			} else {
+				exec($cmd, $o, $rc);
+				unset($o);
+			}
+			if ($rc !== 0) {
+				PluginLog('install', $ownerRepo, "ERROR: 'uv add' failed for one or more Python package dependencies (exit $rc)");
+				$ok = false;
+			} else {
+				// uv ran privileged above (matching the apt install), so its
+				// venv/lock/project files land root-owned -- chown back to fpp so
+				// the plugin's own (non-root) tooling doesn't hit permission
+				// errors later, matching install_plugin's own post-clone chown.
+				if (!isset($settings['Platform']) || $settings['Platform'] !== 'MacOS') {
+					exec($SUDO . " chown -R fpp:fpp " . escapeshellarg($pluginDir));
+				}
+				PluginLog('install', $ownerRepo, "Installed Python package dependencies: " . implode(', ', $pyPkgs));
 			}
 		}
 	}
@@ -485,6 +600,24 @@ function ResolvePluginInfoByName($repoName)
  */
 function SelectPluginVersion($pluginInfo)
 {
+	$v = SelectPluginVersionEntry($pluginInfo);
+	if ($v === null) {
+		return null;
+	}
+	return array(
+		'branch' => isset($v['branch']) && $v['branch'] !== '' ? $v['branch'] : 'master',
+		'sha' => isset($v['sha']) ? $v['sha'] : ''
+	);
+}
+
+/**
+ * Same matching logic as SelectPluginVersion(), but returns the full matched
+ * versions[] entry instead of just branch/sha, so callers can also read a
+ * per-version 'dependencies' block (see MergePluginDependencies()). Returns
+ * null if $pluginInfo has no versions[] array.
+ */
+function SelectPluginVersionEntry($pluginInfo)
+{
 	global $settings;
 	if (!isset($pluginInfo['versions']) || !is_array($pluginInfo['versions']) || count($pluginInfo['versions']) === 0) {
 		return null;
@@ -509,11 +642,40 @@ function SelectPluginVersion($pluginInfo)
 	if ($compatible < 0) {
 		$compatible = 0; // fall back to first entry so the dependency still installs
 	}
-	$v = $versions[$compatible];
-	return array(
-		'branch' => isset($v['branch']) && $v['branch'] !== '' ? $v['branch'] : 'master',
-		'sha' => isset($v['sha']) ? $v['sha'] : ''
-	);
+	return $versions[$compatible];
+}
+
+/**
+ * Merges a plugin's top-level dependencies block with the ones declared on
+ * its currently-selected versions[] entry, if any. Per-version dependencies
+ * are ADDITIONAL to the top-level ones (e.g. a package whose name differs
+ * between the FPP9 and FPP10 image) -- they don't replace them. Arrays are
+ * concatenated per-key; a name declared both places is a harmless duplicate
+ * (every install path here -- apt/uv/script-repo/plugin -- is a no-op on a
+ * repeat). Returns null if neither side declares anything.
+ */
+function MergePluginDependencies($topLevelDeps, $versionEntry)
+{
+	$top = is_array($topLevelDeps) ? $topLevelDeps : array();
+	$ver = (is_array($versionEntry) && isset($versionEntry['dependencies']) && is_array($versionEntry['dependencies']))
+		? $versionEntry['dependencies'] : array();
+	if (!count($top) && !count($ver)) {
+		return null;
+	}
+	$merged = array();
+	foreach (array('packages', 'python', 'scripts', 'plugins') as $key) {
+		$list = array();
+		if (isset($top[$key]) && is_array($top[$key])) {
+			$list = array_merge($list, $top[$key]);
+		}
+		if (isset($ver[$key]) && is_array($ver[$key])) {
+			$list = array_merge($list, $ver[$key]);
+		}
+		if (count($list)) {
+			$merged[$key] = $list;
+		}
+	}
+	return count($merged) ? $merged : null;
 }
 
 // PHP port of versionToNumber() in www/js/fpp.js -- turns a version string into
