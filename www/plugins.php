@@ -251,6 +251,10 @@
             // "All" view shown at every UI level (D27) and is the default landing view.
             pills.push({ name: 'All', slug: 'all', icon: 'fas fa-border-all' });
             for (var i = 0; i < pluginCategoryList.length; i++) pills.push(pluginCategoryList[i]);
+            // Insert "Other" alphabetically among the known categories (skip index 0 which is "All")
+            var insIdx = 1;
+            while (insIdx < pills.length && pills[insIdx].name.localeCompare('Other', undefined, { sensitivity: 'base' }) < 0) insIdx++;
+            pills.splice(insIdx, 0, OTHER_CATEGORY);
             activeCategorySlug = 'all';
             for (var j = 0; j < pills.length; j++) {
                 var c = pills[j];
@@ -1264,15 +1268,15 @@
                 body += '<div class="fpp-major-callout mb-2"><i class="fas fa-exclamation-triangle"></i>' +
                     '<span>No version is compatible with your FPP version/platform.</span></div>';
             body += '<div class="d-flex flex-column gap-1 small">';
-            if (data.homeURL) body += '<a href="' + data.homeURL + '" target="_blank" rel="noopener noreferrer"><i class="fas fa-home"></i> ' + data.homeURL + '</a>';
+            if (data.homeURL) body += '<a href="' + data.homeURL + '" target="_blank" rel="noopener noreferrer" class="text-decoration-none"><i class="fas fa-home"></i> <span class="text-decoration-underline">' + data.homeURL + '</span></a>';
             // Omit "View Source" when srcURL just duplicates the home link (same repo),
             // ignoring a trailing slash or .git suffix so github.com/x/y(.git)(/) all match.
             var sameLink = function (a, b) {
                 var n = function (u) { return (u || '').replace(/\.git$/i, '').replace(/\/+$/, '').toLowerCase(); };
                 return a && b && n(a) === n(b);
             };
-            if (data.srcURL && !sameLink(data.srcURL, data.homeURL)) body += '<a href="' + data.srcURL + '" target="_blank" rel="noopener noreferrer"><i class="fas fa-code"></i> View Source</a>';
-            if (data.bugURL) body += '<a href="' + data.bugURL + '" target="_blank" rel="noopener noreferrer"><i class="fas fa-bug"></i> Report a Bug</a>';
+            if (data.srcURL && !sameLink(data.srcURL, data.homeURL)) body += '<a href="' + data.srcURL + '" target="_blank" rel="noopener noreferrer" class="text-decoration-none"><i class="fas fa-code"></i> <span class="text-decoration-underline">View Source</span></a>';
+            if (data.bugURL) body += '<a href="' + data.bugURL + '" target="_blank" rel="noopener noreferrer" class="text-decoration-none"><i class="fas fa-bug"></i> <span class="text-decoration-underline">Report a Bug</span></a>';
             body += '</div>';
 
             var buttons = {};
@@ -1553,6 +1557,7 @@
                     }
                     LoadPlugin(data, true);
                     $('#pluginInput').val('');
+                    ShowTopTab('available');
                     FilterPlugins();
                     $('#row-' + data.repoName)[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
                 };
@@ -1827,7 +1832,7 @@
                         <div id="pane-manage" class="pluginTopPane d-none">
                             <div class='pluginsHeader'>
                                 <h2 id="manageHeading">Installed Plugins</h2>
-                                <div class="d-flex gap-2 align-items-center">
+                                <div class="d-flex flex-wrap gap-2 align-items-center">
                                     <button id="checkAllUpdatesBtn" class="buttons btn-outline-success"
                                         onClick='CheckAllPluginsForUpdates();'
                                         title="Check all installed plugins for updates">
