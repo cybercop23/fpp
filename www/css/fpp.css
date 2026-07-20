@@ -2570,6 +2570,11 @@ table#fppSystemsTable > thead > tr:last-child > td {
 	background-image: url(/images/redesign/search-24px.svg);
 	background-repeat: no-repeat;
 	background-position: right 15px center;
+	padding-right: 36px;
+}
+
+#pluginInput.has-text {
+	background-image: none;
 }
 
 /* The find-box row sits inside .settings, whose `.settings .row` rule adds a
@@ -2582,16 +2587,21 @@ table#fppSystemsTable > thead > tr:last-child > td {
 	margin-bottom: 0;
 }
 
-.fppPluginInputActionCol {
+.pluginClearBtn {
+	position: absolute;
+	right: 12px;
+	top: 50%;
+	transform: translateY(-50%);
+	cursor: pointer;
+	color: #aaa;
 	display: none;
+	z-index: 5;
+	font-size: 18px;
+	line-height: 1;
 }
 
-.fppPluginInput.is-url .fppPluginInputActionCol {
-	display: block;
-}
-
-.fppPluginInput.is-url #pluginInput {
-	background-image: none;
+.pluginClearBtn:hover {
+	color: #333;
 }
 
 .fppPluginSection {
