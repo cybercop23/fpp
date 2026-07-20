@@ -61,7 +61,7 @@ function DepsRequirePackages($deps)
 	return false;
 }
 
-// True if a dependencies block declares at least one non-empty Python (uv) package.
+// True if a dependencies block declares at least one non-empty Python (pip) package.
 function DepsRequirePython($deps)
 {
 	if (!is_array($deps) || !isset($deps['python']) || !is_array($deps['python'])) {
@@ -75,18 +75,19 @@ function DepsRequirePython($deps)
 	return false;
 }
 
-// True if the 'uv' tool is on PATH. FPP's own OS image provisions it via pipx
-// (see SD/FPP_Install.sh) specifically so plugins have a sanctioned, PEP
-// 668-safe way to install Python packages -- see PLUGIN_GUIDELINES.md #6.2 in
-// fpp-plugin-Template. Cached per-request; this is checked at most twice
-// (posted info, then the authoritative re-check after clone).
-function UvAvailable()
+// True if 'pip' (via `python3 -m pip`) is available. FPP's own OS image
+// provisions python3-pip via apt (see SD/FPP_Install.sh) specifically so
+// plugins have a sanctioned way to install Python packages -- see
+// PLUGIN_GUIDELINES.md #6.2 in fpp-plugin-Template. Cached per-request; this
+// is checked at most twice (posted info, then the authoritative re-check
+// after clone).
+function PipAvailable()
 {
 	static $available = null;
 	if ($available === null) {
 		$out = array();
 		$rc = 1;
-		exec('command -v uv 2>/dev/null', $out, $rc);
+		exec('python3 -m pip --version 2>/dev/null', $out, $rc);
 		$available = ($rc === 0 && count($out) > 0);
 	}
 	return $available;
@@ -263,11 +264,12 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 	}
 
 	// Same idea for Python package dependencies: refuse up front rather than
-	// half-install if 'uv' isn't available. FPP's own OS image provisions it via
-	// pipx (SD/FPP_Install.sh) specifically for this, so its absence means a
-	// non-standard/unprovisioned system, not a normal per-platform gap.
-	if (DepsRequirePython($declaredDeps0) && !UvAvailable()) {
-		PluginEchoLog('install', $repoName, "\nERROR: '$repoName' requires Python package dependencies but 'uv' is not available on this system. Refusing to install.\n", $stream);
+	// half-install if 'pip' isn't available. FPP's own OS image provisions
+	// python3-pip via apt (SD/FPP_Install.sh) specifically for this, so its
+	// absence means a non-standard/unprovisioned system, not a normal
+	// per-platform gap.
+	if (DepsRequirePython($declaredDeps0) && !PipAvailable()) {
+		PluginEchoLog('install', $repoName, "\nERROR: '$repoName' requires Python package dependencies but 'pip' is not available on this system. Refusing to install.\n", $stream);
 		return false;
 	}
 
@@ -343,8 +345,8 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 	}
 
 	// Authoritative Python-dependency gate, same reasoning as the package gate above.
-	if (DepsRequirePython($deps) && !UvAvailable()) {
-		PluginEchoLog('install', $repoName, "\nERROR: '$repoName' requires Python package dependencies but 'uv' is not available on this system. Refusing to install.\nRemoving the partial install of '$plugin'.\n", $stream);
+	if (DepsRequirePython($deps) && !PipAvailable()) {
+		PluginEchoLog('install', $repoName, "\nERROR: '$repoName' requires Python package dependencies but 'pip' is not available on this system. Refusing to install.\nRemoving the partial install of '$plugin'.\n", $stream);
 		CleanupPartialPluginInstall($plugin);
 		return false;
 	}
@@ -397,8 +399,8 @@ function InstallPluginFromInfo($pluginInfo, &$visited, $stream, $depth = 0)
 
 /**
  * Resolves a plugin's dependencies block: system packages (apt, ref-counted to
- * the owning plugin), Python packages (uv, into a venv in the plugin's own
- * directory), script-repository scripts ("Category/file"), and other plugins
+ * the owning plugin), Python packages (pip, system-wide -- not isolated per
+ * plugin), script-repository scripts ("Category/file"), and other plugins
  * (installed transitively). Packages are installed first, then Python
  * packages, then scripts, then dependency plugins. Returns false if a
  * *required* dependency (a declared package, Python package, or a dependency
@@ -435,7 +437,7 @@ function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth
 		}
 	}
 
-	// --- python packages (uv, system-wide) ---
+	// --- python packages (pip, system-wide) ---
 	if (isset($deps['python']) && is_array($deps['python']) && count($deps['python'])) {
 		$pyPkgs = array();
 		foreach ($deps['python'] as $pkg) {
@@ -445,18 +447,24 @@ function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth
 		}
 		if (count($pyPkgs)) {
 			if ($streaming) {
-				echo "\n=== Installing Python package dependencies for $ownerRepo (uv) ===\n";
+				echo "\n=== Installing Python package dependencies for $ownerRepo (pip) ===\n";
 				flush();
 			}
 			$args = implode(' ', array_map('escapeshellarg', $pyPkgs));
-			// 'uv pip install --system' installs straight into FPP's system Python
-			// interpreter, PEP 668-safe (unlike bare 'pip install --break-system-packages',
-			// which corrupts it). No per-plugin venv/pyproject.toml to create or chown --
-			// plugin scripts just call the system "python3" (see PLUGIN_GUIDELINES.md #6.1).
-			// Packages are shared system-wide, not isolated per plugin: a version conflict
-			// between two plugins' declared deps will surface as a real install failure
-			// here, not silently coexist.
-			$cmd = $SUDO . " uv pip install --system " . $args;
+			// `pip install --break-system-packages` is required on any current
+			// PEP-668-managed image (Debian/RPi OS Bookworm+) -- without it pip refuses
+			// outright ("externally managed environment"). This is safe here, not a
+			// corruption risk: it installs into /usr/local/lib/python3.x/dist-packages,
+			// which is NOT tracked by dpkg (apt-installed python3-* packages live in
+			// /usr/lib/python3/dist-packages instead) -- confirmed by inspecting both
+			// paths directly. No per-plugin venv/pyproject.toml to create or chown --
+			// plugin scripts just call the system "python3" (see PLUGIN_GUIDELINES.md
+			// #6.1). Packages are shared system-wide, not isolated per plugin: a version
+			// conflict between two plugins' declared deps will surface as a real install
+			// failure here, not silently coexist. Note: a plugin needing a Python version
+			// other than FPP's system default (e.g. a dependency with no wheel for it) has
+			// no built-in FPP mechanism for that -- must be handled by the plugin itself.
+			$cmd = $SUDO . " python3 -m pip install --break-system-packages " . $args;
 			$rc = 0;
 			if ($streaming) {
 				system($cmd, $rc);
@@ -465,7 +473,7 @@ function ResolvePluginDependencies($deps, $ownerRepo, &$visited, $stream, $depth
 				unset($o);
 			}
 			if ($rc !== 0) {
-				PluginLog('install', $ownerRepo, "ERROR: 'uv pip install --system' failed for one or more Python package dependencies (exit $rc)");
+				PluginLog('install', $ownerRepo, "ERROR: 'pip install --break-system-packages' failed for one or more Python package dependencies (exit $rc)");
 				$ok = false;
 			} else {
 				PluginLog('install', $ownerRepo, "Installed Python package dependencies: " . implode(', ', $pyPkgs));
@@ -639,7 +647,7 @@ function SelectPluginVersionEntry($pluginInfo)
  * are ADDITIONAL to the top-level ones (e.g. a package whose name differs
  * between the FPP9 and FPP10 image) -- they don't replace them. Arrays are
  * concatenated per-key; a name declared both places is a harmless duplicate
- * (every install path here -- apt/uv/script-repo/plugin -- is a no-op on a
+ * (every install path here -- apt/pip/script-repo/plugin -- is a no-op on a
  * repeat). Returns null if neither side declares anything.
  */
 function MergePluginDependencies($topLevelDeps, $versionEntry)

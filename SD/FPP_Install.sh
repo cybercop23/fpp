@@ -660,7 +660,7 @@ install_base_packages() {
                       gstreamer1.0-libav gstreamer1.0-gl gstreamer1.0-x \
                       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-0 \
                       flex bison pkg-config libasound2-dev python3-setuptools libssl-dev libtool bsdextrautils iw rsyslog tzdata libsystemd-dev \
-                      pipx yt-dlp"
+                      python3-pip yt-dlp"
 
         if [ "$FPPPLATFORM" == "Raspberry Pi" -o "$FPPPLATFORM" == "BeagleBone Black"  -o "$FPPPLATFORM" == "BeagleBone 64" ]; then
             # firmware-misc-nonfree carries the rt2x00 / Mediatek (mt7601u, mt76xx) USB
@@ -717,19 +717,6 @@ EOF
         fi
         echo "FPP - Cleaning up after installing packages"
         apt-get -y clean
-
-        # uv: sanctioned way for a plugin's fpp_install.sh to get an isolated Python
-        # venv/interpreter without `pip install --break-system-packages` (which
-        # corrupts the system Python) or piping a third-party installer into a
-        # shell. No Debian package for uv itself, but pipx (installed above via
-        # PACKAGE_LIST) is a trusted apt package that can install it cleanly.
-        # --global installs to a shared location so it's on PATH for every user,
-        # not just root's home -- plugin install scripts may run as fpp or root.
-        if ! $skip_apt_install && command -v pipx >/dev/null 2>&1; then
-            echo "FPP - Installing uv (via pipx) for plugin use"
-            pipx install --global uv || echo "FPP - WARNING: 'pipx install --global uv' failed"
-        fi
-
 
         echo "FPP - Configuring shellinabox to use /var/tmp"
         echo "SHELLINABOX_DATADIR=/var/tmp/" >> /etc/default/shellinabox
