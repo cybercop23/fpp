@@ -1932,7 +1932,7 @@ configure_apache() {
 
     local mod
     for mod in mpm_event http2 cgi rewrite expires proxy proxy_http proxy_http2 \
-               proxy_html headers; do
+               proxy_html headers proxy_wstunnel; do
         a2enmod "$mod"
     done
     a2enmod proxy_fcgi setenvif

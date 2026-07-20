@@ -90,3 +90,4 @@ lib/*.so
 .claude/rules
 .claude/settings.local.json
 .wolf/
+plans/

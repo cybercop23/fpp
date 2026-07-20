@@ -654,6 +654,18 @@ function SystemGetStatus()
             $result = $result[$ipAddresses[0]];
         }
         return json($result);
+    } else if (isset($_GET['systemonly'])) {
+        // Just the host-side augmentation (advancedView cpu/mem, wifi, interfaces,
+        // reboot/restart flags, plugin indicators, crash-report warning) with no
+        // fppd base.  Used by pages that get the fppd half over the /fppdws
+        // WebSocket: they poll this slowly (default 30s) purely for the slow
+        // augmentation, so returning the fppd base too would just clobber the
+        // fresh WebSocket status with a stale copy.  Skipping the /fppd/status
+        // curl also means these warnings are the PHP-sourced ones only (crash
+        // report, and — since fppd is up whenever the WebSocket is — nothing
+        // else), so the client can union them with fppd's live warnings without
+        // a cleared warning lingering.
+        return json(finalizeStatusJson(array()));
     } else {
         // If IP[] was not provided, then status of the local machine is desired.
         //go through the new API to get the status

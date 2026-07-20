@@ -25,6 +25,30 @@ var statusTimeout = null;
 var lastStatus = '';
 var lastStatusJSON = null;
 var statusChangeFuncs = [];
+
+// fppd status WebSocket (/fppdws).  When connected, fppd pushes its /fppd/status
+// payload here instead of every page polling api/system/status for it.  The PHP
+// poll then runs slowly (gblSystemAugRefreshSeconds) and only for the host-side
+// augmentation (advancedView, wifi, interfaces, flags, plugin indicators, crash
+// warning) via ?systemonly=1.  If the socket never connects or drops -- an older
+// system without the proxy_wstunnel apache module, an odd reverse proxy, or fppd
+// itself being down -- everything falls back to the full poll at gblStatusRefreshSeconds,
+// which is also the only path that can report "fppd Not Running".
+var fppdWS = null;
+var fppdWSConnected = false;
+var fppdWSReconnectDelay = 1000; // ms, backoff up to 30s
+var fppdWSReconnectTimer = null;
+var fppdWSLastMsgTime = 0;
+var fppdWSWatchdog = null;
+var gblSystemAugRefreshSeconds = 30; // WS-mode PHP poll interval for the augmentation
+// Warnings have two independent sources that must be unioned for display: fppd's
+// live warnings (over the WS) and PHP's warnings (crash report / "fppd Not
+// Running") which survive an fppd crash.  Kept separate so a cleared fppd warning
+// disappears immediately instead of lingering in a stale PHP copy.
+var _wsWarnings = [];
+var _wsWarningInfo = [];
+var _systemWarnings = [];
+var _systemWarningInfo = [];
 var zebraPinSubContentTop = 0;
 var VolumeChangeInProgress = false;
 var VolumeChangeAPIInProgress = false;
@@ -133,6 +157,7 @@ function common_PageLoad_DOM_Setup () {
 	$.jGrowl.defaults.closerTemplate = '<div>Close Notifications</div>';
 	SetupToolTips();
 	LoadSystemStatus();
+	startFppdWS();
 
 	CheckBrowser();
 	CheckRestartRebootFlags();
@@ -9742,25 +9767,170 @@ function ToggleMenu () {
  * Other functions can either call the variable as a on-off or subscribe to changes.
  */
 function LoadSystemStatus () {
+	// When the WebSocket is delivering fppd's status, this poll drops to a slow
+	// cadence and fetches only the host-side augmentation (?systemonly=1), so it
+	// doesn't overwrite the fresh pushed status with a stale copy.  Otherwise it
+	// fetches the full status exactly as before.
+	var wsActive = fppdWSConnected;
 	$.ajax({
-		url: 'api/system/status',
+		url: wsActive ? 'api/system/status?systemonly=1' : 'api/system/status',
 		dataType: 'json',
 		success: function (response, reqStatus, xhr) {
-			if (response && typeof response === 'object') {
+			if (!response || typeof response !== 'object') return;
+			if (wsActive && fppdWSConnected) {
+				// Augmentation only; merge onto the WebSocket-supplied base.
+				applySystemAugmentation(response);
+			} else if (!wsActive) {
+				// Full status (no WebSocket) -- original behavior.
+				_wsWarnings = response.warnings || [];
+				_wsWarningInfo = response.warningInfo || [];
+				_systemWarnings = [];
+				_systemWarningInfo = [];
 				lastStatusJSON = response;
 				lastStatus = response.status;
-				// Call any "listeners"
 				triggerStatusChangeFunctions();
 			}
+			// else: WS dropped mid-request; its close handler triggers a full
+			// reload, so this systemonly response (which lacks the fppd base) is
+			// intentionally ignored.
 		},
 		complete: function () {
 			clearTimeout(statusTimeout);
-			statusTimeout = setTimeout(
-				LoadSystemStatus,
-				gblStatusRefreshSeconds * 1000
-			);
+			var secs = fppdWSConnected
+				? gblSystemAugRefreshSeconds
+				: gblStatusRefreshSeconds;
+			statusTimeout = setTimeout(LoadSystemStatus, secs * 1000);
 		}
 	});
+}
+
+// Recompute the displayed warning arrays from the two independent sources.
+// updateWarnings() and everything else read lastStatusJSON.warnings/warningInfo
+// unchanged; only how those arrays are assembled changes.
+function mergeWarningsInto (obj) {
+	if (!obj) return;
+	obj.warnings = _wsWarnings.concat(_systemWarnings);
+	obj.warningInfo = _wsWarningInfo.concat(_systemWarningInfo);
+}
+
+// A status snapshot pushed by fppd over the WebSocket.
+function applyWsStatus (status) {
+	if (!status || typeof status !== 'object') return;
+	if (!lastStatusJSON) lastStatusJSON = {};
+	_wsWarnings = status.warnings || [];
+	_wsWarningInfo = status.warningInfo || [];
+	Object.assign(lastStatusJSON, status);
+	mergeWarningsInto(lastStatusJSON);
+	lastStatus = status.status;
+	triggerStatusChangeFunctions();
+}
+
+// The host-side augmentation from api/system/status?systemonly=1.
+function applySystemAugmentation (response) {
+	if (!lastStatusJSON) lastStatusJSON = {};
+	_systemWarnings = response.warnings || [];
+	_systemWarningInfo = response.warningInfo || [];
+	Object.assign(lastStatusJSON, response);
+	mergeWarningsInto(lastStatusJSON);
+	triggerStatusChangeFunctions();
+}
+
+// Open (or reopen) the status WebSocket.  Safe to call repeatedly.
+function startFppdWS () {
+	if (typeof WebSocket === 'undefined') return; // very old browser: stay on polling
+	if (fppdWS && (fppdWS.readyState === 0 || fppdWS.readyState === 1)) return;
+	if (fppdWSReconnectTimer) {
+		clearTimeout(fppdWSReconnectTimer);
+		fppdWSReconnectTimer = null;
+	}
+	var proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+	var url = proto + '//' + window.location.host + '/fppdws';
+	try {
+		fppdWS = new WebSocket(url);
+	} catch (e) {
+		scheduleFppdWSReconnect();
+		return;
+	}
+	fppdWS.onopen = function () {
+		fppdWSReconnectDelay = 1000;
+		fppdWSLastMsgTime = Date.now();
+		// Connected marker is set on the first message (proves data actually
+		// flows through the proxy, not just that the handshake completed).
+		startFppdWSWatchdog();
+	};
+	fppdWS.onmessage = function (evt) {
+		fppdWSLastMsgTime = Date.now();
+		var wasConnected = fppdWSConnected;
+		fppdWSConnected = true;
+		var msg;
+		try {
+			msg = JSON.parse(evt.data);
+		} catch (e) {
+			return;
+		}
+		if (msg && msg.type === 'snapshot' && msg.data && msg.data.status) {
+			applyWsStatus(msg.data.status);
+		}
+		if (!wasConnected) {
+			// Just transitioned to WS-fed.  Poll the augmentation once
+			// immediately (now that fppdWSConnected is set, this fetches
+			// ?systemonly=1) so advancedView and the PHP-sourced crash-report
+			// warning populate right away instead of blinking out until the
+			// first slow poll; subsequent polls settle to the slow cadence.
+			clearTimeout(statusTimeout);
+			LoadSystemStatus();
+		}
+	};
+	fppdWS.onclose = function () {
+		handleFppdWSDown();
+	};
+	fppdWS.onerror = function () {
+		// onclose fires after onerror; let it do the teardown.
+	};
+}
+
+// Server pushes at least once a second while connected (the clock ticks), so a
+// multi-second gap means the socket is wedged even if it hasn't reported closed.
+function startFppdWSWatchdog () {
+	if (fppdWSWatchdog) clearInterval(fppdWSWatchdog);
+	fppdWSWatchdog = setInterval(function () {
+		if (!fppdWS) return;
+		if (fppdWSConnected && Date.now() - fppdWSLastMsgTime > 8000) {
+			try {
+				fppdWS.close();
+			} catch (e) {}
+			handleFppdWSDown();
+		}
+	}, 4000);
+}
+
+function handleFppdWSDown () {
+	var wasConnected = fppdWSConnected;
+	fppdWSConnected = false;
+	if (fppdWSWatchdog) {
+		clearInterval(fppdWSWatchdog);
+		fppdWSWatchdog = null;
+	}
+	// Drop the fppd-sourced warnings; the full poll below re-supplies everything.
+	_wsWarnings = [];
+	_wsWarningInfo = [];
+	if (wasConnected) {
+		// Fall back to the full status poll immediately so the fppd half (and,
+		// if fppd itself is down, the "Not Running" state) refreshes without
+		// waiting out the slow cadence.
+		clearTimeout(statusTimeout);
+		LoadSystemStatus();
+	}
+	scheduleFppdWSReconnect();
+}
+
+function scheduleFppdWSReconnect () {
+	if (fppdWSReconnectTimer) return;
+	fppdWSReconnectTimer = setTimeout(function () {
+		fppdWSReconnectTimer = null;
+		startFppdWS();
+	}, fppdWSReconnectDelay);
+	fppdWSReconnectDelay = Math.min(fppdWSReconnectDelay * 2, 30000);
 }
 
 function triggerStatusChangeFunctions () {
@@ -9777,6 +9947,24 @@ function SetStatusRefreshSeconds (seconds) {
 	if (!Number.isInteger(seconds)) return;
 	if (seconds < 1) return;
 	gblStatusRefreshSeconds = seconds;
+}
+
+/*
+ * How often to poll the host-side augmentation (advancedView cpu/mem, wifi, ...)
+ * while the status WebSocket is delivering the fppd half.  Defaults to 30s so
+ * incidental pages are cheap; a page that shows near-real-time system stats
+ * (system-stats.php) lowers this while it is open.
+ */
+function SetSystemAugRefreshSeconds (seconds) {
+	if (seconds == undefined) return;
+	if (!Number.isInteger(seconds)) return;
+	if (seconds < 1) return;
+	gblSystemAugRefreshSeconds = seconds;
+	// If the WebSocket is already feeding status, apply the new cadence now.
+	if (fppdWSConnected) {
+		clearTimeout(statusTimeout);
+		statusTimeout = setTimeout(LoadSystemStatus, gblSystemAugRefreshSeconds * 1000);
+	}
 }
 
 /*

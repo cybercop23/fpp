@@ -130,6 +130,15 @@ ProxyPassReverse /api/http-virtual-display-3d/ http://localhost:32329/
 ProxyPass /api/http-virtual-display/ http://localhost:32328/ flushpackets=on
 ProxyPassReverse /api/http-virtual-display/ http://localhost:32328/
 
+# WebSocket status push from fppd (/fppdws).  Same same-origin reverse-proxy
+# trick the SSE routes above use, so the browser never talks to :32322
+# directly (no CORS, works under HTTPS).  A WebSocket upgrade cannot go through
+# RewriteRule [P]; it needs ProxyPass with the ws:// scheme.  mod_proxy_http
+# (Apache >= 2.4.47, which all supported FPP OS images have) tunnels the upgrade
+# natively; mod_proxy_wstunnel is enabled as well for defense on older configs.
+ProxyPass /fppdws ws://localhost:32322/fppdws
+ProxyPassReverse /fppdws ws://localhost:32322/fppdws
+
 <Directory "/opt/fpp/www/js/plugin">
     Options FollowSymLinks
     AllowOverride None

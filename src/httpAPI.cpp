@@ -21,6 +21,7 @@
 
 #include "fpp-json.h"
 #include "fpphttp.h" // drogon/HTTP helpers used here; no longer pulled transitively (see fpphttp_types.h)
+#include "StatusWebSocket.h"
 #include <fcntl.h>
 
 // Defined in fppd.cpp; setting it to 0 breaks the main loop and triggers
@@ -468,6 +469,11 @@ void APIServer::Init(void) {
     auto fppShutdown = []() { runMainFPPDLoop = 0; };
     app.setIntSignalHandler(fppShutdown);
     app.setTermSignalHandler(fppShutdown);
+
+    // Register the /fppdws status push endpoint and its 1s change-poll timer.
+    // The explicit call also keeps StatusWebSocket.o's controller
+    // self-registration from being dropped by the linker.
+    StatusWebSocketInit();
 
     m_serverThread = new std::thread([]() {
         drogon::app().run();

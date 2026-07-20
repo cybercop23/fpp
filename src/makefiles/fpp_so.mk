@@ -57,6 +57,7 @@ OBJECTS_fpp_so += \
 	fseq/FSEQFile.o \
 	gpio.o \
 	httpAPI.o \
+	StatusWebSocket.o \
 	fpphttp_compat.o \
 	log.o \
 	FPPLocale.o \
