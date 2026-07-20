@@ -53,6 +53,10 @@ public:
     virtual void EnableDisplay() override;
     virtual void DisableDisplay() override;
 
+    virtual bool SupportsVariableRefresh() override { return m_variableRefresh; }
+    virtual int GetMaxRefreshRate() override;
+    virtual bool SetRefreshRate(int fps) override;
+
     int m_cardFd = -1;
     uint32_t m_connectorId = 0;
     uint32_t m_crtcId = 0;
@@ -70,6 +74,12 @@ private:
     static bool CreateDumbBuffer(int fd, uint32_t width, uint32_t height, uint32_t format, DumbBuffer& buf);
     static void DestroyDumbBuffer(int fd, DumbBuffer& buf);
     uint32_t FindPlaneForCrtc(int fd, uint32_t crtcId, uint32_t format);
+
+    // Rewrites the vertical timing of `mode` for `vactive` scanlines at `fps`,
+    // keeping the horizontal timing and pixel clock (and thus the DPI/WS bit
+    // timing) unchanged.  Requesting an fps above what the vactive allows is
+    // clamped to the minimum vertical blanking (i.e. the maximum rate).
+    void ApplyVerticalTiming(drmModeModeInfo& mode, int vactive, int fps);
 
     // Drain the completion event of an outstanding (m_flipPending) page flip.
     // Blocks in poll() until the flip retires at vblank (or timeoutMs elapses),

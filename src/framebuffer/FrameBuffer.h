@@ -78,6 +78,18 @@ public:
     virtual void EnableDisplay() {}
     virtual void DisableDisplay() {}
 
+    // Variable-refresh support (KMS/DPI only).  A frame buffer that manages its
+    // own display timing can change the output refresh rate at runtime by
+    // adjusting the vertical blanking while keeping the pixel clock and
+    // resolution fixed.  The base class does not support this.
+    virtual bool SupportsVariableRefresh() { return false; }
+    // Highest refresh rate (fps) achievable at the current resolution, or 0 when
+    // variable refresh is not supported.
+    virtual int GetMaxRefreshRate() { return 0; }
+    // Set the output refresh rate (fps).  Returns true when applied (or already
+    // at that rate); a no-op returning false when unsupported.
+    virtual bool SetRefreshRate(int fps) { return false; }
+
     void FBStartDraw(ImageTransitionType transitionType = IT_Default);
 
     virtual void Dump(void);
@@ -129,6 +141,7 @@ protected:
     int m_width = 0;
     int m_height = 0;
     int m_bpp = -1;
+    bool m_variableRefresh = false;
     uint8_t* m_buffer = nullptr;
     uint8_t* m_outputBuffer = nullptr;
     uint8_t* m_pageBuffers[3] = { nullptr, nullptr, nullptr };

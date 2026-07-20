@@ -16,6 +16,7 @@
 #include "fpp-json.h"
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 #include <sys/ioctl.h>
@@ -32,6 +33,7 @@
 
 #include "DPIPixels.h"
 #include "../CapeUtils/CapeUtils.h"
+#include "channeloutput/channeloutputthread.h"
 #include "channeloutput/stringtesters/PixelStringTester.h"
 #include "util/GPIOUtils.h"
 
@@ -66,11 +68,20 @@
  *
  * This requires a dtoverlay to set the appropriate clock frequency and
  * resolution and other timing parameters.  The source for the FPP overlay
- * is in /opt/fpp/capes/drivers/pi.
+ * is in /opt/fpp/capes/drivers/pi.  The overlay only needs to establish the
+ * 1920-wide, 38.4MHz DPI pipeline; its vertical resolution is just a boot
+ * default and is overridden at runtime (see below).
  *
- * The resolution is now set to 1920x497 for 40fps and 1920x997 for 20fps,
- * both at 38.4Mhz.  The DPI resolution and clock are kept the same
- * whether or not latches are used.
+ * The width is 1920 and the pixel clock 38.4MHz, which makes each WS bit 48 FB
+ * pixels (1.25us).  The vertical resolution is sized at Init() to the longest
+ * configured string: each scanline carries 5 channels, so the data occupies
+ * ceil(longestString/5) scanlines plus a small blank reset tail.  The output
+ * frame rate is then set per-sequence to min(sequenceRate, maxRateForLength) by
+ * varying ONLY the vertical blanking (vtotal) via FrameBuffer::SetRefreshRate();
+ * on the Pi5/RP1 DPI this is a runtime modeset that needs no reboot.  The
+ * clock stays fixed so the WS bit timing and framebuffer layout never change.
+ * fps * maxChannels is bounded by the WS281x 800kHz bit rate (~96000), e.g. at
+ * 38.4MHz: 40fps<->2400ch, 60fps<->1600ch, 80fps<->1200ch, 100fps<->960ch.
  *
  * 48 FrameBuffer pixels are used to drive each WS bit for all channels.  This
  * allows 16 FB pixels to set the initial On state, 16 FB pixels that are On/Off
@@ -462,10 +473,28 @@ int DPIPixelsOutput::Init(Json::Value config) {
         }
     }
 
+    // Size the framebuffer height to the longest string.  At the fixed DPI
+    // geometry (1920 wide, 48 FB pixels per WS bit) each scanline carries 5
+    // channels, so the WS bit stream for the longest string occupies
+    // ceil(longestString / 5) scanlines.  A few trailing blank scanlines
+    // guarantee the >50us WS reset low between frames.  The frame rate is then
+    // set at runtime purely by the vertical blanking (see PrepData ->
+    // FrameBuffer::SetRefreshRate), so this height is fixed for the life of the
+    // output and never needs a reboot to change fps.
+    constexpr int DPI_CHANNELS_PER_ROW = 5;   // 1920 / (3 * 16 fbPixelMult) / 8 bits
+    constexpr int DPI_RESET_ROWS = 8;         // ~400us guaranteed-low reset tail
+    constexpr int DPI_MAX_CHANNELS = 4800;    // onOffMask[][4800] limit (1600 pixels)
+    int cappedChannels = std::min(longestString, DPI_MAX_CHANNELS);
+    int dataRows = (cappedChannels + DPI_CHANNELS_PER_ROW - 1) / DPI_CHANNELS_PER_ROW;
+    int neededRows = dataRows + DPI_RESET_ROWS;
+
     Json::Value fbConfig;
-    // Read dimensions from current since we need a config.txt entry to set dpi_timings
+    // Width 0 => use the connector's (1920) width.  Height is our computed row
+    // count; VariableRefresh tells KMS to drive its own vertical timing so we can
+    // change the refresh rate at runtime without a reboot.
     fbConfig["Width"] = 0;
-    fbConfig["Height"] = 0;
+    fbConfig["Height"] = neededRows;
+    fbConfig["VariableRefresh"] = true;
 
     // Default is now to use KMS which would be named DPI-1
     device = "DPI-1";
@@ -507,6 +536,14 @@ int DPIPixelsOutput::Init(Json::Value config) {
     }
 
     LogDebug(VB_CHANNELOUT, "The framebuffer device %s was opened successfully.\n", device.c_str());
+
+    // Highest refresh rate this string length allows.  KMS starts the display at
+    // that rate (minimal blanking); the actual rate is lowered per-sequence to
+    // min(sequenceRate, m_configuredMaxFps) in PrepData().
+    m_configuredMaxFps = fb->GetMaxRefreshRate();
+    m_currentFps = m_configuredMaxFps;
+    LogInfo(VB_CHANNELOUT, "DPIPixels: framebuffer %dx%d, max refresh %d fps for %d channel longest string\n",
+            fb->Width(), fb->Height(), m_configuredMaxFps, longestString);
 
     bool initOK = false;
     if (protocol == "ws2811") {
@@ -552,11 +589,18 @@ int DPIPixelsOutput::Init(Json::Value config) {
     vs_pin.configPin("dpi");
 #endif
 
+    // Enable runtime refresh-rate control now that pins are live.
+    m_initialized = true;
+
     return ChannelOutput::Init(config);
 }
 
 int DPIPixelsOutput::Close(void) {
     LogDebug(VB_CHANNELOUT, "DPIPixelsOutput::Close()\n");
+
+    // Stop runtime rate control so the blanking PrepData() calls below don't
+    // trigger a modeset while we're tearing down.
+    m_initialized = false;
 
     // Send blank WS281x data to clear latched pixels before shutdown
     if (fb && pixelStrings.size() > 0 && protocol == "ws2811") {
@@ -620,6 +664,24 @@ void DPIPixelsOutput::OverlayTestData(unsigned char* channelData, int cycleNum, 
 }
 
 void DPIPixelsOutput::PrepData(unsigned char* channelData) {
+    // Match the DPI output rate to the running sequence, capped by what the
+    // longest string physically allows.  A change only happens when a sequence
+    // with a different frame rate starts, so the (brief) modeset is rare.
+    if (m_initialized && m_configuredMaxFps > 0) {
+        int target = (int)std::lround(GetChannelOutputRefreshRate());
+        if (target < 1) {
+            target = 1;
+        }
+        if (target > m_configuredMaxFps) {
+            target = m_configuredMaxFps;
+        }
+        if (target != m_currentFps && fb->SetRefreshRate(target)) {
+            LogInfo(VB_CHANNELOUT, "DPIPixels: DPI refresh -> %d fps (sequence rate %.1f, max %d)\n",
+                    target, GetChannelOutputRefreshRate(), m_configuredMaxFps);
+            m_currentFps = target;
+        }
+    }
+
     PixelString* ps = NULL;
     int ch = 0;
 #ifdef LOG_ELAPSED_TIME
@@ -828,48 +890,32 @@ bool DPIPixelsOutput::FrameBufferIsConfigured(void) {
     if (!fb)
         return false;
 
+    if (protocol != "ws2811")
+        return false;
+
     std::string errStr = "";
 
-    if (protocol == "ws2811") {
-        int currentFPS = getSettingInt("DPI_FPS", 40);
-        if (fb->Width() == 1920) {
-            if (fb->Height() == 497) { // 40 FPS
-                if (longestString <= 2400) {
-                    return true;
-                } else if (longestString <= 4800) {
-                    errStr = m_outputType + " Framebuffer configured for 40fps but channel count " + std::to_string(longestString) + " is too high.  Reboot is required to switch to 20fps.";
-
-                    std::string nvresults;
-                    urlPut("http://127.0.0.1/api/settings/DPI_FPS", "20", nvresults);
-                    urlPut("http://127.0.0.1/api/settings/rebootFlag", "1", nvresults);
-                } else {
-                    errStr = m_outputType + " Framebuffer configured for 40fps but channel count " + std::to_string(longestString) + " is too high for 40fps (max 2400 channels) or 20fps (max 4800).";
-                }
-            } else if (fb->Height() == 997) { // 20 FPS
-                if (longestString <= 2400) {
-                    errStr = m_outputType + " Framebuffer configured for 20fps but channel count " + std::to_string(longestString) + " allows running at 40fps.  Reboot is required to switch to 40fps.";
-
-                    std::string nvresults;
-                    urlPut("http://127.0.0.1/api/settings/DPI_FPS", "40", nvresults);
-                    urlPut("http://127.0.0.1/api/settings/rebootFlag", "1", nvresults);
-                    return true;
-                } else if (longestString <= 4800) {
-                    return true;
-                } else {
-                    errStr = m_outputType + " Framebuffer configured for 20fps but channel count " + std::to_string(longestString) + " is too high.  Max 4800 channels.";
-                }
-            }
-        } else {
-            return false;
-        }
+    // The DPI overlay (config.txt: dtoverlay=vc4-kms-dpi-fpp) fixes the width at
+    // 1920 and the pixel clock at 38.4MHz, which is what makes each WS bit 48 FB
+    // pixels (1.25us).  Without it the bit timing is wrong.
+    if (fb->Width() != 1920) {
+        errStr = m_outputType + " Framebuffer width " + std::to_string(fb->Width()) +
+                 " is not 1920; the DPI overlay is not configured.  A reboot may be required to load it.";
+    } else if (!fb->SupportsVariableRefresh()) {
+        // Non-KMS fallback (e.g. IOCTL fbdev) cannot retime the output; the
+        // variable frame rate feature requires the KMS DPI device.
+        errStr = m_outputType + " Framebuffer does not support variable refresh; KMS DPI output is required.";
+    } else if (longestString > 4800) {
+        // Hard limit from onOffMask[][4800] (1600 pixels per string).
+        errStr = m_outputType + " channel count " + std::to_string(longestString) +
+                 " is too high.  Max 4800 channels (1600 pixels) per string.";
+    } else {
+        return true;
     }
 
-    if (errStr != "") {
-        WarningHolder::AddWarning(errStr);
-        errStr += "\n";
-        LogErr(VB_CHANNELOUT, errStr.c_str());
-    }
-
+    WarningHolder::AddWarning(errStr);
+    errStr += "\n";
+    LogErr(VB_CHANNELOUT, errStr.c_str());
     return false;
 }
 

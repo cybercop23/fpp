@@ -18,6 +18,9 @@
 #include <libdrm/drm_fourcc.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <cmath>
+#include <cstring>
+#include <cerrno>
 #include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
@@ -349,21 +352,39 @@ int KMSFrameBuffer::InitializeFrameBuffer(void) {
             card->reservedConnectors.push_back(m_connectorId);
             card->reservedCrtcs.push_back(m_crtcId);
 
-            if (m_width == 0) {
-                m_width = m_mode.hdisplay;
-            }
-            if (m_height == 0) {
-                m_height = m_mode.vdisplay;
-            }
-            if (m_pixelSize == 0) {
-                int mw = m_mode.hdisplay / m_width;
-                int mh = m_mode.vdisplay / m_height;
-                m_pixelSize = std::min(mw, mh);
-                if (m_pixelSize < 1) {
-                    m_pixelSize = 1;
+            if (m_variableRefresh) {
+                // DPI Pixels: drive our own vertical timing.  Keep the
+                // connector's horizontal timing and pixel clock (they define the
+                // WS281x bit timing) but set vactive to the caller's requested
+                // scanline count (sized to the longest string) and start at the
+                // maximum refresh rate.  DPIPixelsOutput lowers it per-sequence
+                // via SetRefreshRate() by only varying the vertical blanking, so
+                // the framebuffer and its contents never have to be rebuilt.
+                if (m_width == 0) {
+                    m_width = m_mode.hdisplay;
                 }
-                m_width *= m_pixelSize;
-                m_height *= m_pixelSize;
+                if (m_height == 0) {
+                    m_height = m_mode.vdisplay;
+                }
+                m_pixelSize = 1;
+                ApplyVerticalTiming(m_mode, m_height, 1000000); // clamped to max fps
+            } else {
+                if (m_width == 0) {
+                    m_width = m_mode.hdisplay;
+                }
+                if (m_height == 0) {
+                    m_height = m_mode.vdisplay;
+                }
+                if (m_pixelSize == 0) {
+                    int mw = m_mode.hdisplay / m_width;
+                    int mh = m_mode.vdisplay / m_height;
+                    m_pixelSize = std::min(mw, mh);
+                    if (m_pixelSize < 1) {
+                        m_pixelSize = 1;
+                    }
+                    m_width *= m_pixelSize;
+                    m_height *= m_pixelSize;
+                }
             }
 
             m_bpp = 24;
@@ -715,6 +736,100 @@ void KMSFrameBuffer::EnableDisplay() {
     } else {
         LogDebug(VB_CHANNELOUT, "  Skipping: mediaOutputStatus.output matches connector\n");
     }
+}
+
+// Minimum vertical blanking (scanlines) to keep between vactive and vtotal.  The
+// RP1 DPI generates a low signal on the data pins during blanking, so this also
+// contributes to the WS281x reset gap; the caller (DPIPixelsOutput) additionally
+// pads vactive with blank scanlines so the reset is guaranteed regardless.
+static constexpr int KMS_MIN_VBLANK_LINES = 3;
+
+void KMSFrameBuffer::ApplyVerticalTiming(drmModeModeInfo& mode, int vactive, int fps) {
+    if (mode.htotal == 0) {
+        return;
+    }
+    int minVtotal = vactive + KMS_MIN_VBLANK_LINES;
+    int vtotal = minVtotal;
+    if (fps > 0) {
+        // pixel clock is kHz; vtotal = clockHz / (htotal * fps)
+        long long v = llround((double)mode.clock * 1000.0 / ((double)mode.htotal * (double)fps));
+        if (v > minVtotal) {
+            vtotal = (int)v;
+        }
+    }
+    mode.vdisplay = vactive;
+    mode.vsync_start = vactive + 1;
+    mode.vsync_end = vactive + 2;
+    mode.vtotal = vtotal;
+    mode.vrefresh = (uint32_t)llround((double)mode.clock * 1000.0 / ((double)mode.htotal * (double)vtotal));
+    snprintf(mode.name, sizeof(mode.name), "%dx%d", mode.hdisplay, vactive);
+}
+
+int KMSFrameBuffer::GetMaxRefreshRate() {
+    if (!m_variableRefresh || m_mode.htotal == 0) {
+        return 0;
+    }
+    int minVtotal = m_mode.vdisplay + KMS_MIN_VBLANK_LINES;
+    return (int)((double)m_mode.clock * 1000.0 / ((double)m_mode.htotal * (double)minVtotal));
+}
+
+bool KMSFrameBuffer::SetRefreshRate(int fps) {
+    if (!m_variableRefresh || fps <= 0 || m_mode.htotal == 0) {
+        return false;
+    }
+
+    int minVtotal = m_mode.vdisplay + KMS_MIN_VBLANK_LINES;
+    long long v = llround((double)m_mode.clock * 1000.0 / ((double)m_mode.htotal * (double)fps));
+    int newVtotal = (v > minVtotal) ? (int)v : minVtotal;
+    if (newVtotal == m_mode.vtotal) {
+        return true; // already at this rate
+    }
+
+    // Only the vertical blanking changes; horizontal timing and the pixel clock
+    // (and therefore the WS bit timing and the framebuffer layout) are untouched.
+    m_mode.vsync_start = m_mode.vdisplay + 1;
+    m_mode.vsync_end = m_mode.vdisplay + 2;
+    m_mode.vtotal = newVtotal;
+    m_mode.vrefresh = (uint32_t)llround((double)m_mode.clock * 1000.0 / ((double)m_mode.htotal * (double)newVtotal));
+
+    std::unique_lock<std::mutex> lock(mediaOutputLock);
+    if (mediaOutputStatus.output == m_connectorName) {
+        // The connector is currently presenting media playback; don't fight it.
+        // The updated m_mode is applied on the next EnableDisplay()/modeset.
+        return true;
+    }
+    int im = ioctl(m_cardFd, DRM_IOCTL_SET_MASTER, 0);
+    if (im != 0) {
+        // Couldn't grab master right now; m_mode is updated and the next modeset
+        // in SyncDisplay() will pick up the new timing.
+        return true;
+    }
+    // Drain any in-flight flip so the modeset starts from a known state.
+    if (m_flipPending) {
+        int vr = m_mode.vrefresh > 0 ? m_mode.vrefresh : 60;
+        WaitForPendingFlip((1000 / vr) + 20);
+    }
+    int ret = drmModeSetCrtc(m_cardFd, m_crtcId, m_fb[m_cPage].fb_id, 0, 0,
+                             &m_connectorId, 1, &m_mode);
+    if (ret == 0) {
+        m_displayEnabled = true;
+        if (m_planeId) {
+            drmModeSetPlane(m_cardFd, m_planeId, m_crtcId, m_fb[m_cPage].fb_id, 0,
+                            0, 0, m_mode.hdisplay, m_mode.vdisplay,
+                            0, 0, (uint32_t)m_width << 16, (uint32_t)m_height << 16);
+        }
+        // A mode change restarts the vblank stream; clear the cadence trackers so
+        // the transition isn't miscounted as a stutter.
+        m_flipPending = false;
+        m_lastFlipSeq = 0;
+        m_prevVblankDelta = 0;
+        LogInfo(VB_CHANNELOUT, "KMSFrameBuffer %s: refresh set to %dHz (vtotal=%d)\n",
+                m_connectorName.c_str(), m_mode.vrefresh, newVtotal);
+    } else {
+        LogErr(VB_CHANNELOUT, "KMSFrameBuffer::SetRefreshRate modeset failed: %d (%s)\n", ret, strerror(errno));
+    }
+    ioctl(m_cardFd, DRM_IOCTL_DROP_MASTER, 0);
+    return ret == 0;
 }
 
 #endif

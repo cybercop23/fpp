@@ -140,6 +140,9 @@ int FrameBuffer::FBInit(const Json::Value& config) {
     if (config.isMember("AutoSync"))
         m_autoSync = config["AutoSync"].asBool();
 
+    if (config.isMember("VariableRefresh"))
+        m_variableRefresh = config["VariableRefresh"].asBool();
+
     if (m_pixelSize > 0) {
         m_pixelsWide = m_width / m_pixelSize;
         m_pixelsHigh = m_height / m_pixelSize;

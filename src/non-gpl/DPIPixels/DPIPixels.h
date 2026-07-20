@@ -82,6 +82,13 @@ private:
 
     int fbPixelMult = 1;
 
+    // Runtime refresh-rate control.  The framebuffer height is sized once to the
+    // longest string; the DPI output rate is then set per-sequence by varying
+    // only the vertical blanking (see KMSFrameBuffer::SetRefreshRate).
+    int m_configuredMaxFps = 0; // highest rate the longest string allows
+    int m_currentFps = 0;       // last rate applied to the framebuffer
+    bool m_initialized = false; // gates runtime rate control (off during Init/Close)
+
     // Track which pins we configured as DPI so we can reset them on close
     std::vector<std::string> m_configuredDPIPins;
 

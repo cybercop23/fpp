@@ -968,10 +968,15 @@ void setupChannelOutputs() {
         origLine = content.substr(idx, idx2 - idx);
     }
     if (hasDPI) {
-        int fps = getRawSettingInt("DPI_FPS", 40);
-        std::string model = GetFileContents("/sys/firmware/devicetree/base/model");
+        // The DPI overlay only bootstraps the 1920-wide, 38.4MHz pipeline; its
+        // vertical resolution is just the boot/default mode.  DPIPixelsOutput
+        // overrides the vertical timing at runtime (sizing vactive to the longest
+        // string and setting the frame rate purely via the vertical blanking, no
+        // reboot).  Declare the tallest envelope we support - vactive=997 (the old
+        // 20fps mode, the lowest rate / longest string) - so every runtime mode is
+        // a subset of what the overlay advertises.
         std::string width = "1920";
-        std::string height = fps == 40 ? "497" : "997";
+        std::string height = "997";
         std::string line = "dtoverlay=vc4-kms-dpi-fpp,rgb888,hactive=" + width + ",hfp=0,hsync=1,hbp=0,vactive=" + height + ",vfp=1,vsync=1,vbp=1";
         if (line != origLine) {
             if (origLine != "") {
