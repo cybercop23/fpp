@@ -28,6 +28,9 @@
         var pluginInfoURLs = [];
         var pluginInfoUseCredentials = {};
         var manuallyLoadedPlugins = {};
+        var lastAutoLoadedUrl = '';
+        var urlLoadedRepo = null;
+        var pluginUrlError = '';
         // --- Plugin categories (Phase 1) ---
         var pluginCategoryList = [];      // [{name,longName,slug,icon}] from pluginCategories.json
         var pluginCategoryBySlug = {};
@@ -1527,7 +1530,34 @@
                             if (pluginList[index] && pluginList[index].length > 2 && pluginList[index][2])
                                 data.__category = pluginList[index][2];
                             LoadPlugin(data);
-                            $('#pluginInput').on('input', FilterPlugins);
+                            $('#pluginInput').on('input', function () {
+                                var val = $('#pluginInput').val() || '';
+                                pluginUrlError = '';
+                                if (val.length > 0) {
+                                    $('#pluginInput').addClass('has-text');
+                                    $('#pluginClearBtn').css('display', 'block');
+                                } else {
+                                    $('#pluginInput').removeClass('has-text');
+                                    $('#pluginClearBtn').css('display', '');
+                                }
+                                 if (/plugininfo\.json$/i.test(val)) {
+                                    if (val !== lastAutoLoadedUrl) {
+                                        if (urlLoadedRepo) {
+                                            $('#row-' + urlLoadedRepo).remove();
+                                            delete manuallyLoadedPlugins[urlLoadedRepo];
+                                            urlLoadedRepo = null;
+                                        }
+                                        lastAutoLoadedUrl = val;
+                                        ManualLoadInfo(true);
+                                    }
+                                } else if (urlLoadedRepo) {
+                                    $('#row-' + urlLoadedRepo).remove();
+                                    delete manuallyLoadedPlugins[urlLoadedRepo];
+                                    urlLoadedRepo = null;
+                                    lastAutoLoadedUrl = '';
+                                }
+                                FilterPlugins();
+                            });
                             FilterPlugins();
 
                         },
@@ -1547,7 +1577,21 @@
             }
         }
 
-        function ManualLoadInfo() {
+        function ClearPluginInput() {
+            $('#pluginInput').val('').removeClass('has-text');
+            $('#pluginClearBtn').css('display', '');
+            pluginUrlError = '';
+            if (urlLoadedRepo) {
+                $('#row-' + urlLoadedRepo).remove();
+                delete manuallyLoadedPlugins[urlLoadedRepo];
+                urlLoadedRepo = null;
+            }
+            lastAutoLoadedUrl = '';
+            $('#pluginInput').focus();
+            FilterPlugins();
+        }
+
+        function ManualLoadInfo(auto) {
             var url = $('#pluginInput').val();
 
             if (url.indexOf('://') > -1) {
@@ -1566,8 +1610,8 @@
                         // for subsequent install/upgrade operations.
                         pluginInfoUseCredentials[data.repoName] = 1;
                     }
+                    urlLoadedRepo = data.repoName;
                     LoadPlugin(data, true);
-                    $('#pluginInput').val('');
                     ShowTopTab('available');
                     FilterPlugins();
                     $('#row-' + data.repoName)[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -1590,24 +1634,23 @@
                             success: function (data) {
                                 if (data && data.Status === 'Error') {
                                     $('html,body').css('cursor', 'auto');
-                                    alert('Error fetching plugin info: ' + data.Message + '\n\nIf this is a private repository, configure the GitHub user name and Personal Access Token on the Developer settings page.');
+                                    pluginUrlError = url;
+                                    FilterPlugins();
                                     return;
                                 }
                                 onSuccess(data, true);
                             },
                             error: function (d) {
                                 $('html,body').css('cursor', 'auto');
-                                if (d.statusText !== undefined) {
-                                    d = d.statusText;
-                                }
-                                alert('Error, failed to fetch ' + url + " - " + d);
+                                pluginUrlError = url;
+                                FilterPlugins();
                             }
                         });
                     }
                 });
             }
-            else {
-                alert('Invalid pluginInfo.json URL');
+            else if (!auto) {
+                alert('Invalid plugininfo.json URL');
             }
         }
         // Remembered across page loads: the progress dialogs (install/upgrade/
@@ -1639,43 +1682,53 @@
 
         function FilterPlugins() {
             var raw = $('#pluginInput').val() || '';
-            var isUrl = raw.indexOf('://') > -1;
             var value = raw.toLowerCase();
-            if (isUrl) $('.fppPluginInput').addClass('is-url'); else $('.fppPluginInput').removeClass('is-url');
 
-            var searching = (value !== '' && !isUrl);
+            var isUrlInput = /plugininfo\.json$/i.test(raw);
+            var urlLoadedMode = isUrlInput && urlLoadedRepo;
+            var searching = (value !== '' && !isUrlInput);
             pluginSearchActive = searching;
 
-            // Category chip shows only where categories are mixed: the All view and search
-            // results. Inside a single-category pane it is redundant with the active pill.
             $('#pluginGrid .pluginCatChip').toggleClass('d-none', !(searching || activeCategorySlug === 'all'));
 
-            // Available cards: filter by active category pill + search.
+            var loadedCardEl = urlLoadedMode ? document.getElementById('row-' + urlLoadedRepo) : null;
+
+            // Available cards
             var counts = {}, total = 0, availVisible = 0;
             $('#pluginGrid').children('.pluginCard').each(function () {
                 var slug = $(this).attr('data-category-slug') || 'other';
                 counts[slug] = (counts[slug] || 0) + 1; total++;
-                var searchText = $('.pluginTitle', this).text().toLowerCase();
-                var authorTxt = $('.pluginAuthor', this).text().toLowerCase();
-                if (authorTxt) searchText += ' ' + authorTxt;
-                var descTxt = $('.pluginCardDesc', this).text().toLowerCase();
-                if (descTxt) searchText += ' ' + descTxt;
-                var matchesSearch = isUrl || value === '' || searchText.indexOf(value) > -1;
-                var matchesCat = searching || activeCategorySlug === 'all' || slug === activeCategorySlug;
-                var show = matchesSearch && matchesCat;
-                $(this).toggleClass('d-none', !show);
-                if (show) availVisible++;
+                if (urlLoadedMode) {
+                    var show = this === loadedCardEl;
+                    $(this).toggleClass('d-none', !show);
+                    if (show) availVisible++;
+                } else {
+                    var searchText = $('.pluginTitle', this).text().toLowerCase();
+                    var authorTxt = $('.pluginAuthor', this).text().toLowerCase();
+                    if (authorTxt) searchText += ' ' + authorTxt;
+                    var descTxt = $('.pluginCardDesc', this).text().toLowerCase();
+                    if (descTxt) searchText += ' ' + descTxt;
+                    var matchesSearch = value === '' || searchText.indexOf(value) > -1;
+                    var matchesCat = searching || activeCategorySlug === 'all' || slug === activeCategorySlug;
+                    var show = matchesSearch && matchesCat;
+                    $(this).toggleClass('d-none', !show);
+                    if (show) availVisible++;
+                }
             });
 
-            // Installed cards: search filter; Updates tab shows only updatable ones.
+            // Installed cards
             var installedVisible = 0, updateVisible = 0;
             $('#installedGrid').children('.pluginCard').each(function () {
+                if (urlLoadedMode) {
+                    $(this).addClass('d-none');
+                    return;
+                }
                 var searchText = $('.pluginTitle', this).text().toLowerCase();
                 var authorTxt = $('.pluginAuthor', this).text().toLowerCase();
                 if (authorTxt) searchText += ' ' + authorTxt;
                 var descTxt = $('.pluginCardDesc', this).text().toLowerCase();
                 if (descTxt) searchText += ' ' + descTxt;
-                var matchesSearch = isUrl || value === '' || searchText.indexOf(value) > -1;
+                var matchesSearch = value === '' || searchText.indexOf(value) > -1;
                 var hasUpdate = $(this).hasClass('fppHasUpdate');
                 if (hasUpdate) updateVisible++;
                 var matchesTab = (activeTopTab !== 'updates') || hasUpdate;
@@ -1686,18 +1739,21 @@
             if (activeTopTab === 'updates') $('#noUpdatesHint').toggleClass('d-none', installedVisible > 0);
             else $('#noUpdatesHint').addClass('d-none');
 
-            // With nothing to update, an "Updates Available" title claims the opposite of
-            // what the pane shows. .invisible (not .d-none) so the header keeps its box and
-            // the buttons stay put relative to the Installed tab.
             $('#manageHeading').toggleClass('invisible', activeTopTab === 'updates' && updateVisible === 0);
 
-            // "No results" messages so an empty view reads as a search miss, not a bug.
             var installedTotal = $('#installedGrid').children('.pluginCard').length;
-            $('#noAvailableResults').toggleClass('d-none', !(searching && activeTopTab === 'available' && availVisible === 0));
+            var hasUrlError = pluginUrlError && raw === pluginUrlError;
+            if (hasUrlError) {
+                $('#noAvailableResults').addClass('d-none');
+                $('#noUrlResults').removeClass('d-none');
+            } else {
+                $('#noAvailableResults').toggleClass('d-none', !(searching && activeTopTab === 'available' && availVisible === 0));
+                $('#noUrlResults').addClass('d-none');
+            }
             $('#noInstalledResults').toggleClass('d-none', !(searching && activeTopTab === 'installed' && installedVisible === 0 && installedTotal > 0));
             $('.fppNoResultsTerm').text(raw);
+            $('.fppUrlErrorTerm').text(raw);
 
-            // Pill counts + hide empty category pills.
             $('#pluginCategoryPills .fppCatCount').each(function () {
                 var s = $(this).attr('data-count-slug');
                 var val = (s === 'all') ? total : (counts[s] || 0);
@@ -1706,11 +1762,12 @@
                 if (s !== 'all' && val === 0) $li.addClass('d-none'); else $li.removeClass('d-none');
             });
 
-            // Search hides the strip: the results are the answer, not a discovery shelf.
-            // Visibility only — rebuilding 10 cards per keystroke would be waste.
-            UpdatePopularStripVisibility();
+            if (isUrlInput) {
+                $('#popularStripWrap').addClass('d-none');
+            } else {
+                UpdatePopularStripVisibility();
+            }
 
-            // Top-tab counts.
             $('#topCountAvailable').text(total);
             $('#topCountInstalled').text($('#installedGrid').children('.pluginCard').length);
             $('#topCountUpdates').text(updateVisible);
@@ -1731,6 +1788,7 @@
                 ShowTopTab($(this).attr('data-top-tab'));
                 this.scrollIntoView({ block: 'nearest', inline: 'center' });
             });
+            $('#pluginClearBtn').on('click', ClearPluginInput);
             BindPopularStripControls();
             GetPluginPopularity();   // parallel with the list/installed loads (Phase 2)
             GetInstalledPlugins();
@@ -1759,15 +1817,12 @@
                         <div class="row align-items-lg-center g-2 mb-3">
                             <div id='pluginTableHead' class="col-12 col-lg-4 order-lg-2 d-lg-flex">
                                 <div class="row fppPluginInput gx-2 flex-grow-1 align-items-center">
-                                    <div class="col d-flex">
+                                    <div class="col d-flex position-relative">
                                         <input type="text" id="pluginInput" autocomplete="off"
                                             class="form-control form-control-rounded has-shadow flex-grow-1"
-                                            placeholder="Find a Plugin or Enter a plugininfo.json URL" />
-                                    </div>
-                                    <div class="col-auto fppPluginInputActionCol">
-                                        <div class="buttons btn-rounded btn-outline-success" onClick='ManualLoadInfo();'>
-                                            <i class="fas fa-download"></i> Get Plugin Info
-                                        </div>
+                                            placeholder="Find a Plugin or Enter a pluginInfo.json URL" />
+                                        <i id="pluginClearBtn" class="fas fa-times-circle pluginClearBtn"
+                                            title="Clear search"></i>
                                     </div>
                                 </div>
                             </div>
@@ -1836,6 +1891,10 @@
                                 <div id="noAvailableResults" class="alert alert-info d-none mt-2">
                                     <i class="fas fa-search"></i> No plugins match
                                     "<b class="fppNoResultsTerm"></b>". Clear the search box to see all plugins.
+                                </div>
+                                <div id="noUrlResults" class="alert alert-info d-none mt-2">
+                                    <i class="fas fa-exclamation-triangle"></i> No valid plugins found on JSON URL:
+                                    "<b class="fppUrlErrorTerm"></b>". Clear the search box to see all plugins.
                                 </div>
                             </div>
                         </div>
