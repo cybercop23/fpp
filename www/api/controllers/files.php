@@ -327,6 +327,73 @@ function GetFiles()
 }
 
 /**
+ * Get sequence frame rates (fps)
+ *
+ * Returns a map of sequence filename => fps for every `.fseq` file in the
+ * sequence directory. This is intentionally split out from the main file
+ * listing so the file manager can render the sequence list immediately and
+ * lazily fill in the FPS column via this endpoint.
+ *
+ * The fps is derived from the fseq header StepTime (fps = round(1000 /
+ * StepTime)) and cached per file (keyed on name + size) so fsequtils is only
+ * run on cache misses.
+ *
+ * @route GET /api/files/Sequences/fps
+ * @response 200 Map of sequence filename to fps
+ * ```json
+ * {
+ *   "GreatestShow.fseq": 40,
+ *   "subdir/Intro.fseq": 20
+ * }
+ * ```
+ */
+function GetSequenceFPS()
+{
+    global $fppDir, $SUDO;
+
+    $dir = GetDirSetting("sequences");
+    $result = array();
+
+    $doSudo = $SUDO;
+    $user = get_current_user();
+    if ($user == "fpp" || $user == "root") {
+        $doSudo = "";
+    }
+
+    $filelist = array();
+    exec("$doSudo find " . escapeshellarg($dir) . " -type f -follow -iname '*.fseq' -printf \"%P|||%s\n\"", $filelist);
+
+    foreach ($filelist as $line) {
+        $parts = explode("|||", $line);
+        $name = $parts[0];
+        $size = isset($parts[1]) ? $parts[1] : 0;
+        if ($name == "") {
+            continue;
+        }
+
+        $fps = sequence_fps_cache($name, null, $size);
+        if ($fps === null) {
+            $full = $dir . "/" . $name;
+            $out = array();
+            exec($fppDir . "/src/fsequtils -j " . escapeshellarg($full) . " 2> /dev/null", $out);
+            if (isset($out[0])) {
+                $js = json_decode($out[0], true);
+                if (isset($js['StepTime']) && $js['StepTime'] > 0) {
+                    $fps = round(1000 / $js['StepTime']);
+                    sequence_fps_cache($name, $fps, $size);
+                }
+            }
+        }
+
+        if ($fps !== null) {
+            $result[$name] = $fps;
+        }
+    }
+
+    return json($result);
+}
+
+/**
  * Get plugin file info
  *
  * Returns plugin-specific file info for the specified file path. The plugin

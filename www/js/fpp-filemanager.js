@@ -1,6 +1,10 @@
 // Global storage for file data to calculate total sizes
 var fileData = {};
 
+// Cache of sequence filename => fps, populated lazily by LoadSequenceFPS() so
+// the file manager list renders immediately and the FPS column fills in after.
+var sequenceFpsCache = {};
+
 // Logs tab ordering: FPP's own logs first, third-party plugin logs after.
 //
 // This is deliberately a VIEW concern, solved in the view. The alternative --
@@ -188,6 +192,23 @@ function GetFiles (dir, extraParams) {
 					if (f.sizeBytes == 0) {
 						extraClass += ' fileIsDirectory';
 					}
+
+					// Sequences get an extra FPS column. Directories show no
+					// value; files show the cached fps if we have it, otherwise
+					// a placeholder that LoadSequenceFPS() fills in afterwards.
+					var fpsCell = '';
+					if (dir == 'Sequences') {
+						var fpsVal = '';
+						if (f.sizeBytes != 0) {
+							fpsVal =
+								sequenceFpsCache[f.name] !== undefined
+									? sequenceFpsCache[f.name]
+									: "<span class='fpsPending text-muted'>…</span>";
+						}
+						fpsCell =
+							"<td class='fileFPS' align='right'>" + fpsVal + '</td>';
+					}
+
 					tableRow =
 						"<tr class='" +
 						extraClass +
@@ -197,7 +218,9 @@ function GetFiles (dir, extraParams) {
 						f.name.replace(/&/g, '&amp;').replace(/</g, '&lt;') +
 						"</td><td class='fileExtraInfo'>" +
 						detail +
-						"</td><td class ='fileTime'>" +
+						'</td>' +
+						fpsCell +
+						"<td class ='fileTime'>" +
 						f.mtime +
 						'</td></tr>';
 				}
@@ -220,6 +243,11 @@ function GetFiles (dir, extraParams) {
 		complete: function () {
 			SetupTableSorter('tbl' + dir);
 			UpdateFileCount(dir);
+			if (dir == 'Sequences') {
+				// Lazily fetch the per-sequence fps (server-cached) and fill in
+				// the FPS column afterwards, without blocking the initial list.
+				LoadSequenceFPS();
+			}
 		}
 	});
 }
@@ -238,6 +266,67 @@ function GetAllFiles () {
 
 	pluginFileExtensions.forEach(ext => {
 		GetFiles(ext);
+	});
+}
+
+// Fetches the fps (frame rate) for every sequence from the server-cached
+// endpoint. This is deliberately decoupled from the main file listing so the
+// file manager renders immediately; the FPS column shows a placeholder until
+// this resolves, then the values are pushed into the table.
+function LoadSequenceFPS () {
+	$.getJSON('api/files/Sequences/fps').done(function (data) {
+		if (!data || typeof data !== 'object') {
+			return;
+		}
+		$.extend(sequenceFpsCache, data);
+
+		var $table = $('#tblSequences');
+		var initialized = !!(
+			$table.closest('.bootstrap-table').length ||
+			$table.data('bootstrap.table')
+		);
+
+		// Decoder to turn an escaped filename cell value back into the raw name
+		// used as the cache/endpoint key (handles &amp;, &lt;, &#39;, etc.).
+		var decoder = document.createElement('textarea');
+		var decode = function (s) {
+			decoder.innerHTML = s;
+			return decoder.value.trim();
+		};
+
+		if (initialized) {
+			// Update the Bootstrap Table data model in place and reload so the
+			// FPS column repaints (rewriting the raw <tbody> is discarded by
+			// Bootstrap Table's destroy/restore cycle).
+			var rows = $table.bootstrapTable('getData');
+			var changed = false;
+			rows.forEach(function (row) {
+				if (row.filename === undefined) {
+					return;
+				}
+				var name = decode(row.filename);
+				if (
+					sequenceFpsCache[name] !== undefined &&
+					row.fps != sequenceFpsCache[name]
+				) {
+					row.fps = sequenceFpsCache[name];
+					changed = true;
+				}
+			});
+			if (changed) {
+				$table.bootstrapTable('load', rows);
+			}
+		} else {
+			// Table not built yet (its tab is hidden); patch the raw cells so
+			// the values are present when it initializes from the DOM.
+			$table.find('tbody tr').each(function () {
+				var $row = $(this);
+				var name = decode($row.find('td.fileName').html());
+				if (sequenceFpsCache[name] !== undefined) {
+					$row.find('td.fileFPS').text(sequenceFpsCache[name]);
+				}
+			});
+		}
 	});
 }
 

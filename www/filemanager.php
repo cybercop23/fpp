@@ -237,6 +237,7 @@
                                                 <tr>
                                                     <th data-field="filename">File</th>
                                                     <th data-field="size">Size</th>
+                                                    <th data-field="fps">FPS</th>
                                                     <th data-field="dateModified">Date Modified</th>
                                                 </tr>
                                             </thead>

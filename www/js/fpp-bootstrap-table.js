@@ -66,6 +66,15 @@ const bootstrapTableOptions_Sequences = {
 			filterControl: 'input'
 		},
 		{
+			field: 'fps',
+			title: 'FPS',
+			sortable: true,
+			searchable: true,
+			align: 'right',
+			sorter: 'numericSorter',
+			filterControl: 'input'
+		},
+		{
 			field: 'dateModified',
 			title: 'Date Modified',
 			sortable: true,
@@ -668,6 +677,16 @@ window.metricSorter = function (a, b) {
 		return number * (multipliers[unit] || 1);
 	};
 	return parseMetric(a) - parseMetric(b);
+};
+
+// Numeric sorter (for plain numbers like the sequence FPS column). Cells may
+// contain a placeholder (e.g. "…") while the value is loading; those sort as 0.
+window.numericSorter = function (a, b) {
+	const parseNum = val => {
+		const num = parseFloat(String(val).replace(/[^\d.-]/g, ''));
+		return isNaN(num) ? 0 : num;
+	};
+	return parseNum(a) - parseNum(b);
 };
 
 // Date sorter (for dates like "04/01/26  09:42 PM")

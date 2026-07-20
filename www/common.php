@@ -1944,6 +1944,66 @@ function media_duration_cache($media, $duration_seconds = null, $filesize = null
 }
 
 /**
+ * Caches the frame rate (fps) of sequence (.fseq) files so the file manager
+ * doesn't have to shell out to fsequtils for every sequence on every listing.
+ *
+ * Mirrors media_duration_cache(): keyed on the relative filename and validated
+ * against the file size so a re-rendered/replaced sequence of a different size
+ * is recomputed rather than returning a stale value.
+ *
+ * If the fps for the file exists in the cache it's returned, otherwise null is
+ * returned (or, when $fps is supplied, the value is stored and returned).
+ *
+ * @param string $sequence relative sequence filename (cache key)
+ * @param int|float|null $fps fps to store, or null to only query
+ * @param int|string|null $filesize file size used to validate the cache entry
+ * @return int|float|null cached/stored fps, or null on a miss with nothing to store
+ */
+function sequence_fps_cache($sequence, $fps = null, $filesize = null)
+{
+    global $settings;
+    $config_dir = $settings['configDirectory'];
+    $file_path = $config_dir . "/sequence_fps.cache";
+    $time = 86400 * 30; //seconds - cache for 24hrs * 30days
+    $fps_cache = array();
+    $return_fps = null;
+
+    if (!file_exists($file_path) || (time() - filemtime($file_path) > $time)) {
+        // cache doesn't exist or expired so lets create it and insert our entry
+        if ($fps !== null) {
+            $fps_cache[$sequence] = array('filesize' => $filesize, 'fps' => $fps);
+            $return_fps = $fps;
+            file_put_contents($file_path, json_encode($fps_cache, JSON_PRETTY_PRINT), LOCK_EX);
+        }
+    } else {
+        //else cache exists and is valid, replace/append our entry to it
+        $fps_cache = file_get_contents($file_path);
+        if ($fps_cache !== false && !empty($fps_cache)) {
+            $fps_cache = json_decode($fps_cache, true);
+            if ($fps_cache === null) {
+                //failed to decode json, reset the cache
+                $fps_cache = array();
+                unlink($file_path);
+            }
+        } else {
+            // file exists but failed to read it or it's empty, reset the cache
+            $fps_cache = array();
+            unlink($file_path);
+        }
+        //if the file size matches then it's the same file
+        if (array_key_exists($sequence, $fps_cache) && $fps_cache[$sequence]['filesize'] == $filesize) {
+            $return_fps = $fps_cache[$sequence]['fps'];
+        } else if ($fps !== null) {
+            $fps_cache[$sequence] = array('filesize' => $filesize, 'fps' => $fps);
+            $return_fps = $fps;
+            file_put_contents($file_path, json_encode($fps_cache, JSON_PRETTY_PRINT), LOCK_EX);
+        }
+    }
+
+    return $return_fps;
+}
+
+/**
  * Returns the supplied filesize in bytes in a human readable format
  * @param $bytes
  * @param int $decimals

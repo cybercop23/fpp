@@ -59,6 +59,7 @@ dispatch_get('/events', 'events_list');
 dispatch_get('/events/:eventId', 'event_get');
 dispatch_get('/events/:eventId/trigger', 'event_trigger');
 
+dispatch_get('/files/Sequences/fps', 'GetSequenceFPS'); // keep above files/:DirName
 dispatch_get('/files/:DirName', 'GetFiles');
 dispatch_get('/file/info/:plugin/:ext/**', 'GetPluginFileInfo'); // keep above file/:DirName
 dispatch_get('/file/onUpload/:ext/**', 'PluginFileOnUpload'); // keep above file/:DirName
