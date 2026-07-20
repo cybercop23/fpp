@@ -2380,6 +2380,27 @@ function readCapes($cd, $capes)
     ?>
     const xlmodels = <? echo $models_json; ?>;
     const xlmodels_err = "<? echo $models_err; ?>";
+    //xLights removed the generic parm1/parm2/parm3 model attributes in favor of
+    //per-model-type named attributes.  Older show folders still carry parm2, so try
+    //the named attributes first and fall back.  Matching on the attribute name rather
+    //than DisplayAs is deliberate: the same xLights change also split combined values
+    //("Tree 360") into a base plus a modifier ("Tree" + TreeDegrees), so a DisplayAs
+    //lookup table would need maintaining in two places.  These are the names that
+    //replaced parm2 specifically, so the pixel count matches what parm2 used to give.
+    const XL_PARM2_NAMES = ["NodesPerString", "NodesPerArch", "NodesPerCane", "NodesPerArm", "CubeHeight", "SideNodes", "CustomHeight"];
+
+    function xlNodeCount(attrs) {
+        //a custom model carries its node layout directly
+        if (attrs.CustomModel)
+            return attrs.CustomModel.split(/[;,]/).filter(node => node !== "").length;
+
+        for (const name of XL_PARM2_NAMES)
+            if (attrs[name])
+                return +attrs[name];
+
+        return attrs.parm2 ? +attrs.parm2 : 0; //pre-rename show folders
+    }
+
     //xlate xLights models into Pixel Strings:
     function importStrings() {
         const outtype = $('#PixelStringSubType').val(); //"DPI24Hat"
@@ -2390,7 +2411,7 @@ function readCapes($cd, $capes)
                 const attrs = model["@attributes"];
                 const name = attrs.name;
                 const starch = +attrs.StartChannel.replace(/![^:]+:/, "");
-                const numpx = attrs.CustomModel ? attrs.CustomModel.split(/[;,]/).filter(node => node !== "").length : attrs.parm2 ? +attrs.parm2 : 0;
+                const numpx = xlNodeCount(attrs);
                 return Object.assign(model, { inx, attrs, name, starch, numpx });
             })
             .sort((lhs, rhs) => lhs.starch - rhs.starch)
