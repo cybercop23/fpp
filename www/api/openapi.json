@@ -2277,6 +2277,31 @@
         }
       }
     },
+    "/api/files/Sequences/fps": {
+      "get": {
+        "tags": [
+          "files"
+        ],
+        "summary": "Get sequence frame rates (fps)",
+        "description": "Returns a map of sequence filename => fps for every `.fseq` file in the sequence directory. This is intentionally split out from the main file listing so the file manager can render the sequence list immediately and lazily fill in the FPS column via this endpoint. The fps is derived from the fseq header StepTime (fps = round(1000 / StepTime)) and cached per file (keyed on name + size) so fsequtils is only run on cache misses.",
+        "responses": {
+          "200": {
+            "description": "Map of sequence filename to fps",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                },
+                "example": {
+                  "GreatestShow.fseq": 40,
+                  "subdir/Intro.fseq": 20
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/files/zip/{DirNames}": {
       "parameters": [
         {
@@ -6464,6 +6489,23 @@
         }
       }
     },
+    "/api/plugin/fetchImage?url=...": {
+      "get": {
+        "tags": [
+          "plugin"
+        ],
+        "summary": "Proxy-fetch a plugin icon image",
+        "description": "Fetches an image from an external URL and serves it with the correct content-type. Used to bypass CSP restrictions that block loading images from external hosts (e.g. raw.githubusercontent.com) directly in `<img>` tags.",
+        "responses": {
+          "200": {
+            "description": "Image data"
+          },
+          "400": {
+            "description": "Missing or invalid URL"
+          }
+        }
+      }
+    },
     "/api/plugin/fetchInfo": {
       "post": {
         "tags": [
@@ -6527,54 +6569,30 @@
         }
       }
     },
-    "/api/plugin/fetchImage": {
+    "/api/plugin/popularity": {
       "get": {
         "tags": [
           "plugin"
         ],
-        "summary": "Proxy-fetch plugin icon image",
-        "description": "Fetches a plugin icon image from an external URL and serves it with the correct content-type. Used to bypass CSP restrictions that block loading images from external hosts directly in `<img>` tags.",
-        "parameters": [
-          {
-            "name": "url",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uri"
-            },
-            "description": "URL of the icon image to proxy"
-          }
-        ],
+        "summary": "plugin/popularity",
+        "description": "Get plugin install-popularity counts (repoName -> install count, last 365 days), proxied + cached from the community stats feed.",
         "responses": {
           "200": {
-            "description": "Image data",
+            "description": "Success",
             "content": {
-              "image/png": {
+              "application/json": {
                 "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              },
-              "image/jpeg": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              },
-              "image/gif": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
+                  "type": "object"
+                },
+                "example": {
+                  "period": "last365Days",
+                  "counts": {
+                    "remote-falcon": 1680
+                  },
+                  "source": "live|cache|stale|unavailable"
                 }
               }
             }
-          },
-          "400": {
-            "description": "Missing or invalid url parameter"
-          },
-          "404": {
-            "description": "Failed to fetch image from URL"
           }
         }
       }
@@ -6649,36 +6667,25 @@
       }
     },
     "/api/plugin/{RepoName}/icon": {
+      "parameters": [
+        {
+          "name": "RepoName",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
       "get": {
         "tags": [
           "plugin"
         ],
         "summary": "Serve plugin icon",
-        "description": "Serves the plugin icon. First checks for a local `icon.png` in the plugin directory. If not found, checks `pluginInfo.json` for an `iconURL` field and proxies it server-side. Always returns same-origin to avoid CSP restrictions on external image hosts.",
-        "parameters": [
-          {
-            "name": "RepoName",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
+        "description": "Serves the plugin icon. First checks for a local icon.png in the plugin directory. If not found, checks the plugin's pluginInfo.json for an iconURL field and proxies it (same-origin, avoids CSP restrictions on external image hosts).",
         "responses": {
           "200": {
-            "description": "PNG image data",
-            "content": {
-              "image/png": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              }
-            }
-          },
-          "304": {
-            "description": "Not modified — icon file unchanged since `If-Modified-Since` timestamp"
+            "description": "PNG image data"
           },
           "404": {
             "description": "No icon available"
@@ -7797,6 +7804,30 @@
                   "settings": {
                     "alwaysTransmit": {}
                   }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/settings/fanThermal/reset": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Reset fan thermal trip settings",
+        "description": "Removes all FanTrip_* settings and restores the hardware (device tree) default trip temperatures that fppinit captured at boot.",
+        "responses": {
+          "200": {
+            "description": "Settings reset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                },
+                "example": {
+                  "status": "OK"
                 }
               }
             }
