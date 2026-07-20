@@ -108,12 +108,10 @@ OBJECTS_fpp_so += \
 	playlist/PlaylistEntryBranch.o \
 	playlist/PlaylistEntryCommand.o \
 	playlist/PlaylistEntryDynamic.o \
-	playlist/PlaylistEntryEffect.o \
 	playlist/PlaylistEntryImage.o \
 	playlist/PlaylistEntryMedia.o \
 	playlist/PlaylistEntryPause.o \
 	playlist/PlaylistEntryPlaylist.o \
-	playlist/PlaylistEntryPlugin.o \
 	playlist/PlaylistEntryRemap.o \
 	playlist/PlaylistEntryScript.o \
 	playlist/PlaylistEntrySequence.o \

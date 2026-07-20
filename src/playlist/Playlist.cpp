@@ -39,12 +39,10 @@
 #include "PlaylistEntryBranch.h"
 #include "PlaylistEntryCommand.h"
 #include "PlaylistEntryDynamic.h"
-#include "PlaylistEntryEffect.h"
 #include "PlaylistEntryImage.h"
 #include "PlaylistEntryMedia.h"
 #include "PlaylistEntryPause.h"
 #include "PlaylistEntryPlaylist.h"
-#include "PlaylistEntryPlugin.h"
 #include "PlaylistEntryRemap.h"
 #include "PlaylistEntryScript.h"
 #include "PlaylistEntrySequence.h"
@@ -603,8 +601,6 @@ PlaylistEntryBase* Playlist::LoadPlaylistEntry(Json::Value entry) {
         result = new PlaylistEntryBranch(this);
     else if (entry["type"].asString() == "dynamic")
         result = new PlaylistEntryDynamic(this);
-    else if (entry["type"].asString() == "effect")
-        result = new PlaylistEntryEffect(this);
     else if (entry["type"].asString() == "image")
         result = new PlaylistEntryImage(this);
     else if (entry["type"].asString() == "media")
@@ -613,8 +609,6 @@ PlaylistEntryBase* Playlist::LoadPlaylistEntry(Json::Value entry) {
         result = new PlaylistEntryPause(this);
     else if (entry["type"].asString() == "playlist")
         result = new PlaylistEntryPlaylist(this);
-    else if (entry["type"].asString() == "plugin")
-        result = new PlaylistEntryPlugin(this);
     else if (entry["type"].asString() == "remap")
         result = new PlaylistEntryRemap(this);
     else if (entry["type"].asString() == "script")

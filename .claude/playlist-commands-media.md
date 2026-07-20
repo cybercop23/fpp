@@ -8,7 +8,7 @@ Manages three sections: **leadIn**, **mainPlaylist**, **leadOut**. Each contains
 
 **Playlist States**: `IDLE`, `PLAYING`, `STOPPING_GRACEFULLY`, `STOPPING_GRACEFULLY_AFTER_LOOP`, `STOPPING_NOW`, `PAUSED`.
 
-### Playlist Entry Types (14 types)
+### Playlist Entry Types (12 types)
 
 | Entry Type | Class | Purpose |
 | --- | --- | --- |
@@ -17,15 +17,18 @@ Manages three sections: **leadIn**, **mainPlaylist**, **leadOut**. Each contains
 | Both | `PlaylistEntryBoth` | Synchronized sequence + media playback |
 | Command | `PlaylistEntryCommand` | Execute FPP command, check for completion |
 | Script | `PlaylistEntryScript` | Run external shell script (blocking/non-blocking) |
-| Effect | `PlaylistEntryEffect` | Trigger overlay effect (blocking/non-blocking) |
 | Image | `PlaylistEntryImage` | Display image on overlay model (async load, ImageMagick, caching) |
 | Pause | `PlaylistEntryPause` | Timed delay between entries |
 | Playlist | `PlaylistEntryPlaylist` | Nested sub-playlist |
 | Branch | `PlaylistEntryBranch` | Conditional branching (time/loop/MQTT-based, true/false targets) |
 | Remap | `PlaylistEntryRemap` | Channel remapping operations |
 | URL | `PlaylistEntryURL` | HTTP GET/POST requests (libcurl, token replacement) |
-| Dynamic | `PlaylistEntryDynamic` | Load entries at runtime from command/file/plugin/URL/JSON |
-| Plugin | `PlaylistEntryPlugin` | Plugin-defined entries |
+| Dynamic | `PlaylistEntryDynamic` | Load entries at runtime from command/file/URL/JSON |
+
+> To trigger an overlay/`.eseq` effect from a playlist, use a **Command** entry running the
+> `Effect Start` / `Effect Stop` / `Start FSEQ As Effect` commands (`src/commands/EventCommands.cpp`).
+> The former standalone `effect` and `plugin` entry types were unfinished 2017 stubs (the `effect`
+> one broken, the `plugin` one a do-nothing shell), never reachable from the editor, and were removed.
 
 ---
 

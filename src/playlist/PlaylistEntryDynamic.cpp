@@ -25,7 +25,6 @@
 #include "PlaylistEntryBoth.h"
 #include "PlaylistEntryCommand.h"
 #include "PlaylistEntryDynamic.h"
-#include "PlaylistEntryEffect.h"
 #include "PlaylistEntryMedia.h"
 #include "PlaylistEntryPause.h"
 #include "PlaylistEntryRemap.h"
@@ -360,8 +359,6 @@ int PlaylistEntryDynamic::ReadFromString(std::string jsonStr) {
             playlistEntry = new PlaylistEntryBoth(m_parentPlaylist);
         else if (pe["type"].asString() == "command")
             playlistEntry = new PlaylistEntryCommand(m_parentPlaylist);
-        else if (pe["type"].asString() == "effect")
-            playlistEntry = new PlaylistEntryEffect(m_parentPlaylist);
         else if (pe["type"].asString() == "media")
             playlistEntry = new PlaylistEntryMedia(m_parentPlaylist);
         else if (pe["type"].asString() == "pause")
