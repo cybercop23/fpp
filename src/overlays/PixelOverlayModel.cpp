@@ -122,6 +122,12 @@ PixelOverlayModel::PixelOverlayModel(const Json::Value& c) :
     }
     bytesPerPixel = (channelsPerNode >= 4) ? 4 : 3;
 
+    // Color order is consumed by the web UI (testing.php) via the model's JSON
+    // config; ensure it always has a value so the API exposes it.
+    if (!config.isMember("ColorOrder")) {
+        config["ColorOrder"] = "RGB";
+    }
+
     if (config["Type"].asString() != "Channel") {
         if (config.isMember("PixelSize") && config["PixelSize"].asInt() > 1) {            
             width = config["Width"].asInt() / config["PixelSize"].asInt();

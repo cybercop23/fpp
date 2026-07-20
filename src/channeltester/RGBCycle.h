@@ -34,4 +34,5 @@ private:
     std::vector<char> m_colorPattern;
     int m_colorPatternSize;
     int m_patternOffset;
+    int m_channelsPerNode; // 3 for RGB, 4 for RGBW
 };

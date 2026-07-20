@@ -87,6 +87,18 @@ public:
         if (m == "R-G-B-All-None") {
             return "RGBAN";
         }
+        if (m == "R-G-B-W") {
+            return "RGBW";
+        }
+        if (m == "R-G-B-W-All") {
+            return "RGBWA";
+        }
+        if (m == "R-G-B-W-None") {
+            return "RGBWN";
+        }
+        if (m == "R-G-B-W-All-None") {
+            return "RGBWAN";
+        }
         return "RGB";
     }
     std::string mapPattern(const std::string& m) {
@@ -99,7 +111,24 @@ public:
         if (m == "R-G-B-All-None") {
             return "FF000000FF000000FFFFFFFF000000";
         }
+        // RGBW patterns use 4-channel (8 hex digit) groups: R, G, B, W, All, None
+        if (m == "R-G-B-W") {
+            return "FF00000000FF00000000FF00000000FF";
+        }
+        if (m == "R-G-B-W-All") {
+            return "FF00000000FF00000000FF00000000FFFFFFFFFF";
+        }
+        if (m == "R-G-B-W-None") {
+            return "FF00000000FF00000000FF00000000FF00000000";
+        }
+        if (m == "R-G-B-W-All-None") {
+            return "FF00000000FF00000000FF00000000FFFFFFFFFF00000000";
+        }
         return "FF000000FF000000FF";
+    }
+    // Number of channels per pixel implied by the chase/cycle type (4 for RGBW patterns, 3 otherwise)
+    int mapChannelsPerNode(const std::string& m) {
+        return (m.find("W") != std::string::npos) ? 4 : 3;
     }
 
     virtual std::unique_ptr<Result> run(const std::vector<std::string>& args) {
@@ -116,24 +145,46 @@ public:
             config["mode"] = "RGBChase";
             config["subMode"] = std::string("RGBChase-") + mapSubMode(args[3]);
             config["colorPattern"] = mapPattern(args[3]);
+            config["channelsPerNode"] = mapChannelsPerNode(args[3]);
         } else if (effect == "RGB Cycle") {
             config["mode"] = "RGBCycle";
             config["subMode"] = std::string("RGBCycle-") + mapSubMode(args[3]);
             config["colorPattern"] = mapPattern(args[3]);
+            config["channelsPerNode"] = mapChannelsPerNode(args[3]);
         } else if (effect == "Custom Chase") {
             config["mode"] = "RGBChase";
             config["subMode"] = "RGBChase-RGBCustom";
             config["colorPattern"] = args[3];
+            if (args.size() > 4) {
+                config["channelsPerNode"] = std::stoi(args[4], nullptr, 10);
+            }
         } else if (effect == "Custom Cycle") {
             config["mode"] = "RGBCycle";
             config["subMode"] = "RGBCycle-RGBCustom";
             config["colorPattern"] = args[3];
+            if (args.size() > 4) {
+                config["channelsPerNode"] = std::stoi(args[4], nullptr, 10);
+            }
         } else if (effect == "RGB Single Color") {
             config["mode"] = "RGBFill";
-            int v = std::stoi(args[3].substr(1), nullptr, 16);
-            config["color3"] = v & 0xFF;
-            config["color2"] = (v >> 8) & 0xFF;
-            config["color1"] = (v >> 16) & 0xFF;
+            std::string hexStr = args[3].substr(1); // Remove # prefix
+            // 8 hex digits (RGBW) can exceed INT_MAX, so parse as unsigned
+            uint32_t v = (uint32_t)std::stoul(hexStr, nullptr, 16);
+
+            if (hexStr.length() == 8) {
+                // RGBW format (8 hex digits) - 4 channels per pixel
+                config["channelsPerNode"] = 4;
+                config["color4"] = (int)(v & 0xFF);         // W
+                config["color3"] = (int)((v >> 8) & 0xFF);  // B
+                config["color2"] = (int)((v >> 16) & 0xFF); // G
+                config["color1"] = (int)((v >> 24) & 0xFF); // R
+            } else {
+                // RGB format (6 hex digits) - 3 channels per pixel
+                config["channelsPerNode"] = 3;
+                config["color3"] = (int)(v & 0xFF);         // B
+                config["color2"] = (int)((v >> 8) & 0xFF);  // G
+                config["color1"] = (int)((v >> 16) & 0xFF); // R
+            }
         } else if (effect == "Single Channel Chase") {
             config["mode"] = "SingleChase";
             int v = std::stoi(args[3], nullptr, 10);
@@ -244,9 +295,13 @@ HttpResponsePtr ChannelTester::render_GET(const HttpRequestPtr& req) {
             v["optional"] = false;
             v["type"] = "string";
             v["contents"].append("R-G-B");
+            v["contents"].append("R-G-B-W");
             v["contents"].append("R-G-B-All");
+            v["contents"].append("R-G-B-W-All");
             v["contents"].append("R-G-B-None");
+            v["contents"].append("R-G-B-W-None");
             v["contents"].append("R-G-B-All-None");
+            v["contents"].append("R-G-B-W-All-None");
             result["args"].append(v);
         } else if (effect == "RGB Cycle") {
             Json::Value v;
@@ -255,9 +310,13 @@ HttpResponsePtr ChannelTester::render_GET(const HttpRequestPtr& req) {
             v["optional"] = false;
             v["type"] = "string";
             v["contents"].append("R-G-B");
+            v["contents"].append("R-G-B-W");
             v["contents"].append("R-G-B-All");
+            v["contents"].append("R-G-B-W-All");
             v["contents"].append("R-G-B-None");
+            v["contents"].append("R-G-B-W-None");
             v["contents"].append("R-G-B-All-None");
+            v["contents"].append("R-G-B-W-All-None");
             result["args"].append(v);
         } else if (effect == "Custom Chase") {
             Json::Value v;
@@ -267,6 +326,15 @@ HttpResponsePtr ChannelTester::render_GET(const HttpRequestPtr& req) {
             v["type"] = "string";
             v["default"] = "FF000000FF000000FF";
             result["args"].append(v);
+            Json::Value cpn;
+            cpn["description"] = "Channels Per Node";
+            cpn["name"] = "ChannelsPerNode";
+            cpn["optional"] = true;
+            cpn["type"] = "string";
+            cpn["contents"].append("3");
+            cpn["contents"].append("4");
+            cpn["default"] = "3";
+            result["args"].append(cpn);
         } else if (effect == "Custom Cycle") {
             Json::Value v;
             v["description"] = "Pattern";
@@ -275,6 +343,15 @@ HttpResponsePtr ChannelTester::render_GET(const HttpRequestPtr& req) {
             v["type"] = "string";
             v["default"] = "FF000000FF000000FF";
             result["args"].append(v);
+            Json::Value cpn;
+            cpn["description"] = "Channels Per Node";
+            cpn["name"] = "ChannelsPerNode";
+            cpn["optional"] = true;
+            cpn["type"] = "string";
+            cpn["contents"].append("3");
+            cpn["contents"].append("4");
+            cpn["default"] = "3";
+            result["args"].append(cpn);
         } else if (effect == "RGB Single Color") {
             Json::Value v;
             v["description"] = "Color";

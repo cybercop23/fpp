@@ -416,8 +416,9 @@
             var p4 = $.get('/api/pipewire/aes67/instances');
             var p5 = $.get('/api/pipewire/video/input-sources');
             var p6 = $.get('/api/pipewire/opusrtp/instances');
+            var p7 = $.get('/api/pipewire/audio/plugin-sources');
 
-            $.when(p1, p2, p3, p4, p5, p6).done(function (r1, r2, r3, r4, r5, r6) {
+            $.when(p1, p2, p3, p4, p5, p6, p7).done(function (r1, r2, r3, r4, r5, r6, r7) {
                 inputGroups = r1[0];
                 if (!inputGroups || !inputGroups.inputGroups) {
                     inputGroups = { inputGroups: [] };
@@ -438,6 +439,22 @@
                             availablePWSources.push({
                                 nodeName: src.audioPipeWireNodeName,
                                 name: src.name || 'Source ' + src.id,
+                            });
+                        }
+                    });
+                }
+                // Merge plugin-registered audio sources (fppd AudioSourceRegistry)
+                var psData = r7[0];
+                if (psData && psData.sources) {
+                    psData.sources.forEach(function (src) {
+                        if (!src.nodeName)
+                            return;
+                        // Skip duplicates if a node is somehow listed twice
+                        var exists = availablePWSources.some(function (s) { return s.nodeName === src.nodeName; });
+                        if (!exists) {
+                            availablePWSources.push({
+                                nodeName: src.nodeName,
+                                name: (src.name || src.nodeName) + (src.plugin ? ' [' + src.plugin + ']' : ''),
                             });
                         }
                     });
@@ -662,7 +679,8 @@
                     html += '</select>';
                 } else {
                     html += '<span style="color:#6c757d;font-size:0.85rem;">' +
-                        'No audio-enabled video sources. <a href="pipewire-video-inputs.php">Configure Video Inputs</a></span>';
+                        'No PipeWire sources available (audio-enabled video inputs or plugin-provided sources). ' +
+                        '<a href="pipewire-video-inputs.php">Configure Video Inputs</a></span>';
                 }
             } else if (type === 'aes67_receive') {
                 // Dropdown populated from AES67 receive instances

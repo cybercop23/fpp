@@ -50,9 +50,9 @@ public:
         return autoCreate;
     }
     void addAutoOverlayModel(const std::string& name,
-                             uint32_t startChannel, uint32_t channelCount, uint32_t channelsPerNode,
+                             uint32_t startChannel, uint32_t channelCount, uint32_t channelPerNode,
                              const std::string& orientation, const std::string& startLocation,
-                             uint32_t strings, uint32_t strands);
+                             uint32_t strings, uint32_t strands, const std::string& colorOrder = "RGB");
     void removeAutoOverlayModel(const std::string& name);
 
     const std::string& mapFont(const std::string& f);

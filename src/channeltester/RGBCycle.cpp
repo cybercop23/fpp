@@ -24,7 +24,8 @@
 TestPatternRGBCycle::TestPatternRGBCycle() :
     m_colorPatternStr(""),
     m_colorPatternSize(0),
-    m_patternOffset(0) {
+    m_patternOffset(0),
+    m_channelsPerNode(3) {
     LogExcess(VB_CHANNELOUT, "TestPatternRGBCycle::TestPatternRGBCycle()\n");
 
     m_testPatternName = "RGBCycle";
@@ -48,6 +49,15 @@ int TestPatternRGBCycle::Init(Json::Value config) {
         m_configChanged = 1;
     }
 
+    int cpn = config.isMember("channelsPerNode") ? config["channelsPerNode"].asInt() : 3;
+    if (cpn != 3 && cpn != 4) {
+        cpn = 3;
+    }
+    if (m_channelsPerNode != cpn) {
+        m_channelsPerNode = cpn;
+        m_configChanged = 1;
+    }
+
     return TestPatternBase::Init(config);
 }
 
@@ -65,20 +75,20 @@ int TestPatternRGBCycle::SetupTest(void) {
         m_colorPattern.push_back(digit);
     }
 
-    // Make sure we have a valid set of triplets
-    while (m_colorPattern.size() < 3 || m_colorPattern.size() % 3) {
+    // Make sure we have a valid set of color groups (3 channels for RGB, 4 for RGBW)
+    const int stride = m_channelsPerNode;
+    while (m_colorPattern.size() < stride || m_colorPattern.size() % stride) {
         m_colorPattern.push_back(0);
     }
 
     char* c = m_testData;
-    for (int i = 0; i < m_channelCount; i += 3) {
-        *(c++) = m_colorPattern[0];
-        *(c++) = m_colorPattern[1];
-        *(c++) = m_colorPattern[2];
+    for (int i = 0; i + stride <= m_channelCount; i += stride) {
+        for (int j = 0; j < stride; j++)
+            *(c++) = m_colorPattern[j];
     }
 
     m_patternOffset = 0;
-    m_colorPatternSize = m_colorPattern.size() / 3;
+    m_colorPatternSize = m_colorPattern.size() / stride;
 
     return TestPatternBase::SetupTest();
 }
@@ -87,15 +97,15 @@ int TestPatternRGBCycle::SetupTest(void) {
  *
  */
 void TestPatternRGBCycle::CycleData(void) {
-    m_patternOffset += 3;
+    const int stride = m_channelsPerNode;
+    m_patternOffset += stride;
     if (m_patternOffset >= m_colorPattern.size()) {
         m_patternOffset = 0;
     }
     char* c = m_testData;
-    for (int i = 0; i < m_channelCount; i += 3) {
-        *(c++) = m_colorPattern[m_patternOffset];
-        *(c++) = m_colorPattern[m_patternOffset + 1];
-        *(c++) = m_colorPattern[m_patternOffset + 2];
+    for (int i = 0; i + stride <= m_channelCount; i += stride) {
+        for (int j = 0; j < stride; j++)
+            *(c++) = m_colorPattern[m_patternOffset + j];
     }
 }
 

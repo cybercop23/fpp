@@ -654,6 +654,9 @@ void PixelString::AutoCreateOverlayModels(const std::vector<PixelString*>& strin
                     --strings;
                 }
             }
+            // Channel data is always in R,G,B[,W] order; the output driver remaps to the
+            // hardware wire order.  The model's ColorOrder describes the channel data.
+            std::string colorOrder = (channelsPerNode >= 4) ? "RGBW" : "RGB";
             int32_t channelCount = maxChan - startChannel;
 
             if (name.find("Tree") != std::string::npos || name.find("TREE") != std::string::npos || name.find("tree") != std::string::npos || name.find("Vert") != std::string::npos || name.find("vert") != std::string::npos) {
@@ -664,7 +667,7 @@ void PixelString::AutoCreateOverlayModels(const std::vector<PixelString*>& strin
             if ((channelCount > 0) && (rn == -1)) {
                 autoModelNames.push_back(name);
                 PixelOverlayManager::INSTANCE.addAutoOverlayModel(name, startChannel, channelCount, channelsPerNode, orientation,
-                                                                  startLocation, strings, strands);
+                                                                  startLocation, strings, strands, colorOrder);
             }
         }
     }

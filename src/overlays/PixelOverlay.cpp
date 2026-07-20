@@ -1251,10 +1251,19 @@ public:
             if (state != "Don't Set") {
                 m->setState(PixelOverlayState(state));
             }
-            unsigned int x = PixelOverlayManager::mapColor(color);
-            m->fillOverlayBuffer((x >> 16) & 0xFF,
-                                 (x >> 8) & 0xFF,
-                                 x & 0xFF);
+            if (color.size() == 9 && color[0] == '#') {
+                // #RRGGBBWW - explicit white channel for RGBW models
+                uint32_t x = (uint32_t)std::stoul(color.substr(1), nullptr, 16);
+                m->fillOverlayBuffer((x >> 24) & 0xFF,
+                                     (x >> 16) & 0xFF,
+                                     (x >> 8) & 0xFF,
+                                     x & 0xFF);
+            } else {
+                unsigned int x = PixelOverlayManager::mapColor(color);
+                m->fillOverlayBuffer((x >> 16) & 0xFF,
+                                     (x >> 8) & 0xFF,
+                                     x & 0xFF);
+            }
             m->flushOverlayBuffer();
         }
         return std::make_unique<Command::Result>("Models Filled");
@@ -1361,7 +1370,7 @@ void PixelOverlayManager::RegisterCommands() {
 void PixelOverlayManager::addAutoOverlayModel(const std::string& name,
                                               uint32_t startChannel, uint32_t channelCount, uint32_t channelPerNode,
                                               const std::string& orientation, const std::string& startLocation,
-                                              uint32_t strings, uint32_t strands) {
+                                              uint32_t strings, uint32_t strands, const std::string& colorOrder) {
     Json::Value val;
     val["Name"] = name;
     val["Type"] = "Channel";
@@ -1372,6 +1381,7 @@ void PixelOverlayManager::addAutoOverlayModel(const std::string& name,
     val["Orientation"] = orientation;
     val["StartCorner"] = startLocation;
     val["ChannelCountPerNode"] = channelPerNode;
+    val["ColorOrder"] = colorOrder;
     val["autoCreated"] = true;
 
     addModel(val);

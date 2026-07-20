@@ -27,7 +27,8 @@ TestPatternRGBChase::TestPatternRGBChase() :
     m_patternOffset(0),
     m_rgbTriplets(0),
     m_lastTripletOffset(0),
-    m_lastPatternOffset(0) {
+    m_lastPatternOffset(0),
+    m_channelsPerNode(3) {
     LogExcess(VB_CHANNELOUT, "TestPatternRGBChase::TestPatternRGBChase()\n");
 
     m_testPatternName = "RGBChase";
@@ -51,6 +52,15 @@ int TestPatternRGBChase::Init(Json::Value config) {
         m_configChanged = 1;
     }
 
+    int cpn = config.isMember("channelsPerNode") ? config["channelsPerNode"].asInt() : 3;
+    if (cpn != 3 && cpn != 4) {
+        cpn = 3;
+    }
+    if (m_channelsPerNode != cpn) {
+        m_channelsPerNode = cpn;
+        m_configChanged = 1;
+    }
+
     return TestPatternBase::Init(config);
 }
 
@@ -68,28 +78,32 @@ int TestPatternRGBChase::SetupTest(void) {
         m_colorPattern.push_back(digit);
     }
 
-    // Make sure we have a valid set of triplets
-    while (m_colorPattern.size() < 3 || m_colorPattern.size() % 3)
+    // Make sure we have a valid set of color groups (3 channels for RGB, 4 for RGBW)
+    const int stride = m_channelsPerNode;
+    while (m_colorPattern.size() < stride || m_colorPattern.size() % stride)
         m_colorPattern.push_back(0);
+
+    // Need at least two pixels for a chase; bump before filling so the whole
+    // (possibly expanded) range gets initialized
+    if (m_channelCount < (2 * stride)) {
+        m_channelCount = 2 * stride;
+        bzero(m_testData, m_channelCount);
+    }
 
     char* c = m_testData;
     int offset = 0;
-    for (int i = 0; i < m_channelCount; i += 3) {
-        *(c++) = m_colorPattern[offset++];
-        *(c++) = m_colorPattern[offset++];
-        *(c++) = m_colorPattern[offset++];
+    for (int i = 0; i + stride <= m_channelCount; i += stride) {
+        for (int j = 0; j < stride; j++)
+            *(c++) = m_colorPattern[offset++];
 
         if (offset >= m_colorPattern.size())
             offset = 0;
     }
 
-    if (m_channelCount < 6)
-        m_channelCount = 6;
-
     m_patternOffset = 0;
-    m_colorPatternSize = m_colorPattern.size() / 3;
-    m_rgbTriplets = m_channelCount / 3;
-    m_lastTripletOffset = (m_rgbTriplets - 1) * 3;
+    m_colorPatternSize = m_colorPattern.size() / stride;
+    m_rgbTriplets = m_channelCount / stride;
+    m_lastTripletOffset = (m_rgbTriplets - 1) * stride;
     m_lastPatternOffset = m_lastTripletOffset % m_colorPattern.size();
 
     return TestPatternBase::SetupTest();
@@ -99,18 +113,18 @@ int TestPatternRGBChase::SetupTest(void) {
  *
  */
 void TestPatternRGBChase::CycleData(void) {
-    memmove(m_testData + 3, m_testData, m_channelCount - 3);
+    const int stride = m_channelsPerNode;
+    memmove(m_testData + stride, m_testData, m_channelCount - stride);
 
-    m_patternOffset -= 3;
+    m_patternOffset -= stride;
 
     if (m_patternOffset < 0)
-        m_patternOffset = m_colorPattern.size() - 3;
+        m_patternOffset = m_colorPattern.size() - stride;
 
     int offset = m_patternOffset;
 
-    m_testData[0] = m_colorPattern[offset++];
-    m_testData[1] = m_colorPattern[offset++];
-    m_testData[2] = m_colorPattern[offset];
+    for (int j = 0; j < stride; j++)
+        m_testData[j] = m_colorPattern[offset++];
 }
 
 /*

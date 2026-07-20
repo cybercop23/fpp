@@ -67,6 +67,7 @@ extern volatile int runMainFPPDLoop;
 #include "channeltester/ChannelTester.h"
 #include "commands/Commands.h"
 #include "mediaoutput/AES67Manager.h"
+#include "mediaoutput/AudioSourceRegistry.h"
 #include "mediaoutput/OpusRTPManager.h"
 #include "mediaoutput/MediaOutputBase.h"
 #include "mediaoutput/MediaOutputStatus.h"
@@ -362,6 +363,16 @@ void APIServer::Init(void) {
     app.registerHandler("/opusrtp", copyHandler(handleOpusRTP), {drogon::Get, drogon::Head});
     app.registerHandlerViaRegex("/opusrtp/.*", copyHandler(handleOpusRTP), {drogon::Get, drogon::Head});
 #endif
+
+    // Plugin-published PipeWire audio sources (AudioSourceRegistry).
+    // Consumed by the PHP API (GET /api/pipewire/audio/plugin-sources) to
+    // populate the Input Groups "PipeWire Source" member picker.
+    auto handlePluginSources = [](const HttpRequestPtr& req,
+                                  std::function<void(const HttpResponsePtr&)>&& callback) {
+        std::string body = SaveJsonToString(AudioSourceRegistry::INSTANCE.toJson());
+        callback(makeStringResponse(body, 200, "application/json"));
+    };
+    app.registerHandler("/pipewire/audio/plugin-sources", copyHandler(handlePluginSources), {drogon::Get, drogon::Head});
 
     // PlayerResource catch-all for all other /fppd/* paths (registered AFTER
     // specific /fppd/ports and /fppd/testing routes so they match first)
