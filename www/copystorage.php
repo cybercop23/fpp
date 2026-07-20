@@ -79,6 +79,15 @@ echo "\n";
 
 sleep(2);
 
+// Flag for reboot only when "Configuration" is restored via File Copy restore.
+$direction = $_GET['direction'] ?? '';
+$flags = $_GET['flags'] ?? '';
+$isRestore = stripos($direction, 'FROM') === 0;
+$hasConfig = stripos($flags, 'Configuration') !== false;
+if ($isRestore && $hasConfig && $backupRc === 0) {
+    WriteSettingToFile('rebootFlag', '1');
+}
+
 // The run's output goes into the fppd.log timeline, and the progress file is
 // then removed rather than kept as fpp_backup_filecopy_last.log.
 //
