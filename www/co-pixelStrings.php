@@ -790,6 +790,7 @@ function readCapes($cd, $capes)
     // ---- Rough max-frame-rate estimate --------------------------------------
     // A pixel port can drive roughly 800 RGB pixels (2400 channels) at 40fps, so
     // the slowest port (the one clocking the most channels) sets the ceiling.
+    // (DPIPixels has an exact ceiling instead - see DPIMaxFPS() below.)
     // The channel accounting mirrors src/channeloutput/PixelString.cpp: null
     // pixels count, grouping does NOT reduce wire time, and smart receivers add
     // a per-chain overhead.  The Falcon remote cost is not in
@@ -875,6 +876,33 @@ function readCapes($cd, $capes)
         return { channels: chans, isV5: type == 'v5' && !isV4, isV4: isV4 };
     }
 
+    // ---- DPIPixels frame-rate ceiling ---------------------------------------
+    // DPIPixels is no longer a fixed 20/40fps framebuffer mode; it sizes the
+    // framebuffer once to the longest string and then sets the rate per sequence
+    // to min(sequenceRate, ceiling) by varying only the vertical blanking, so
+    // the ceiling below is exact rather than a rule of thumb and a sequence
+    // above it is clamped rather than dropping to the next fixed mode.
+    // Mirrors DPIPixelsOutput::Init() (src/non-gpl/DPIPixels/DPIPixels.cpp) and
+    // KMSFrameBuffer::GetMaxRefreshRate(): the pipeline is fixed at 1920 wide /
+    // 38.4MHz by the vc4-kms-dpi-fpp overlay and each scanline carries 5
+    // channels, so a frame is ceil(channels / 5) data lines plus the blank reset
+    // tail plus the minimum vertical blanking.
+    var DPI_PIXEL_CLOCK = 38400000;
+    var DPI_HTOTAL = 1921; // hactive 1920 + hfp 0 + hsync 1 + hbp 0
+    var DPI_CHANNELS_PER_ROW = 5;
+    var DPI_RESET_ROWS = 8; // DPI_RESET_ROWS in DPIPixels.cpp
+    var DPI_MIN_VBLANK_ROWS = 3; // KMS_MIN_VBLANK_LINES in KMSFrameBuffer.cpp
+    var DPI_MAX_CHANNELS = 4800; // onOffMask[][4800] - 1600 pixels per string
+    // Above this the ceiling is headroom no sequence will reach, so reporting a
+    // number just reads as a promise; say it isn't the limit instead.
+    var DPI_UNLIMITED_FPS = 120;
+
+    function DPIMaxFPS(channels) {
+        var chans = Math.min(channels, DPI_MAX_CHANNELS);
+        var rows = Math.ceil(chans / DPI_CHANNELS_PER_ROW) + DPI_RESET_ROWS + DPI_MIN_VBLANK_ROWS;
+        return Math.floor(DPI_PIXEL_CLOCK / (DPI_HTOTAL * rows));
+    }
+
     var pixelStringMaxFPSTimer = null;
     function CalculatePixelStringMaxFPS() {
         // coalesce the bursts of change events fired while typing
@@ -888,10 +916,15 @@ function readCapes($cd, $capes)
         }
         var data = getPixelStringOutputJSON();
         var maxPixels = 0;
+        var maxChannels = 0;
         var worstPort = -1;
         var anyV5 = false;
         var anyV4 = false;
+        var isDPI = false;
         for (var o = 0; o < data.channelOutputs.length; o++) {
+            if (data.channelOutputs[o].type == 'DPIPixels') {
+                isDPI = true;
+            }
             var outs = data.channelOutputs[o].outputs || [];
             for (var i = 0; i < outs.length; i++) {
                 var r = pixelStringPortChannels(outs[i]);
@@ -906,25 +939,46 @@ function readCapes($cd, $capes)
                 var px = r.channels / 3;
                 if (px > maxPixels) {
                     maxPixels = px;
+                    maxChannels = r.channels;
                     worstPort = outs[i].portNumber;
                 }
             }
         }
         if (maxPixels <= 0) {
             el.html('');
+            el.removeAttr('title');
             return;
         }
-        // v5 remotes cost ~90 pixels of budget (config packet + query/listen
-        // windows); send-only v4 remotes only cost the config packet, ~30
-        var budget = maxPixels + (anyV5 ? 90 : (anyV4 ? 30 : 0));
-        var fps = Math.floor(32000 / budget);
-        var msg = 'Supports &asymp;' + (fps > 999 ? '>999' : fps) + ' fps max (longest port ' + (worstPort + 1);
-        if (anyV5) {
-            msg += ', -90px for v5 remotes';
-        } else if (anyV4) {
-            msg += ', -30px for v4 remotes';
+
+        var fps;
+        var msg;
+        if (isDPI) {
+            // The longest string sizes the framebuffer, so it alone sets the
+            // ceiling; the receiver overhead is already inside r.channels.
+            fps = DPIMaxFPS(maxChannels);
+            var where = '(longest port ' + (worstPort + 1) + ', ' + maxChannels + ' ch)';
+            if (fps >= DPI_UNLIMITED_FPS) {
+                msg = 'String length is not a frame-rate limit ' + where;
+            } else {
+                msg = 'Runs up to ' + fps + ' fps ' + where;
+            }
+            el.attr('title', 'DPI output follows the sequence frame rate up to a ceiling of ' + fps +
+                ' fps, set by the longest string (' + maxChannels + ' channels on port ' + (worstPort + 1) +
+                '). Faster sequences are clamped to it; changing rate needs no reboot.');
+        } else {
+            // v5 remotes cost ~90 pixels of budget (config packet + query/listen
+            // windows); send-only v4 remotes only cost the config packet, ~30
+            var budget = maxPixels + (anyV5 ? 90 : (anyV4 ? 30 : 0));
+            fps = Math.floor(32000 / budget);
+            msg = 'Supports &asymp;' + (fps > 999 ? '&gt;999' : fps) + ' fps max (longest port ' + (worstPort + 1);
+            if (anyV5) {
+                msg += ', -90px for v5 remotes';
+            } else if (anyV4) {
+                msg += ', -30px for v4 remotes';
+            }
+            msg += ')';
+            el.removeAttr('title');
         }
-        msg += ')';
         el.html(msg);
     }
 
