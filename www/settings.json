@@ -2356,6 +2356,7 @@
 			"tip": "Unicast MultiSync messages individually to every known FPP remote that is running in Remote mode.  Remotes are added to the list automatically as they are discovered (via mDNS or the normal FPP discovery).  Non-FPP devices (WLED, ESPixelStick, Falcon controllers, etc.) and FPP instances not in Remote mode are skipped.  Useful when multicast/broadcast is unreliable across your network.",
 			"type": "checkbox",
 			"restart": 2,
+			"default": 1,
 			"fppModes": [
 				"player"
 			],
@@ -2471,7 +2472,6 @@
 			"tip": "Send MultiCast to 239.70.80.80 to send MultiSync messages to all remotes.",
 			"type": "checkbox",
 			"restart": 2,
-			"default": 1,
 			"fppModes": [
 				"player"
 			],
