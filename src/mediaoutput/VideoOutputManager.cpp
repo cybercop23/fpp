@@ -359,14 +359,37 @@ std::vector<VideoOutputManager::HdmiConsumerInfo> VideoOutputManager::GetHdmiCon
                 if (s == streamSlot) { match = true; break; }
             if (!match) continue;
         }
-        if (skipConnectorIds.count(c.connectorId))
-            continue;
         HdmiConsumerInfo info;
         info.connectorId = c.connectorId;
         info.connector = c.connector;
         info.cardPath = c.cardPath;
         info.width = c.width;
         info.height = c.height;
+
+        // The cardPath/connectorId stored in the config were captured when the
+        // group was configured, but DRM card numbering is not stable across
+        // reboots (a Pi5 was observed moving HDMI from card2 to card1 simply by
+        // rebooting).  A stale path points kmssink at the wrong device, so
+        // re-resolve from the connector name — which is stable — and only fall
+        // back to the stored values if the connector can't be found now.
+        // Done before the skipConnectorIds test because the caller's skip list
+        // is built from live lookups, so it must be compared against a live id.
+        if (!c.connector.empty()) {
+            auto live = GStreamerOutput::ResolveDrmConnector(c.connector);
+            if (!live.cardPath.empty()) {
+                if (live.cardPath != c.cardPath) {
+                    LogInfo(VB_MEDIAOUT,
+                            "VideoOutputManager: %s moved %s → %s since config was saved; using current path\n",
+                            c.connector.c_str(), c.cardPath.c_str(), live.cardPath.c_str());
+                }
+                info.cardPath = live.cardPath;
+            }
+            if (live.connectorId > 0)
+                info.connectorId = live.connectorId;
+        }
+
+        if (skipConnectorIds.count(info.connectorId))
+            continue;
         result.push_back(info);
     }
     return result;
