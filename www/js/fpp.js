@@ -3571,6 +3571,33 @@ function EditPlaylistEntry () {
 	}
 
 	UpdateChildVisibility();
+	RevealAdvancedArgsWithValues(pet);
+}
+
+// Advanced args are hidden below the advanced UI level.  That is right for an
+// entry that doesn't use them, but an entry that already carries a value would
+// otherwise hide it with no way to see it, change it, or clear it -- and the
+// value is still saved, so it keeps taking effect invisibly.  Reveal the ones
+// that are actually set.
+function RevealAdvancedArgsWithValues (pet) {
+	var keys = Object.keys(pet.args);
+	for (var i = 0; i < keys.length; i++) {
+		var a = pet.args[keys[i]];
+		if (!a.advanced) continue;
+
+		var inp = $('#playlistEntryOptions').find('.arg_' + a.name);
+		if (!inp.length) continue;
+
+		var set;
+		if (a.type == 'bool') {
+			set = inp.is(':checked');
+		} else {
+			var v = inp.val();
+			set = v !== undefined && v !== null && v !== '' && v != '--Default--';
+		}
+
+		if (set) inp.closest('tr').removeAttr('style');
+	}
 }
 
 function RemovePlaylistEntry () {
