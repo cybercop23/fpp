@@ -1823,6 +1823,18 @@
         #pluginTopTabs {
             border-bottom-width: 3px;
         }
+
+        /* On mobile portrait (<576px), move the "Installed Plugins" heading
+           below the action buttons instead of sitting beside them.
+           flex-direction: column-reverse puts the heading (first child) at the
+           bottom and the button group (second child) at the top. */
+        @media (max-width: 575.98px) {
+            .pluginsHeader {
+                flex-direction: column-reverse;
+                align-items: flex-start;
+                gap: 0.5rem;
+            }
+        }
     </style>
     <title><? echo $pageTitle; ?></title>
 </head>
