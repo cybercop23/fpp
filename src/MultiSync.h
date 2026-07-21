@@ -389,6 +389,13 @@ private:
     struct sockaddr_in m_receiveSrcAddr;
     std::mutex m_socketLock;
 
+    // Serializes UpdateUnicastDestinations() calls against each other (DNS
+    // resolution happens without m_systemsLock held, so overlapping calls are
+    // otherwise possible). Never held together with m_systemsLock or
+    // m_socketLock for more than the brief snapshot/swap steps inside that
+    // function.
+    std::mutex m_unicastUpdateLock;
+
     unsigned long m_lastPingTime;
     unsigned long m_lastCheckTime;
     // Set while a background thread is running the blocking HTTP remote probes
