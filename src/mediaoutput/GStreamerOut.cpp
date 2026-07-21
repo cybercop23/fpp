@@ -1302,13 +1302,16 @@ int GStreamerOutput::Start(int msTime) {
             if (haveHdmiConnector) {
                 // Link tee → kmsQueue → kmssink via request pad
                 GstElement* kmsQueue = gst_element_factory_make("queue", "vkmsq");
-                gst_bin_add_many(GST_BIN(m_pipeline), kmsQueue, m_kmssink, NULL);
+                // Passthrough for HW-decoded NV12/DMA; required for software
+                // decode (I420 won't negotiate against the DRM plane).
+                GstElement* teeKmsConvert = gst_element_factory_make("videoconvert", "vteekmsconv");
+                gst_bin_add_many(GST_BIN(m_pipeline), kmsQueue, teeKmsConvert, m_kmssink, NULL);
                 GstPad* teeSrc = gst_element_request_pad_simple(vtee, "src_%u");
                 GstPad* kmsQSink = gst_element_get_static_pad(kmsQueue, "sink");
                 gst_pad_link(teeSrc, kmsQSink);
                 gst_object_unref(teeSrc);
                 gst_object_unref(kmsQSink);
-                gst_element_link(kmsQueue, m_kmssink);
+                gst_element_link_many(kmsQueue, teeKmsConvert, m_kmssink, NULL);
                 LogDebug(VB_MEDIAOUT, "GStreamer: video tee active — kmssink direct, pipewiresink deferred\n");
             } else {
                 // No primary HDMI — vtee routes to deferred pipewiresink
@@ -1413,11 +1416,14 @@ int GStreamerOutput::Start(int msTime) {
                                  "max-size-time", (guint64)0,
                                  NULL);
 
-                    // kmssink accepts HW decoder's native NV12/DMA output and
-                    // handles format conversion + scaling in hardware.
-                    // No CPU-side videoconvert/videoscale needed.
-                    gst_bin_add_many(GST_BIN(m_pipeline), dQueue, dkmsSink, NULL);
-                    gst_element_link_many(dQueue, dkmsSink, NULL);
+                    // videoconvert negotiates to passthrough for a HW decoder's
+                    // native NV12/DMA (no CPU cost), but is required when the
+                    // decode happened in software -- I420 will not negotiate
+                    // against the DRM plane and the pipeline would fail with
+                    // "not-negotiated".  See the direct-kmssink path below.
+                    GstElement* dConvert = gst_element_factory_make("videoconvert", nullptr);
+                    gst_bin_add_many(GST_BIN(m_pipeline), dQueue, dConvert, dkmsSink, NULL);
+                    gst_element_link_many(dQueue, dConvert, dkmsSink, NULL);
 
                     GstPad* teeSrc = gst_element_request_pad_simple(vtee, "src_%u");
                     GstPad* dQSink = gst_element_get_static_pad(dQueue, "sink");
@@ -1437,12 +1443,18 @@ int GStreamerOutput::Start(int msTime) {
             }
         } else if (haveHdmiConnector) {
             // ── Direct kmssink (no PipeWire video routing) ──
-            // Link directly: videoQueue → kmssink.  kmssink accepts the HW
-            // decoder's native NV12/DMA output and handles format conversion +
-            // scaling in hardware.  Skipping videoconvert/videoscale avoids
-            // CPU-side conversion (~100% CPU on Pi4).
-            gst_bin_add_many(GST_BIN(m_pipeline), videoQueue, m_kmssink, NULL);
-            if (!gst_element_link_many(videoQueue, m_kmssink, NULL)) {
+            // videoQueue → videoconvert → kmssink.  A hardware decoder hands us
+            // NV12/DMA that kmssink takes directly, and in that case videoconvert
+            // negotiates to passthrough and costs nothing -- so this keeps the
+            // "no CPU-side conversion" property that matters on a Pi4.  But when
+            // the decode is in SOFTWARE the format is typically I420, which the
+            // DRM plane will not accept, and without a converter the whole
+            // pipeline dies with "not-negotiated".  That is not hypothetical: a
+            // Pi5 has no hardware H.264 decoder at all, so every H.264 video
+            // takes the software path and HDMI output failed outright.
+            GstElement* kmsConvert = gst_element_factory_make("videoconvert", "vkmsconv");
+            gst_bin_add_many(GST_BIN(m_pipeline), videoQueue, kmsConvert, m_kmssink, NULL);
+            if (!gst_element_link_many(videoQueue, kmsConvert, m_kmssink, NULL)) {
                 LogErr(VB_MEDIAOUT, "GStreamer HDMI: Failed to link video chain\n");
             }
         }
