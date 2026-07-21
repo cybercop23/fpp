@@ -44,6 +44,17 @@ public:
     int GetStreamSlot(void) { return m_streamSlot; }
     bool IsBackgroundSlot(void) { return m_streamSlot > 1; }
 
+    // Companion streams started alongside this entry's own media and stopped
+    // with it -- e.g. a second language on another audio device, or a second
+    // video on a second HDMI.  Declared on the entry so they share its
+    // lifetime instead of having to be fired and cleaned up by hand.
+    struct ExtraMedia {
+        std::string mediaName;
+        int slot = 2;
+        std::string videoOut;
+        bool sync = false;
+    };
+
     virtual uint64_t GetLengthInMS() override;
     virtual uint64_t GetElapsedMS() override;
 
@@ -63,6 +74,13 @@ private:
     unsigned int m_fileSeed;
     int GetFileList(void);
     std::string GetNextRandomFile(void);
+
+    /// startMS > 0 resumes the companions at that offset instead of from zero.
+    void StartExtraMedia(int startMS = 0);
+    void StopExtraMedia(void);
+
+    std::vector<ExtraMedia> m_extraMedia;
+    bool m_extraMediaStarted = false;
 
     std::string m_mediaFilename;
     std::string m_mediaPrefix;

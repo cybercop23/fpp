@@ -469,6 +469,39 @@
 				"contentListUrl": "api/options/PlaylistVideoOutput",
 				"optional": true
 			},
+			"extraMediaName": {
+				"name": "extraMediaName",
+				"description": "Extra Media",
+				"type": "string",
+				"contentListUrl": "api/media",
+				"optional": true,
+				"simpleUI": false,
+				"advanced": true
+			},
+			"extraMediaSlot": {
+				"name": "extraMediaSlot",
+				"description": "Extra Media Slot",
+				"type": "string",
+				"contents": {
+					"2": "2",
+					"3": "3",
+					"4": "4",
+					"5": "5"
+				},
+				"default": "2",
+				"optional": true,
+				"simpleUI": false,
+				"advanced": true
+			},
+			"extraMediaOut": {
+				"name": "extraMediaOut",
+				"description": "Extra Media Video Out",
+				"type": "string",
+				"contentListUrl": "api/options/PlaylistVideoOutput",
+				"optional": true,
+				"simpleUI": false,
+				"advanced": true
+			},
 			"note": {
 				"name": "note",
 				"description": "Note",
@@ -745,6 +778,39 @@
 				"type": "string",
 				"contentListUrl": "api/options/PlaylistVideoOutput",
 				"optional": true
+			},
+			"extraMediaName": {
+				"name": "extraMediaName",
+				"description": "Extra Media",
+				"type": "string",
+				"contentListUrl": "api/media",
+				"optional": true,
+				"simpleUI": false,
+				"advanced": true
+			},
+			"extraMediaSlot": {
+				"name": "extraMediaSlot",
+				"description": "Extra Media Slot",
+				"type": "string",
+				"contents": {
+					"2": "2",
+					"3": "3",
+					"4": "4",
+					"5": "5"
+				},
+				"default": "2",
+				"optional": true,
+				"simpleUI": false,
+				"advanced": true
+			},
+			"extraMediaOut": {
+				"name": "extraMediaOut",
+				"description": "Extra Media Video Out",
+				"type": "string",
+				"contentListUrl": "api/options/PlaylistVideoOutput",
+				"optional": true,
+				"simpleUI": false,
+				"advanced": true
 			},
 			"note": {
 				"name": "note",

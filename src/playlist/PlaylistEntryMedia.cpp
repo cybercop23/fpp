@@ -24,6 +24,7 @@ using namespace std::filesystem;
 
 #include "../Events.h"
 #include "../MultiSync.h"
+#include "../commands/Commands.h"
 #include "../Plugins.h"
 #include "../channeloutput/ChannelOutputSetup.h"
 #include "../common.h"
@@ -107,6 +108,53 @@ int PlaylistEntryMedia::Init(Json::Value& config) {
 
     if (config.isMember("videoOut")) {
         m_videoOutput = config["videoOut"].asString();
+    }
+
+    // Companion streams to run alongside this entry (see ExtraMedia).
+    m_extraMedia.clear();
+    if (config.isMember("extraMedia") && config["extraMedia"].isArray()) {
+        for (const auto& e : config["extraMedia"]) {
+            ExtraMedia em;
+            em.mediaName = e.get("mediaName", "").asString();
+            if (em.mediaName.empty())
+                continue;
+            em.slot = e.get("slot", 2).asInt();
+            if (em.slot < 2 || em.slot > StreamSlotManager::MAX_SLOTS) {
+                LogWarn(VB_PLAYLIST, "Media entry: extraMedia '%s' has slot %d; must be 2-%d (slot 1 is this entry's own media), skipping\n",
+                        em.mediaName.c_str(), em.slot, StreamSlotManager::MAX_SLOTS);
+                continue;
+            }
+            em.videoOut = e.get("videoOut", "").asString();
+            em.sync = e.get("sync", false).asBool();
+            m_extraMedia.push_back(em);
+        }
+    }
+    // Flat single-companion form, which is what the playlist editor writes --
+    // the editor rebuilds an entry from the fields it knows about, so a
+    // hand-authored "extraMedia" array survives fppd but not a round trip
+    // through the UI.  One companion covers both things this was asked for (a
+    // second audio feed on another device, a second video on another HDMI), so
+    // that case gets real fields and the array stays the advanced escape hatch.
+    if (config.isMember("extraMediaName") && !config["extraMediaName"].asString().empty()) {
+        ExtraMedia em;
+        em.mediaName = config["extraMediaName"].asString();
+        // The slot is the output route -- which audio device a companion lands
+        // on is set per slot in the PipeWire audio groups, not per entry.  The
+        // editor writes this as a string; hand-authored playlists may use an
+        // int, and asInt() on a string throws, so handle both.
+        em.slot = 2;
+        if (config.isMember("extraMediaSlot")) {
+            const Json::Value& sv = config["extraMediaSlot"];
+            int s = sv.isString() ? atoi(sv.asString().c_str()) : (sv.isIntegral() ? sv.asInt() : 0);
+            if (s >= 2 && s <= StreamSlotManager::MAX_SLOTS) {
+                em.slot = s;
+            } else if (s != 0) {
+                LogWarn(VB_PLAYLIST, "Media entry: extraMediaSlot %d out of range, using slot 2\n", s);
+            }
+        }
+        em.videoOut = config.get("extraMediaOut", "").asString();
+        em.sync = true;  // it belongs to the show; sync is only a repair path
+        m_extraMedia.push_back(em);
     }
 
     // Stream slot (1-5), default 1.  Slot > 1 plays on a separate PipeWire stream.
@@ -219,6 +267,7 @@ int PlaylistEntryMedia::StartPlaying(void) {
 
     lock.unlock();
     m_startTime = GetTimeMS();
+    StartExtraMedia();
     return PlaylistEntryBase::StartPlaying();
 }
 
@@ -240,6 +289,9 @@ int PlaylistEntryMedia::Process(void) {
         if (!m_mediaOutput->IsPlaying()) {
             FinishPlay();
             lock.unlock();
+            // Companions are tied to this entry's lifetime, so they stop when
+            // the media ends naturally too -- not only on an explicit Stop().
+            StopExtraMedia();
             CloseMediaOutput();
             lock.lock();
         }
@@ -315,9 +367,52 @@ uint64_t PlaylistEntryMedia::GetElapsedMS() {
 /*
  *
  */
+// Start/stop are delegated to the existing Play Media / Stop Media Slot
+// commands rather than reimplementing slot setup here: those already handle
+// registration, teardown and the sync flag, and reusing them keeps one code
+// path for "play something on a slot".
+void PlaylistEntryMedia::StartExtraMedia(int startMS) {
+    if (m_extraMedia.empty() || m_extraMediaStarted)
+        return;
+    m_extraMediaStarted = true;
+    for (const auto& em : m_extraMedia) {
+        std::vector<std::string> args = {
+            em.mediaName,
+            "1", // play once; it is stopped with the entry
+            "0", // no volume adjustment
+            std::to_string(em.slot),
+            em.videoOut,
+            em.sync ? "true" : "false"
+        };
+        LogInfo(VB_PLAYLIST, "Media entry: starting extra media '%s' on slot %d (videoOut='%s'%s)\n",
+                em.mediaName.c_str(), em.slot, em.videoOut.c_str(),
+                em.sync ? ", synced" : "");
+        CommandManager::INSTANCE.run("Play Media", args);
+
+        // Resuming mid-entry: "Play Media" always starts at zero, so put the
+        // companion back on the entry's timeline explicitly.  Waiting for the
+        // sync repair path is not enough -- it only acts past MAX_DRIFT_SEC,
+        // and only for companions that opted into sync at all.
+        if (startMS > 0) {
+            StreamSlotManager::Instance().SeekSlot(em.slot, startMS / 1000.0f);
+        }
+    }
+}
+
+void PlaylistEntryMedia::StopExtraMedia(void) {
+    if (!m_extraMediaStarted)
+        return;
+    m_extraMediaStarted = false;
+    for (const auto& em : m_extraMedia) {
+        std::vector<std::string> args = { std::to_string(em.slot) };
+        CommandManager::INSTANCE.run("Stop Media Slot", args);
+    }
+}
+
 int PlaylistEntryMedia::Stop(void) {
     LogDebug(VB_PLAYLIST, "PlaylistEntryMedia::Stop()\n");
 
+    StopExtraMedia();
     CloseMediaOutput();
 
     Events::Publish("playlist/media/status", "");
@@ -546,6 +641,10 @@ Json::Value PlaylistEntryMedia::GetMqttStatus(void) {
 void PlaylistEntryMedia::Pause() {
     m_pausedStatus = *m_slotStatus;
     m_pausedTime = GetElapsedMS();
+    // Pausing a media entry tears the output down rather than pausing the
+    // pipeline, so companions are stopped and rebuilt the same way; Resume()
+    // restarts them at m_pausedTime.
+    StopExtraMedia();
     CloseMediaOutput();
     Events::Publish("playlist/media/status", "");
     Events::Publish("playlist/media/title", "");
@@ -556,6 +655,9 @@ bool PlaylistEntryMedia::IsPaused() {
 }
 void PlaylistEntryMedia::Resume() {
     if (m_pausedTime >= 0) {
+        // Captured before the block below clears m_pausedTime, and used to put
+        // the companions back at the same offset as this entry's own media.
+        int resumeMS = m_pausedTime;
         // PreparePlay()'s return is intentionally not treated as fatal here;
         // if it failed, m_mediaOutput will be left null and is handled below
         // instead of blindly dereferencing it.
@@ -598,5 +700,9 @@ void PlaylistEntryMedia::Resume() {
         *m_slotStatus = m_pausedStatus;
         }
         delete failed;
+
+        // Outside the media output lock: this dispatches commands, and holding
+        // the lock across that is how deadlocks get built.
+        StartExtraMedia(resumeMS);
     }
 }
