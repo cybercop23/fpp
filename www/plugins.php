@@ -1742,17 +1742,26 @@
             $('#manageHeading').toggleClass('invisible', activeTopTab === 'updates' && updateVisible === 0);
 
             var installedTotal = $('#installedGrid').children('.pluginCard').length;
+            var hasUrlScheme = /^https?:\/\//i.test(raw);
+            var hasUrlSchemeError = isUrlInput && !hasUrlScheme;
             var hasUrlError = pluginUrlError && raw === pluginUrlError;
-            if (hasUrlError) {
+            if (hasUrlSchemeError) {
+                $('#noAvailableResults').addClass('d-none');
+                $('#noUrlResults').addClass('d-none');
+                $('#noUrlSchemeResults').removeClass('d-none');
+            } else if (hasUrlError) {
                 $('#noAvailableResults').addClass('d-none');
                 $('#noUrlResults').removeClass('d-none');
+                $('#noUrlSchemeResults').addClass('d-none');
             } else {
                 $('#noAvailableResults').toggleClass('d-none', !(searching && activeTopTab === 'available' && availVisible === 0));
                 $('#noUrlResults').addClass('d-none');
+                $('#noUrlSchemeResults').addClass('d-none');
             }
             $('#noInstalledResults').toggleClass('d-none', !(searching && activeTopTab === 'installed' && installedVisible === 0 && installedTotal > 0));
             $('.fppNoResultsTerm').text(raw);
             $('.fppUrlErrorTerm').text(raw);
+            $('.fppUrlSchemeErrorTerm').text(raw);
 
             $('#pluginCategoryPills .fppCatCount').each(function () {
                 var s = $(this).attr('data-count-slug');
@@ -1795,6 +1804,26 @@
 
         });
     </script>
+    <style>
+        /* Round the top corners of the Available/Installed/Updates tabs to match
+           the 12px border-radius used by the category pills (.nav-pills).  The
+           category pills get 12px from --bs-nav-pills-border-radius; the top tabs
+           use Bootstrap's default --bs-nav-tabs-border-radius (~0.375rem).  We
+           override just the top corners here so both tab strips share the same
+           visual radius. */
+        #pluginTopTabs .nav-link {
+            border-top-left-radius: 12px;
+            border-top-right-radius: 12px;
+        }
+
+        /* Thicken the bottom border of the top tab bar to make the separator
+           between the tabs and the category pills more visually distinct.
+           Bootstrap's .nav-tabs default is 1px; bumping to 3px gives a
+           visible line without overwhelming the layout. */
+        #pluginTopTabs {
+            border-bottom-width: 3px;
+        }
+    </style>
     <title><? echo $pageTitle; ?></title>
 </head>
 
@@ -1895,6 +1924,11 @@
                                 <div id="noUrlResults" class="alert alert-info d-none mt-2">
                                     <i class="fas fa-exclamation-triangle"></i> No valid plugins found on JSON URL:
                                     "<b class="fppUrlErrorTerm"></b>". Clear the search box to see all plugins.
+                                </div>
+                                <div id="noUrlSchemeResults" class="alert alert-warning d-none mt-2">
+                                    <i class="fas fa-exclamation-circle"></i> URL:
+                                    "<b class="fppUrlSchemeErrorTerm"></b>" must contain http:// or https://.
+                                    Clear the search box to see all plugins.
                                 </div>
                             </div>
                         </div>
