@@ -45,6 +45,7 @@ private:
 
     void FindDevice(const std::string& wanted);
     std::string GetDevicePath(struct libusb_device* dev) const;
+    std::string GetSysfsSerial(const std::string& path) const;
     std::string GetDeviceSerial(struct libusb_device* dev,
                                 const struct libusb_device_descriptor* desc) const;
 };

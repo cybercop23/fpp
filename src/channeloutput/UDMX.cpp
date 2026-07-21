@@ -98,23 +98,44 @@ std::string UDMXOutput::GetDevicePath(struct libusb_device* dev) const {
     return path;
 }
 
+std::string UDMXOutput::GetSysfsSerial(const std::string& path) const {
+    // The kernel reads and caches the serial when the device enumerates, so it can
+    // be had from sysfs without putting any traffic on the wire.  Empty on non-Linux
+    // or if the device has no serial, in which case the caller falls back to libusb.
+    if (path.empty()) {
+        return "";
+    }
+    std::string serial = GetFileContents("/sys/bus/usb/devices/" + path + "/serial");
+    while (!serial.empty() && (serial.back() == '\n' || serial.back() == '\r')) {
+        serial.pop_back();
+    }
+    return serial;
+}
+
 std::string UDMXOutput::GetDeviceSerial(struct libusb_device* dev,
                                         const struct libusb_device_descriptor* desc) const {
     if (desc->iSerialNumber == 0) {
         return "";
     }
     // Reading the serial string descriptor requires briefly opening the device.
-    libusb_device_handle* h = nullptr;
-    if (libusb_open(dev, &h) != 0 || nullptr == h) {
-        return "";
+    // uDMX hardware implements USB in firmware and can intermittently stop
+    // answering control transfers, so retry rather than treating a single
+    // timeout as "this is not the device we are looking for".
+    for (int attempt = 0; attempt < 3; attempt++) {
+        libusb_device_handle* h = nullptr;
+        if (libusb_open(dev, &h) != 0 || nullptr == h) {
+            return "";
+        }
+        unsigned char buf[256] = { 0 };
+        int r = libusb_get_string_descriptor_ascii(h, desc->iSerialNumber, buf, sizeof(buf) - 1);
+        libusb_close(h);
+        if (r > 0) {
+            return std::string(reinterpret_cast<char*>(buf));
+        }
+        LogWarn(VB_CHANNELOUT, "Could not read UDMX serial descriptor (%s), attempt %d of 3\n",
+                libusb_error_name(r), attempt + 1);
     }
-    unsigned char buf[256] = { 0 };
-    int r = libusb_get_string_descriptor_ascii(h, desc->iSerialNumber, buf, sizeof(buf) - 1);
-    libusb_close(h);
-    if (r <= 0) {
-        return "";
-    }
-    return std::string(reinterpret_cast<char*>(buf));
+    return "";
 }
 
 void UDMXOutput::FindDevice(const std::string& wanted) {
@@ -146,8 +167,13 @@ void UDMXOutput::FindDevice(const std::string& wanted) {
             continue;
         }
 
-        std::string serial = GetDeviceSerial(dev, &desc);
         std::string path = GetDevicePath(dev);
+        // Prefer the kernel's cached serial; only fall back to asking the device
+        // directly if sysfs cannot answer.
+        std::string serial = GetSysfsSerial(path);
+        if (serial.empty()) {
+            serial = GetDeviceSerial(dev, &desc);
+        }
         if (wanted == serial || wanted == path) {
             LogDebug(VB_CHANNELOUT, "UDMX Device Found (serial '%s', path '%s')\n",
                      serial.c_str(), path.c_str());
