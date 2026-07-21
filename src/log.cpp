@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
+#include <sys/utsname.h>
 #include <pwd.h>
 #include <sys/types.h>
 #include <chrono>
@@ -556,6 +557,15 @@ void logVersionInfo(void) {
             LogErr(VB_ALL, "Model: %s\n", buf);
         }
         close(o);
+    }
+    // Kernel matters for triage far more often than it looks: the Pi's V4L2
+    // decoder wedge (issues #2695/#2727) and several DRM/KMS bugs are fixed or
+    // broken per kernel, and asking a user for `uname -a` days after the fact
+    // is unreliable -- the box may have been updated since. Log it with the
+    // rest of the version banner so every fppd.log answers it on its own.
+    struct utsname un;
+    if (uname(&un) == 0) {
+        LogErr(VB_ALL, "Kernel: %s %s (%s)\n", un.sysname, un.release, un.machine);
     }
     LogErr(VB_ALL, "=========================================\n");
 }
