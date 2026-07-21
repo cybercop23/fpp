@@ -263,7 +263,8 @@ static std::string RegisterRunningMedia(const std::string& file, MediaOutputBase
 #ifdef HAS_GSTREAMER
 class GStreamerPlayData : public GStreamerOutput {
 public:
-    GStreamerPlayData(const std::string& file, int l, int vol, int slot = 1);
+    GStreamerPlayData(const std::string& file, int l, int vol, int slot = 1,
+                      const std::string& videoOut = "");
     virtual ~GStreamerPlayData();
     virtual void Stopped() override;
     // Declared first so it is destroyed last, remaining valid throughout ~GStreamerPlayData()
@@ -275,12 +276,13 @@ public:
     MediaOutputStatus status;
 };
 
-GStreamerPlayData::GStreamerPlayData(const std::string& file, int l, int vol, int slot) :
+GStreamerPlayData::GStreamerPlayData(const std::string& file, int l, int vol, int slot,
+                                     const std::string& videoOut) :
     GStreamerOutput(file,
                     (slot > 1 && slot <= StreamSlotManager::MAX_SLOTS)
                         ? StreamSlotManager::Instance().GetStatus(slot)
                         : &status,
-                    "", slot),
+                    videoOut, slot),
     filename(file),
     volumeAdjust(vol),
     streamSlot(slot) {
@@ -316,6 +318,11 @@ PlayMediaCommand::PlayMediaCommand() :
     args.push_back(CommandArg("loop", "int", "Loop Count").setDefaultValue(std::string("1")).setRange(1, 100));
     args.push_back(CommandArg("volume", "int", "Volume Adjust").setDefaultValue(std::string("0")).setRange(-100, 100));
     args.push_back(CommandArg("slot", "int", "Stream Slot").setDefaultValue(std::string("1")).setRange(1, StreamSlotManager::MAX_SLOTS));
+    // Video output for this stream.  Empty (the default) keeps the historical
+    // audio-only behavior; setting it to a connector (e.g. "HDMI-A-2") lets a
+    // non-primary slot drive its own display, which is what makes independent
+    // video-per-output possible.
+    args.push_back(CommandArg("videoOut", "string", "Video Output", true).setContentListUrl("api/options/PlaylistVideoOutput"));
 }
 std::unique_ptr<Command::Result> PlayMediaCommand::run(const std::vector<std::string>& args) {
     int loop = args.size() > 1 ? std::atoi(args[1].c_str()) : 1;
@@ -331,11 +338,15 @@ std::unique_ptr<Command::Result> PlayMediaCommand::run(const std::vector<std::st
     if (loop < 1) {
         loop = 1;
     }
+    std::string videoOut;
+    if (args.size() > 4) {
+        videoOut = args[4];
+    }
 
     MediaOutputBase* out = nullptr;
 #ifdef HAS_GSTREAMER
     if (UseGStreamerForPlayMedia()) {
-        out = new GStreamerPlayData(args[0], loop, volAdjust, slot);
+        out = new GStreamerPlayData(args[0], loop, volAdjust, slot, videoOut);
         LogInfo(VB_COMMAND, "Play Media using GStreamer backend for: %s (slot %d)\n", args[0].c_str(), slot);
     }
 #endif
