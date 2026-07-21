@@ -17,6 +17,7 @@
 #include "Warnings.h" // WarningHolder -- needed directly for NOPCH builds
 
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -56,7 +57,8 @@ HTTPVirtualDisplayOutput::HTTPVirtualDisplayOutput(unsigned int startChannel,
     VirtualDisplayBaseOutput(startChannel, channelCount),
     m_port(HTTPVIRTUALDISPLAYPORT),
     m_screenSize(0),
-    m_updateInterval(1),  // Default: send every frame for smooth playback
+    m_updateInterval(25),  // Default: 25ms (40fps), about all a browser can render
+    m_nextSendMS(0),
     m_socket(-1),
     m_running(true),
     m_connListChanged(true),
@@ -132,10 +134,11 @@ int HTTPVirtualDisplayOutput::Init(Json::Value config) {
 
     if (config.isMember("updateInterval"))
         m_updateInterval = config["updateInterval"].asInt();
-    
-    // Clamp to reasonable values (1-10 frames)
-    if (m_updateInterval < 1) m_updateInterval = 1;
-    if (m_updateInterval > 10) m_updateInterval = 10;
+
+    // Clamp to reasonable values (10-100ms between updates)
+    // Typical: 25ms for 40fps, 16ms for 60fps, 50ms for 20fps
+    if (m_updateInterval < 10) m_updateInterval = 10;
+    if (m_updateInterval > 100) m_updateInterval = 100;
 
     // Signal base class to allocate m_virtualDisplay buffer
     m_width = -1;
@@ -148,6 +151,10 @@ int HTTPVirtualDisplayOutput::Init(Json::Value config) {
     }
 
     m_screenSize = m_width * m_height * 3;
+
+    // Worst case a frame touches every pixel; size this once so the hot loop
+    // never reallocates
+    m_cacheRollback.reserve(m_pixels.size() * 3);
 
     bzero(m_virtualDisplay, m_screenSize);
 
@@ -217,6 +224,17 @@ void HTTPVirtualDisplayOutput::ConnectionThread(void) {
         client = accept(m_socket, NULL, NULL);
 
         if (client >= 0) {
+            // Enable TCP keepalive to detect dead connections
+            int keepalive = 1;
+            setsockopt(client, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+
+            // Accepted sockets don't inherit O_NONBLOCK from the listener, so
+            // set it explicitly - otherwise a browser that stops draining its
+            // socket blocks write() on the channel output thread, which stalls
+            // the actual light output, not just this preview.
+            int flags = fcntl(client, F_GETFL, 0);
+            fcntl(client, F_SETFL, (flags < 0 ? 0 : flags) | O_NONBLOCK);
+
             auto t = std::time(nullptr);
             struct tm tm;
             localtime_r(&t, &tm);
@@ -327,23 +345,71 @@ void HTTPVirtualDisplayOutput::SelectThread(void) {
 /*
  *
  */
-int HTTPVirtualDisplayOutput::WriteSSEPacket(int fd, std::string data) {
+int HTTPVirtualDisplayOutput::WriteSSEPacket(int fd, const std::string& data) {
     int len = data.size();
     std::string sendData;
-    
+
     // Pre-allocate to avoid reallocations
     sendData.reserve(20 + len); // hex length + delimiters + data
-    
+
     // Convert length to hex directly into string
     char hexBuf[16];
     snprintf(hexBuf, sizeof(hexBuf), "%x", len);
-    
+
     sendData = hexBuf;
     sendData += "\r\n";
     sendData += data;
     sendData += "\r\n";
 
-    write(fd, sendData.c_str(), sendData.size());
+    size_t total = sendData.size();
+    size_t sent = 0;
+
+    while (sent < total) {
+        ssize_t written = write(fd, sendData.c_str() + sent, total - sent);
+
+        if (written > 0) {
+            sent += written;
+            continue;
+        }
+
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+
+        if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (sent == 0) {
+                // The client isn't draining fast enough and the send buffer is
+                // full.  Drop this frame rather than the connection - nothing is
+                // on the wire yet.  The caller resyncs the client afterwards,
+                // since the pixel changes in this payload are only sent once.
+                LogExcess(VB_CHANNELOUT, "SSE send buffer full, dropping frame\n");
+                return 0;
+            }
+
+            // We're part way through a chunk.  We can't abandon it - the client
+            // is counting out the bytes we promised in the chunk header, so a
+            // truncated chunk desyncs the stream permanently.  Wait (briefly)
+            // for room and finish it.
+            struct pollfd pfd;
+            pfd.fd = fd;
+            pfd.events = POLLOUT;
+            int pr = poll(&pfd, 1, 250);
+            if (pr > 0) {
+                continue;
+            }
+            if (pr < 0 && errno == EINTR) {
+                continue;
+            }
+
+            LogDebug(VB_CHANNELOUT, "SSE stalled part way through a chunk (%zu/%zu bytes), closing connection\n",
+                     sent, total);
+            return -1;
+        }
+
+        // EPIPE/ECONNRESET/ENOTCONN and anything else: the connection is gone
+        LogDebug(VB_CHANNELOUT, "SSE write failed (connection closed): %s\n", FPPstrerror(errno));
+        return -1;
+    }
 
     return 1;
 }
@@ -361,9 +427,39 @@ void HTTPVirtualDisplayOutput::PrepData(unsigned char* channelData) {
     {
         // Short circuit if no current connections
         std::unique_lock<std::mutex> lock(m_connListLock);
-        if (!m_connList.size())
+        if (!m_connList.size()) {
+            m_sseData.clear();
             return;
+        }
     }
+
+    // We run at the sequence frame rate, which can now be well above anything a
+    // browser can render.  Sending faster than the client drains just piles
+    // frames up in the socket and proxy buffers, so the preview falls further
+    // and further behind playback.  Rate limit to m_updateInterval instead.
+    //
+    // Skipping a frame here is safe even though we send deltas: m_virtualDisplay
+    // is only updated for pixels we actually emit, so it always holds what the
+    // client was last sent and the next diff simply spans a longer gap.
+    //
+    // The deadline is advanced by whole intervals rather than reset to "now" so
+    // that an update interval which isn't a multiple of the frame time still
+    // averages out to the requested rate instead of aliasing down to the next
+    // frame boundary (eg. 25ms against a 20ms sequence gives 40fps, not 25fps).
+    long long now = GetTimeMS();
+    if (now < m_nextSendMS) {
+        m_sseData.clear();
+        return;
+    }
+    m_nextSendMS += m_updateInterval;
+    if (m_nextSendMS <= now) {
+        // First frame, or we've been idle/stalled long enough that the deadline
+        // is stale - resync rather than sending a burst to catch up.
+        m_nextSendMS = now + m_updateInterval;
+    }
+
+    // Start a fresh rollback record for this frame's cache writes
+    m_cacheRollback.clear();
 
     // Fast black detection - check if all channel data is zero (sequence ended/stopped)
     // Only do this check occasionally to reduce CPU overhead
@@ -415,6 +511,12 @@ void HTTPVirtualDisplayOutput::PrepData(unsigned char* channelData) {
             (m_virtualDisplay[m_pixels[i].r] != r) ||
             (m_virtualDisplay[m_pixels[i].g] != g) ||
             (m_virtualDisplay[m_pixels[i].b] != b)) {
+            // Remember the pre-send values so SendData can undo them if this
+            // frame never makes it to the client
+            m_cacheRollback.emplace_back(m_pixels[i].r, m_virtualDisplay[m_pixels[i].r]);
+            m_cacheRollback.emplace_back(m_pixels[i].g, m_virtualDisplay[m_pixels[i].g]);
+            m_cacheRollback.emplace_back(m_pixels[i].b, m_virtualDisplay[m_pixels[i].b]);
+
             m_virtualDisplay[m_pixels[i].r] = r;
             m_virtualDisplay[m_pixels[i].g] = g;
             m_virtualDisplay[m_pixels[i].b] = b;
@@ -489,10 +591,32 @@ void HTTPVirtualDisplayOutput::PrepData(unsigned char* channelData) {
  *
  */
 int HTTPVirtualDisplayOutput::SendData(unsigned char* channelData) {
+    bool dropped = false;
+
     if (m_sseData != "") {
         std::unique_lock<std::mutex> lock(m_connListLock);
-        for (int i = 0; i < m_connList.size(); i++)
-            WriteSSEPacket(m_connList[i], m_sseData);
+        // Iterate backwards so we can safely remove elements
+        for (int i = m_connList.size() - 1; i >= 0; i--) {
+            int result = WriteSSEPacket(m_connList[i], m_sseData);
+            if (result < 0) {
+                // Connection is dead, remove it
+                LogDebug(VB_CHANNELOUT, "Removing dead SSE connection %d\n", m_connList[i]);
+                close(m_connList[i]);
+                m_connList.erase(m_connList.begin() + i);
+                m_connListChanged = true;
+            } else if (result == 0) {
+                dropped = true;
+            }
+        }
+    }
+
+    if (dropped) {
+        // The payload held the only copy of this frame's pixel changes, so put
+        // the cache back the way it was and let the next frame re-send them.
+        for (auto it = m_cacheRollback.rbegin(); it != m_cacheRollback.rend(); ++it) {
+            m_virtualDisplay[it->first] = it->second;
+        }
+        m_cacheRollback.clear();
     }
 
     return m_channelCount;

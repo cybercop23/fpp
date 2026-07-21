@@ -17,6 +17,7 @@
 #include "Warnings.h" // WarningHolder -- needed directly for NOPCH builds
 
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -58,6 +59,7 @@ HTTPVirtualDisplay3DOutput::HTTPVirtualDisplay3DOutput(unsigned int startChannel
     m_port(HTTPVIRTUALDISPLAY3DPORT),
     m_screenSize(0),
     m_updateInterval(25),  // Default: 25ms (40fps) to match typical sequence frame rate
+    m_nextSendMS(0),
     m_socket(-1),
     m_running(true),
     m_connListChanged(true),
@@ -248,7 +250,8 @@ void HTTPVirtualDisplay3DOutput::ConnectionThread(void) {
             setsockopt(client, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
             
             // Set socket to non-blocking to avoid write() blocking on dead connections
-            fcntl(client, F_SETFL, O_NONBLOCK);
+            int flags = fcntl(client, F_GETFL, 0);
+            fcntl(client, F_SETFL, (flags < 0 ? 0 : flags) | O_NONBLOCK);
             
             auto t = std::time(nullptr);
             struct tm tm;
@@ -362,31 +365,69 @@ void HTTPVirtualDisplay3DOutput::SelectThread(void) {
 /*
  *
  */
-int HTTPVirtualDisplay3DOutput::WriteSSEPacket(int fd, std::string data) {
+int HTTPVirtualDisplay3DOutput::WriteSSEPacket(int fd, const std::string& data) {
     int len = data.size();
     std::string sendData;
-    
+
     // Pre-allocate to avoid reallocations
     sendData.reserve(20 + len); // hex length + delimiters + data
-    
+
     // Convert length to hex directly into string
     char hexBuf[16];
     snprintf(hexBuf, sizeof(hexBuf), "%x", len);
-    
+
     sendData = hexBuf;
     sendData += "\r\n";
     sendData += data;
     sendData += "\r\n";
 
-    ssize_t written = write(fd, sendData.c_str(), sendData.size());
-    
-    // Check for write errors (broken connection)
-    if (written < 0) {
-        if (errno == EPIPE || errno == ECONNRESET || errno == ENOTCONN) {
-            LogDebug(VB_CHANNELOUT, "3D SSE write failed (connection closed): %s\n", FPPstrerror(errno));
-            return -1;  // Signal caller to remove this connection
+    size_t total = sendData.size();
+    size_t sent = 0;
+
+    while (sent < total) {
+        ssize_t written = write(fd, sendData.c_str() + sent, total - sent);
+
+        if (written > 0) {
+            sent += written;
+            continue;
         }
-        LogDebug(VB_CHANNELOUT, "3D SSE write error: %s\n", FPPstrerror(errno));
+
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+
+        if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (sent == 0) {
+                // The client isn't draining fast enough and the send buffer is
+                // full.  Drop this frame rather than the connection - nothing is
+                // on the wire yet, and every 3D frame is a full refresh so the
+                // next one brings the client straight back up to date.
+                LogExcess(VB_CHANNELOUT, "3D SSE send buffer full, dropping frame\n");
+                return 0;
+            }
+
+            // We're part way through a chunk.  We can't abandon it - the client
+            // is counting out the bytes we promised in the chunk header, so a
+            // truncated chunk desyncs the stream permanently.  Wait (briefly)
+            // for room and finish it.
+            struct pollfd pfd;
+            pfd.fd = fd;
+            pfd.events = POLLOUT;
+            int pr = poll(&pfd, 1, 250);
+            if (pr > 0) {
+                continue;
+            }
+            if (pr < 0 && errno == EINTR) {
+                continue;
+            }
+
+            LogDebug(VB_CHANNELOUT, "3D SSE stalled part way through a chunk (%zu/%zu bytes), closing connection\n",
+                     sent, total);
+            return -1;
+        }
+
+        // EPIPE/ECONNRESET/ENOTCONN and anything else: the connection is gone
+        LogDebug(VB_CHANNELOUT, "3D SSE write failed (connection closed): %s\n", FPPstrerror(errno));
         return -1;
     }
 
@@ -407,8 +448,32 @@ void HTTPVirtualDisplay3DOutput::PrepData(unsigned char* channelData) {
     {
         // Short circuit if no current connections
         std::unique_lock<std::mutex> lock(m_connListLock);
-        if (!m_connList.size())
+        if (!m_connList.size()) {
+            m_sseData.clear();
             return;
+        }
+    }
+
+    // We run at the sequence frame rate, which can now be well above anything a
+    // browser can render (or even parse) - every 3D frame is a full dump of all
+    // lit pixels, not a delta.  Sending faster than the client drains just piles
+    // frames up in the socket and proxy buffers, so the preview falls further and
+    // further behind playback.  Rate limit to m_updateInterval instead.
+    //
+    // The deadline is advanced by whole intervals rather than reset to "now" so
+    // that an update interval which isn't a multiple of the frame time still
+    // averages out to the requested rate instead of aliasing down to the next
+    // frame boundary (eg. 25ms against a 20ms sequence gives 40fps, not 25fps).
+    long long now = GetTimeMS();
+    if (now < m_nextSendMS) {
+        m_sseData.clear();
+        return;
+    }
+    m_nextSendMS += m_updateInterval;
+    if (m_nextSendMS <= now) {
+        // First frame, or we've been idle/stalled long enough that the deadline
+        // is stale - resync rather than sending a burst to catch up.
+        m_nextSendMS = now + m_updateInterval;
     }
 
     // Fast black detection - check if all channel data is zero (sequence ended/stopped)

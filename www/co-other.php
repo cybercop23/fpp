@@ -299,6 +299,7 @@
         config.width = 1280;
         config.height = 1024;
         config.pixelSize = 2;
+        config.updateInterval = 25;
         return HTTPVirtualDisplayConfig(config);
     }
     function HTTPVirtualDisplayConfig(config) {
@@ -313,7 +314,9 @@
                 result += " selected";
             result += ">" + i + "</option>";
         }
-        result += "</select>";
+        result += "</select> ";
+        result += "Update Interval (ms): <input type='number' class='updateInterval' min='10' max='100' size='4' value='" + (config.updateInterval || 25) + "'>";
+        result += " <span class='text-muted'>(25ms = 40fps)</span>";
         return result;
     }
 
@@ -336,6 +339,8 @@
         if (pixelSize == "")
             pixelSize = "1";
         result.pixelSize = parseInt(pixelSize);
+
+        result.updateInterval = parseInt($cell.find("input.updateInterval").val()) || 25;
         return result;
     }
 

@@ -35,11 +35,14 @@ public:
     void SelectThread(void);
 
 private:
-    int WriteSSEPacket(int fd, std::string data);
+    // Returns 1 if the frame was sent, 0 if it was dropped (client is behind
+    // but the connection is still good), -1 if the connection is dead.
+    int WriteSSEPacket(int fd, const std::string& data);
 
     int m_port;
     int m_screenSize;
-    int m_updateInterval;  // Send update every N frames (1=every frame, 2=every other frame, etc.)
+    int m_updateInterval;   // Minimum ms between SSE frames (25 = 40fps)
+    long long m_nextSendMS; // GetTimeMS() deadline for the next SSE frame
 
     int m_socket;
 

@@ -14,6 +14,7 @@
 #include <mutex>
 #include "fpp-json-fwd.h"
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "VirtualDisplayBase.h"
@@ -35,11 +36,22 @@ public:
     void SelectThread(void);
 
 private:
-    int WriteSSEPacket(int fd, std::string data);
+    // Returns 1 if the frame was sent, 0 if it was dropped (client is behind
+    // but the connection is still good), -1 if the connection is dead.
+    int WriteSSEPacket(int fd, const std::string& data);
 
     int m_port;
     int m_screenSize;
-    int m_updateInterval;  // Send update every N frames (1=every frame, 2=every other frame, etc.)
+    int m_updateInterval;   // Minimum ms between SSE frames (25 = 40fps)
+    long long m_nextSendMS; // GetTimeMS() deadline for the next SSE frame
+
+    // We only send pixels that changed since the last frame, so a payload we
+    // fail to deliver takes that pixel state with it.  Remember what each
+    // emitted pixel's cached value was before this frame so a dropped frame can
+    // roll the cache back and re-send exactly those pixels next time.  Resending
+    // *everything* instead would make the payload maximal precisely when the
+    // client is already struggling, which spirals.
+    std::vector<std::pair<uint32_t, unsigned char>> m_cacheRollback;
 
     int m_socket;
 

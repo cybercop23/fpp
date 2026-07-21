@@ -109,6 +109,13 @@
 	var pendingUpdates = [];
 	var animationFrameId = null;
 	var lastFrameTime = 0;
+	var sseStopped = false;
+
+	// About a half second of backlog at the 40fps fppd defaults to.  Reaching
+	// this means we are not keeping up at all, not just jittering.
+	const MAX_PENDING_FRAMES = 20;
+	const RESYNC_MIN_INTERVAL = 5000;
+	var lastResyncTime = 0;
 
 	function initCanvas() {
 		const canvas = document.getElementById('vCanvas');
@@ -137,7 +144,17 @@
 		buffer.height = canvas.height * window.devicePixelRatio;
 		bctx = buffer.getContext('2d');
 
-		// Draw the black pixels
+		clearPixelBuffer();
+	}
+
+	// Reset every pixel to black.  fppd only sends us pixels that changed since
+	// the last frame, and it zeroes its own copy of that state whenever a client
+	// connects, so we have to start from the same black state it assumes - both
+	// on first load and on any reconnect.
+	function clearPixelBuffer() {
+		if (!bctx)
+			return;
+
 		bctx.fillStyle = '#000000';
 
 		for (var key in cellColors) {
@@ -157,80 +174,152 @@
 
 		clearTimeout(clearTimer);
 
-		// Replace pending update with latest (drop intermediate frames if behind)
-		pendingUpdates = [pixels];
+		// Queue the update - each frame only carries the pixels that changed, so
+		// dropping an intermediate frame would leave those pixels permanently
+		// stale.  renderFrame() drains the whole queue in one go.
+		pendingUpdates.push(pixels);
 
-		// Request animation frame if not already pending
-		if (!animationFrameId) {
-			animationFrameId = requestAnimationFrame(renderFrame);
+		// Safety valve.  Because we can't discard a delta without corrupting the
+		// display, a producer faster than we can draw would grow this queue
+		// without bound and each frame would take longer than the last.
+		if (pendingUpdates.length > MAX_PENDING_FRAMES) {
+			var sinceResync = Date.now() - lastResyncTime;
+
+			if (sinceResync > RESYNC_MIN_INTERVAL) {
+				// Reconnect: fppd resets its pixel state for a new connection,
+				// so this resyncs us from a clean slate.
+				console.warn('Virtual display fell ' + pendingUpdates.length +
+					' frames behind, resyncing');
+				resyncSSE();
+			} else {
+				// We resynced moments ago and are behind again, so this client
+				// simply can't draw at the rate fppd is sending.  Reconnecting
+				// on a loop would only make it worse - each one triggers a full
+				// resend.  Keep just the newest frame instead and accept that
+				// some pixels are stale until they next change; the next
+				// eligible resync will clean them up.
+				pendingUpdates = [pendingUpdates[pendingUpdates.length - 1]];
+			}
+			return;
 		}
 
 		// Clear the display after 6 seconds if no more events.  Max update time in test mode is 5 seconds.
 		clearTimer = setTimeout(function () { ctx.drawImage(img, 0, 0, imgWidth, imgHeight); }, 6000);
 	}
 
-	function renderFrame(timestamp) {
-		animationFrameId = null;
+	// Apply one frame's worth of changed pixels to the off-screen buffer
+	function applyPixels(pixels) {
+		bctx.lineWidth = 0;
+		bctx.strokeStyle = '#000000';
 
-		// Calculate FPS (optional, for debugging)
-		// var fps = 1000 / (timestamp - lastFrameTime);
-		// lastFrameTime = timestamp;
+		for (i = 0; i < pixels.length; i++) {
+			// color:pixel;pixel;pixel|color:pixel|color:pixel;pixel
+			var data = pixels[i].split(':');
 
-		// Process all pending updates in batch
-		while (pendingUpdates.length > 0) {
-			var pixels = pendingUpdates.shift();
+			var rgb = data[0];
 
-			for (i = 0; i < pixels.length; i++) {
-				// color:pixel;pixel;pixel|color:pixel|color:pixel;pixel
-				var data = pixels[i].split(':');
+			var r = base64[rgb.substring(0, 1)];
+			var g = base64[rgb.substring(1, 2)];
+			var b = base64[rgb.substring(2, 3)];
 
-				var rgb = data[0];
+			bctx.fillStyle = '#' + r + g + b;
 
-				var r = base64[rgb.substring(0, 1)];
-				var g = base64[rgb.substring(1, 2)];
-				var b = base64[rgb.substring(2, 3)];
+			// Uncomment to see the incoming color and location data in real time
+			// $('#data').html(bctx.fillStyle + ' => ' + data[1] + '<br>' + $('#data').html().substring(0,500));
 
-				bctx.fillStyle = '#' + r + g + b;
+			var locs = data[1].split(';');
+			for (j = 0; j < locs.length; j++) {
+				var s = scaleMap[locs[j]];
 
-				// Uncomment to see the incoming color and location data in real time
-				// $('#data').html(bctx.fillStyle + ' => ' + data[1] + '<br>' + $('#data').html().substring(0,500));
-
-				bctx.lineWidth = 0;
-				bctx.strokeStyle = '#000000';
-
-				var locs = data[1].split(';');
-				for (j = 0; j < locs.length; j++) {
-					var s = scaleMap[locs[j]];
-
-					// Draw a circle if size is greater than one pixel
-					if (s.size > 1) {
-						bctx.beginPath();
-						bctx.arc(s.x, s.y, parseInt(s.size / 2.0), 0, 2 * Math.PI);
-						bctx.stroke();
-						bctx.fill();
-					} else {
-						bctx.fillRect(s.x, s.y, 1, 1);
-					}
+				// Draw a circle if size is greater than one pixel
+				if (s.size > 1) {
+					bctx.beginPath();
+					bctx.arc(s.x, s.y, parseInt(s.size / 2.0), 0, 2 * Math.PI);
+					bctx.stroke();
+					bctx.fill();
+				} else {
+					bctx.fillRect(s.x, s.y, 1, 1);
 				}
 			}
 		}
+	}
 
-		// Single screen update per frame
+	// Free-running render loop, driven by the display rather than by packet
+	// arrival.  It applies at most one queued frame per displayed frame:
+	// draining the whole backlog into a single present would collapse several
+	// sequence frames into one visible update, which is what made playback look
+	// jerky.  fppd is capped well below display refresh, so the queue still
+	// drains faster than it fills and no delta is ever discarded.
+	function renderFrame(timestamp) {
+		animationFrameId = requestAnimationFrame(renderFrame);
+
+		if (pendingUpdates.length == 0)
+			return;
+
+		applyPixels(pendingUpdates.shift());
+
+		// Single screen update per displayed frame
 		ctx.drawImage(buffer, 0, 0);
 	}
 
+	function startRenderLoop() {
+		if (!animationFrameId)
+			animationFrameId = requestAnimationFrame(renderFrame);
+	}
+
+	function stopRenderLoop() {
+		if (animationFrameId) {
+			cancelAnimationFrame(animationFrameId);
+			animationFrameId = null;
+		}
+	}
+
 	function startSSE() {
+		if (evtSource)
+			return;
+
 		evtSource = new EventSource('api/http-virtual-display/');
+
+		evtSource.onopen = function () {
+			// fppd resets its per-pixel state for every new connection, so drop
+			// anything queued from the old stream and match its black baseline.
+			pendingUpdates = [];
+			clearPixelBuffer();
+			startRenderLoop();
+		};
 
 		evtSource.onmessage = function (event) {
 			processEvent(event);
 		};
 	}
 
+	// Tear the stream down and start a new one, which gives both ends a fresh
+	// black baseline to diff against
+	function resyncSSE() {
+		lastResyncTime = Date.now();
+		pendingUpdates = [];
+
+		if (evtSource) {
+			evtSource.close();
+			evtSource = null;
+		}
+
+		if (!sseStopped && !document.hidden)
+			startSSE();
+	}
+
 	function stopSSE() {
 		$('#stopButton').hide();
 
-		evtSource.close();
+		// Explicit stop - don't let the visibility handler bring it back
+		sseStopped = true;
+
+		if (evtSource) {
+			evtSource.close();
+			evtSource = null;
+		}
+		pendingUpdates = [];
+		stopRenderLoop();
 	}
 
 	function setupSSEClient() {
@@ -238,6 +327,29 @@
 
 		startSSE();
 	}
+
+	// Browsers stop servicing requestAnimationFrame on a hidden tab, so nothing
+	// would drain pendingUpdates while we're in the background.  Drop the stream
+	// instead of queueing frames nobody is going to draw.
+	document.addEventListener('visibilitychange', function () {
+		if (document.hidden) {
+			if (evtSource) {
+				evtSource.close();
+				evtSource = null;
+			}
+			pendingUpdates = [];
+			stopRenderLoop();
+		} else if (!sseStopped) {
+			startSSE();
+		}
+	});
+
+	window.addEventListener('beforeunload', function () {
+		if (evtSource) {
+			evtSource.close();
+			evtSource = null;
+		}
+	});
 
 	$(document).ready(function () {
 		setupSSEClient();
