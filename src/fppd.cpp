@@ -582,6 +582,7 @@ int parseArguments(int argc, char** argv) {
             { "playlist", required_argument, 0, 'p' },
             { "position", required_argument, 0, 'P' },
             { "detect-piface", no_argument, 0, 4 },
+            { "resume-unscheduled", required_argument, 0, 5 },
             { "help", no_argument, 0, 'h' },
             { "log-level", required_argument, 0, 2 },
             { 0, 0, 0, 0 }
@@ -616,6 +617,15 @@ int parseArguments(int argc, char** argv) {
             break;
         case 'P': // position
             SetSetting("resumePosition", atoi(optarg));
+            break;
+        case 5: // resume-unscheduled <repeat>
+            // -p/-P alone only restore the POSITION of a playlist the scheduler
+            // is about to start anyway (Scheduler::PlayScheduledItem).  This
+            // says "start it yourself if the scheduler doesn't", which is what
+            // a self-initiated recovery restart of a manually-started show
+            // needs (issue #2727).  The argument carries the repeat mode.
+            SetSetting("resumeUnscheduled", 1);
+            SetSetting("resumeRepeat", atoi(optarg));
             break;
         case 'v': // volume
             setVolume(atoi(optarg));
@@ -951,22 +961,63 @@ int main(int argc, char* argv[]) {
     curl_global_cleanup();
     std::string logLevelString = FPPLogger::INSTANCE.GetLogLevelString();
 
+    // Decide the restart resume HERE, while the log file is still open:
+    // everything logged after CloseOpenFiles() below is silently discarded
+    // (which is why "Performing Restart." has never appeared in a support log),
+    // and "my show never came back after a restart" is otherwise
+    // indistinguishable from "no playlist was running" (issue #2727).
+    //
+    // A manually-started playlist is normally NOT resumed across a restart -- a
+    // user-requested restart shouldn't silently re-start a show they stopped by
+    // restarting.  A recovery restart we initiated ourselves is the opposite
+    // case: the playlist was running, nobody asked for it to stop, and coming
+    // back idle strands every synced remote mid-clip on a frozen frame.
+    std::string resumePlaylist;
+    std::string resumePosition;
+    std::string resumeRepeat;
+    bool resumeUnscheduled = false;
+    if (restartFPPD) {
+        if ((Player::INSTANCE.GetStatus() == FPP_STATUS_PLAYLIST_PLAYING) &&
+            (Player::INSTANCE.WasScheduled() || RestartShouldResumePlaylist())) {
+            resumePlaylist = Player::INSTANCE.GetPlaylistName();
+            resumePosition = std::to_string(Player::INSTANCE.GetPosition() - 1);
+            resumeRepeat = std::to_string(Player::INSTANCE.GetRepeat());
+            // Force-start only what the scheduler won't restore itself.  A
+            // scheduled playlist is left to CheckIfShouldBePlayingNow(), which
+            // is schedule-window aware -- forcing that one would restart a show
+            // whose window closed while we were restarting.
+            resumeUnscheduled = RestartShouldResumePlaylist() && !Player::INSTANCE.WasScheduled();
+            LogInfo(VB_GENERAL, "Restart: resuming playlist '%s' at position %s (repeat %s, unscheduled resume %d)\n",
+                    resumePlaylist.c_str(), resumePosition.c_str(), resumeRepeat.c_str(),
+                    resumeUnscheduled ? 1 : 0);
+        } else {
+            LogInfo(VB_GENERAL, "Restart: not resuming a playlist (status %d, scheduled %d, resume requested %d)\n",
+                    (int)Player::INSTANCE.GetStatus(), Player::INSTANCE.WasScheduled(),
+                    RestartShouldResumePlaylist() ? 1 : 0);
+        }
+    }
+
     CloseCommand();
     CloseOpenFiles(getSettingInt("daemonize"));
 
     WarningHolder::ClearWarningsFile();
 
     if (restartFPPD) {
-        LogInfo(VB_GENERAL, "Performing Restart.\n");
         remove(FPP_DIR_MEDIA("/fpp-info.json").c_str());
 
-        if ((Player::INSTANCE.GetStatus() == FPP_STATUS_PLAYLIST_PLAYING) &&
-            (Player::INSTANCE.WasScheduled())) {
-            std::string playlist = Player::INSTANCE.GetPlaylistName();
-            std::string position = std::to_string(Player::INSTANCE.GetPosition() - 1);
-            execlp(getFPPDDir("/src/fppd").c_str(), getFPPDDir("/src/fppd").c_str(), getSettingInt("daemonize") ? "-d" : "-f", "--log-level", logLevelString.c_str(), "-r", "-p", playlist.c_str(), "-P", position.c_str(), NULL);
+        std::string fppdDir = getFPPDDir("/src/fppd");
+        const char* dmode = getSettingInt("daemonize") ? "-d" : "-f";
+        if (!resumePlaylist.empty()) {
+            if (resumeUnscheduled) {
+                // We asked for this restart, so the show must come back even
+                // when no schedule would start it (issue #2727).  -p/-P alone
+                // only restore the position of a playlist the scheduler is
+                // already starting.
+                execlp(fppdDir.c_str(), fppdDir.c_str(), dmode, "--log-level", logLevelString.c_str(), "-r", "-p", resumePlaylist.c_str(), "-P", resumePosition.c_str(), "--resume-unscheduled", resumeRepeat.c_str(), NULL);
+            }
+            execlp(fppdDir.c_str(), fppdDir.c_str(), dmode, "--log-level", logLevelString.c_str(), "-r", "-p", resumePlaylist.c_str(), "-P", resumePosition.c_str(), NULL);
         } else {
-            execlp(getFPPDDir("/src/fppd").c_str(), getFPPDDir("/src/fppd").c_str(), getSettingInt("daemonize") ? "-d" : "-f", "--log-level", logLevelString.c_str(), "-r", NULL);
+            execlp(fppdDir.c_str(), fppdDir.c_str(), dmode, "--log-level", logLevelString.c_str(), "-r", NULL);
         }
     }
 
@@ -1095,6 +1146,25 @@ void MainLoop(void) {
             WarningHolder::AddWarning(55, "System clock not set - scheduler start delayed until time sync");
             clockWarningAdded = true;
         }
+
+        // If a scheduled item covered the resume, CheckIfShouldBePlayingNow()
+        // above already started it and cleared resumePlaylist.  Anything left
+        // here is a show that was running with no schedule behind it when we
+        // restarted ourselves to recover the video decoder -- start it, or the
+        // player comes back idle and every synced remote sits on its last frame
+        // waiting for sync packets that never arrive (issue #2727).
+        std::string resumePlaylist = getSetting("resumePlaylist");
+        if (getSettingInt("resumeUnscheduled") && !resumePlaylist.empty() &&
+            Player::INSTANCE.GetStatus() == FPP_STATUS_IDLE) {
+            int resumePosition = getSettingInt("resumePosition");
+            int resumeRepeat = getSettingInt("resumeRepeat");
+            LogInfo(VB_PLAYLIST, "Resuming unscheduled playlist '%s' at position %d (repeat %d) after restart\n",
+                    resumePlaylist.c_str(), resumePosition, resumeRepeat);
+            SetSetting("resumePlaylist", "");
+            SetSetting("resumePosition", 0);
+            SetSetting("resumeUnscheduled", 0);
+            Player::INSTANCE.StartPlaylist(resumePlaylist, resumeRepeat, resumePosition);
+        }
     }
     if (CommandManager::INSTANCE.HasPreset("FPPD_STARTED")) {
         CommandManager::INSTANCE.TriggerPreset("FPPD_STARTED");
@@ -1185,6 +1255,11 @@ void MainLoop(void) {
         } else if (getFPPmode() == REMOTE_MODE) {
             if (mediaOutputStatus.status == MEDIAOUTPUTSTATUS_PLAYING) {
                 Player::INSTANCE.ProcessMedia();
+            } else {
+                // Media that ran to its end and was never stopped by the
+                // player (issue #2727) -- only checked when not playing, so
+                // free-running through a sync gap is untouched.
+                multiSync->CheckSyncedMediaIdleTimeout();
             }
         }
         

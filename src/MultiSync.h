@@ -306,6 +306,7 @@ public:
     void StartSyncedMedia(const std::string& filename, float secondsElapsed = 0.0f);
     void StopSyncedMedia(const std::string& filename);
     void SyncSyncedMedia(const std::string& filename, int frameNumber, float secondsElapsed);
+    void CheckSyncedMediaIdleTimeout();
 
     void SyncPlaylistToMS(uint64_t ms, const std::string& pl = "", bool sendSyncPackets = false);
     void SyncPlaylistToMS(uint64_t ms, int pos, const std::string& pl = "", bool sendSyncPackets = false);
@@ -404,6 +405,12 @@ private:
     int m_lastMediaHalfSecond;
     int m_lastFrame;
     int m_lastFrameSent;
+
+    // Wall-clock ms of the last media sync packet we acted on as a remote.
+    // 0 when no synced media is open.  Read/written from the sync-receive path
+    // and the main loop's idle check, hence atomic.  See
+    // CheckSyncedMediaIdleTimeout().
+    std::atomic<uint64_t> m_lastSyncedMediaPacketMS{ 0 };
 
     float m_remoteOffset;
 

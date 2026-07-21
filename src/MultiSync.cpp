@@ -2747,6 +2747,7 @@ void MultiSync::OpenSyncedMedia(const std::string& filename) {
         a->ReceivedMediaOpenPacket(filename);
     }
 
+    m_lastSyncedMediaPacketMS = (uint64_t)GetTimeMS();
     OpenMediaOutput(filename);
 }
 
@@ -2756,6 +2757,7 @@ void MultiSync::StartSyncedMedia(const std::string& filename, float secondsElaps
         a->ReceivedMediaSyncStartPacket(filename);
     }
     int msTime = (secondsElapsed > 0.0f) ? (int)(secondsElapsed * 1000.0f) : 0;
+    m_lastSyncedMediaPacketMS = (uint64_t)GetTimeMS();
     StartMediaOutput(filename, msTime);
 }
 
@@ -2768,6 +2770,8 @@ void MultiSync::StopSyncedMedia(const std::string& filename) {
         a->ReceivedMediaSyncStopPacket(filename);
     }
 
+    m_lastSyncedMediaPacketMS = 0;
+
     if (!mediaOutput) {
         return;
     }
@@ -2776,6 +2780,58 @@ void MultiSync::StopSyncedMedia(const std::string& filename) {
         LogDebug(VB_SYNC, "Stopping synced media: %s\n", mediaOutput->m_mediaFilename.c_str());
         CloseMediaOutput();
     }
+}
+
+/*
+ * Close a synced media output that has run to its end while the player has
+ * gone away (issue #2727: a wedged-decoder restart on the player left both
+ * remotes holding an EOS'd pipeline forever -- slot still active, /dev/video10
+ * and dmabufs still held -- while the UI happily reported "playing").
+ *
+ * The trigger is deliberately NOT "sync packets went quiet".  A remote's media
+ * free-runs on its own clock, so a network glitch mid-clip is harmless: the
+ * clip keeps playing and UpdateMasterMediaPosition nudges it back when packets
+ * resume.  Tearing that down on packet silence would turn a glitch into a
+ * visible outage.  The unrecoverable state is a clip that has ENDED with the
+ * player gone -- nothing but a sync packet can ever move it forward again.
+ *
+ * The normal end-of-clip-to-next-clip gap on a remote is ~13ms, so the default
+ * grace of 10s is ~750x the real-world gap; a glitch straddling a clip boundary
+ * costs at most the last frame going away early, and the next START packet
+ * opens a fresh output as usual.
+ */
+void MultiSync::CheckSyncedMediaIdleTimeout() {
+    uint64_t last = m_lastSyncedMediaPacketMS;
+    if (last == 0) {
+        return; // no synced media open
+    }
+    // 0 disables the watchdog
+    int timeoutSec = getSettingInt("RemoteSyncedMediaIdleTimeout", 10);
+    if (timeoutSec <= 0) {
+        return;
+    }
+    if (((uint64_t)GetTimeMS() - last) < (uint64_t)(timeoutSec * 1000)) {
+        return;
+    }
+
+    std::string filename;
+    {
+        std::unique_lock<std::mutex> lock(mediaOutputLock);
+        if (!mediaOutput) {
+            m_lastSyncedMediaPacketMS = 0;
+            return;
+        }
+        if (mediaOutput->IsPlaying()) {
+            return; // still playing -- free-running through a sync gap is fine
+        }
+        filename = mediaOutput->m_mediaFilename;
+    }
+
+    LogWarn(VB_SYNC, "Synced media '%s' finished and no sync packet received in %d seconds "
+                     "- player appears to have gone away, closing media output\n",
+            filename.c_str(), timeoutSec);
+    m_lastSyncedMediaPacketMS = 0;
+    CloseMediaOutput();
 }
 
 /*
@@ -2788,6 +2844,7 @@ void MultiSync::SyncSyncedMedia(const std::string& filename, int frameNumber, fl
         a->ReceivedMediaSyncPacket(filename, secondsElapsed);
     }
 
+    m_lastSyncedMediaPacketMS = (uint64_t)GetTimeMS();
     UpdateMasterMediaPosition(filename, secondsElapsed);
 }
 

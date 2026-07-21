@@ -70,7 +70,8 @@ GStreamerOutput* GStreamerOutput::m_currentInstance = nullptr;
 //   2. The decoder stays wedged, so subsequent videos fail preroll too.
 //      Consecutive wedge events (preroll-watchdog fires, abandoned
 //      teardowns) are counted here; at the limit fppd restarts itself via
-//      ShutdownFPPD(true) — a fresh process re-opens the V4L2 device, which
+//      RestartFPPDResumingPlaylist() — a fresh process re-opens the V4L2
+//      device (and picks the show back up where it left off), which
 //      bounds the abandoned-pipeline fd leakage and recovers the decoder in
 //      the cases we can recover.  The count resets the moment any pipeline
 //      reports a valid playback position (decoder demonstrably healthy).
@@ -151,7 +152,7 @@ static void RecordWedgeEventAndMaybeRestart(const char* what) {
             // Reboot unavailable (container, dev box) — fall back to the
             // restart rung rather than doing nothing.
             LogErr(VB_MEDIAOUT, "GStreamer: reboot command failed, falling back to fppd restart\n");
-            ShutdownFPPD(true);
+            RestartFPPDResumingPlaylist();
             return;
         }
         // Exit cleanly while the system goes down.
@@ -162,7 +163,9 @@ static void RecordWedgeEventAndMaybeRestart(const char* what) {
     LogErr(VB_MEDIAOUT, "GStreamer: %d consecutive pipeline wedges — hardware decoder is not recoverable in-process, restarting fppd (restart %d/%d before reboot escalation)\n",
            fails, recentRestarts, rebootLimit);
     WarningHolder::AddWarningTimeout(300, 37, "Restarting fppd: hardware media decoder wedged (repeated pipeline hangs, issue #2695)");
-    ShutdownFPPD(true);
+    // Resume whatever was playing: the restart exists to keep the show (and
+    // the remotes syncing to it) alive, not just to reset the decoder.
+    RestartFPPDResumingPlaylist();
 }
 
 // Drive a pipeline to GST_STATE_NULL on a reaper thread with a deadline.

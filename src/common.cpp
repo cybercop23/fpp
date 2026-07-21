@@ -667,10 +667,18 @@ std::vector<uint8_t> base64Decode(std::string const& encodedString) {
 }
 
 static std::function<void(bool)> SHUTDOWN_HOOK;
+static std::atomic<bool> RESTART_RESUME_PLAYLIST{ false };
 void ShutdownFPPD(bool restart) {
     if (SHUTDOWN_HOOK) {
         SHUTDOWN_HOOK(restart);
     }
+}
+void RestartFPPDResumingPlaylist() {
+    RESTART_RESUME_PLAYLIST = true;
+    ShutdownFPPD(true);
+}
+bool RestartShouldResumePlaylist() {
+    return RESTART_RESUME_PLAYLIST;
 }
 void RegisterShutdownHandler(const std::function<void(bool)> hook) {
     SHUTDOWN_HOOK = hook;

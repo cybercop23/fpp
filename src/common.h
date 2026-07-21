@@ -91,6 +91,13 @@ std::string base64Encode(uint8_t const* bytes_to_encode, unsigned int in_len);
 std::vector<uint8_t> base64Decode(std::string const& encodedString);
 
 void ShutdownFPPD(bool restart = false);
+// Restart fppd and resume the currently-running playlist even when it was
+// started manually rather than by the scheduler.  For self-initiated recovery
+// restarts (the wedged-decoder ladder in GStreamerOut) where coming back idle
+// and leaving the show -- and every synced remote -- dead defeats the whole
+// point of restarting (issue #2727).
+void RestartFPPDResumingPlaylist();
+bool RestartShouldResumePlaylist();
 void RegisterShutdownHandler(const std::function<void(bool)> hook);
 
 void GetCurrentFPPDStatus(Json::Value& result);
