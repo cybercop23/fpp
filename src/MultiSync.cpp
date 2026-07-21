@@ -2107,37 +2107,53 @@ void MultiSync::SendControlPacket(void* outBuf, int len) {
 }
 
 void MultiSync::UpdateUnicastDestinations() {
-    // Build the new sockaddr list while holding m_systemsLock (recursive, so
-    // safe even when a caller already holds it), then swap it into place under
-    // m_socketLock.  We never hold m_socketLock while taking m_systemsLock,
-    // matching the m_systemsLock -> m_socketLock order used by Ping().
-    std::vector<struct sockaddr_in> newAddrs;
+    // Serialize rebuilds against each other -- DNS resolution below happens
+    // without m_systemsLock held, so without this, two overlapping calls could
+    // interleave and the slower resolution could finish last and clobber a
+    // newer result.
+    std::unique_lock<std::mutex> updateLock(m_unicastUpdateLock);
+
+    // Snapshot the addresses to resolve while holding m_systemsLock only
+    // briefly, then resolve outside of it. getaddrinfo() (via GetIPForHost())
+    // is an unbounded, potentially slow DNS/mDNS lookup; resolving while
+    // m_systemsLock was held used to stall every other m_systemsLock caller
+    // (notably the frequently-polled GetSystems()) for as long as the lookup
+    // took. GetIPForHost() itself is reentrant/thread-safe, so it's fine to
+    // call without any MultiSync lock held.
+    std::vector<std::string> addrsToResolve;
     {
         std::unique_lock<std::recursive_mutex> lock(m_systemsLock);
         for (auto& sys : m_remoteSystems) {
-            if (!sys.supportsUnicast) {
-                continue;
+            if (sys.supportsUnicast) {
+                addrsToResolve.push_back(sys.address);
             }
-            struct sockaddr_in addr;
-            memset(&addr, 0, sizeof(addr));
-            addr.sin_family = AF_INET;
-            addr.sin_port = htons(FPP_CTRL_PORT);
-
-            std::string ipAd = sys.address;
-            if (GetIPForHost(ipAd)) {
-                addr.sin_addr.s_addr = inet_addr(ipAd.c_str());
-            } else {
-                addr.sin_addr.s_addr = inet_addr(sys.address.c_str());
-            }
-            // Skip anything that didn't resolve to a usable IPv4 address
-            // (e.g. an IPv6-only peer); sockaddr_in can't represent it.
-            if (addr.sin_addr.s_addr == INADDR_NONE || addr.sin_addr.s_addr == 0) {
-                continue;
-            }
-            newAddrs.push_back(addr);
         }
     }
 
+    std::vector<struct sockaddr_in> newAddrs;
+    for (auto& address : addrsToResolve) {
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(FPP_CTRL_PORT);
+
+        std::string ipAd = address;
+        if (GetIPForHost(ipAd)) {
+            addr.sin_addr.s_addr = inet_addr(ipAd.c_str());
+        } else {
+            addr.sin_addr.s_addr = inet_addr(address.c_str());
+        }
+        // Skip anything that didn't resolve to a usable IPv4 address
+        // (e.g. an IPv6-only peer); sockaddr_in can't represent it.
+        if (addr.sin_addr.s_addr == INADDR_NONE || addr.sin_addr.s_addr == 0) {
+            continue;
+        }
+        newAddrs.push_back(addr);
+    }
+
+    // Build the new sockaddr list, then swap it into place under m_socketLock.
+    // We never hold m_socketLock while taking m_systemsLock, matching the
+    // m_systemsLock -> m_socketLock order used by Ping().
     std::unique_lock<std::mutex> lock(m_socketLock);
     // Skip any address already covered by the statically-configured remote list
     // (m_destAddr, built once in OpenControlSockets and immutable thereafter) so
@@ -2954,10 +2970,15 @@ void MultiSync::ProcessPingPacket(ControlPkt* pkt, int len, const std::string& s
     }
 
     bool isLocal = false;
-    std::unique_lock<std::mutex> lock(m_socketLock);
-    for (auto& a : m_interfaces) {
-        if (address == a.second.interfaceAddress) {
-            isLocal = true;
+    {
+        // Only m_interfaces needs m_socketLock; released before UpdateSystem()
+        // below so it isn't held across a call that can re-enter m_socketLock
+        // via UpdateUnicastDestinations() (m_socketLock is non-recursive).
+        std::unique_lock<std::mutex> lock(m_socketLock);
+        for (auto& a : m_interfaces) {
+            if (address == a.second.interfaceAddress) {
+                isLocal = true;
+            }
         }
     }
 
@@ -2969,7 +2990,6 @@ void MultiSync::ProcessPingPacket(ControlPkt* pkt, int len, const std::string& s
                                 systemMode & 0x04 ? true : false);
     }
     if (discover) {
-        lock.unlock();
         if ((hostname != m_hostname) && !isLocal) {
             // very slight random delay so all the remotes don't send
             // packets out at the same time
