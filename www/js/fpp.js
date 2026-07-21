@@ -5258,6 +5258,15 @@ function updateWarnings (jsonStatus) {
 			currentWarnings = [blockedWarning].concat(currentWarnings);
 		}
 
+		// The status payload now always carries a warnings array (empty when there
+		// is nothing wrong), so the presence of the key no longer implies there is
+		// anything to report.  Render only once a warning has actually survived,
+		// otherwise the panel shows an empty "Abnormal Conditions" heading.
+		if (!currentWarnings || currentWarnings.length == 0) {
+			$('#warningsRow').hide();
+			return;
+		}
+
 		var txt =
 			'<b>Abnormal Conditions - May cause poor performance or other issues';
 		var hasID = false;
