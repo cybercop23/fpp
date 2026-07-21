@@ -834,6 +834,42 @@ static bool anyPluginsInstalled() {
     return false;
 }
 
+// FPP 10 changed the default MultiSync send method from Multicast to
+// Unicast-to-known-remotes for fresh installs (see www/settings.json's
+// MultiSyncUnicast "default": 1). An FPPOS reflash replaces /opt/fpp
+// (settings.json included) but preserves /home/fpp/media/settings from the
+// prior install untouched -- so an existing multisync user who never
+// explicitly recorded a send method (multicast was implicit/default before
+// unicast existed) would otherwise silently flip to unicast the moment this
+// new code boots. Pin them to their historical multicast behavior instead.
+// (Fresh installs and normal in-place `fpp upgrade`s are handled separately,
+// by upgrade/122/upgrade.sh via the version-gated upgrade_config path.)
+static void migrateMultiSyncDefaultToMulticast() {
+    if (getRawSettingInt("MultiSyncEnabled", 0) == 1) {
+        if (getRawSettingInt("MultiSyncMulticast", 0) != 1 &&
+            getRawSettingInt("MultiSyncBroadcast", 0) != 1 &&
+            getRawSettingInt("MultiSyncUnicast", 0) != 1) {
+            setRawSetting("MultiSyncMulticast", "1");
+            setRawSetting("MultiSyncUnicast", "0");
+        }
+    }
+}
+
+// Config-state migrations that must survive an FPPOS reflash, gated on the
+// same /fppos_upgraded marker as checkInstallPackages() (touched by
+// upgradeOS-part2.sh, which is always sourced from the target image being
+// flashed -- see the note in upgradeOS-part1.sh -- so this runs with current
+// code regardless of how old the box being upgraded was). Unlike
+// checkInstallPackages(), this does NOT unlink /fppos_upgraded itself: package
+// installs may still be retrying (e.g. no network yet), and each migration
+// here is written to be safely idempotent, so simply re-running on a later
+// boot is harmless. Add future OS-upgrade-surviving config migrations here.
+void checkConfigMigrations() {
+    if (FileExists("/fppos_upgraded")) {
+        migrateMultiSyncDefaultToMulticast();
+    }
+}
+
 void checkInstallPackages() {
     if (FileExists("/fppos_upgraded")) {
         // An FPPOS reflash replaces /opt/fpp (new fppd, headers, plugin API

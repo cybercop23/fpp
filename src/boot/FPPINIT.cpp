@@ -358,6 +358,12 @@ int main(int argc, char* argv[]) {
         audioThread.join();
         networkThread.join();
 
+        // checkConfigMigrations doesn't need the network, but runs here anyway,
+        // right beside checkInstallPackages -- both are gated on the same
+        // /fppos_upgraded marker, so keeping them together keeps that shared
+        // precondition visible in one place.
+        checkConfigMigrations();
+
         // Both of these must run after a join:
         //  - checkInstallPackages may apt-install user packages after an OS
         //    upgrade, so it needs the network up (network thread joined).

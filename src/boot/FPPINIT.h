@@ -79,6 +79,7 @@ void setupKiosk(bool force = false);
 void checkInstallKiosk();
 void installKiosk();
 void checkInstallPackages();
+void checkConfigMigrations();
 void startZRAMSwap();
 void startDiskSwap();
 void setupChannelOutputs();

@@ -122,43 +122,6 @@ fi
 #make sure settings are re-applied after boot
 echo "BootActions = \"settings\"" >> /home/fpp/media/settings
 
-# Default MultiSync mode is changing from Multicast to Unicast-to-known-remotes
-# for new/fresh installs (see www/settings.json MultiSyncMulticast/MultiSyncUnicast).
-# Pin existing multisync-enabled systems to their current effective mode
-# (Multicast) so this OS upgrade does not silently change their sync behavior.
-# scripts/common is not sourced here (see note at top of file), so getSetting/
-# setSetting's read/write pattern (including their flock locking against a
-# concurrent writer -- fppd is still running at this point) is reproduced
-# inline rather than called directly.
-SETTINGSFILE=/home/fpp/media/settings
-getSettingRaw() {
-    if [ -f "/usr/bin/flock" ]; then
-        exec {FD}<"${SETTINGSFILE}"
-        flock -n ${FD} || exit 1
-        grep -i --binary-files=text "^$1\s*=.*" "${SETTINGSFILE}" | sed -E -e "s/^$1\s*=\s*(.*)/\1/" -e 's/"//g'
-        flock -u ${FD}
-    else
-        grep -i --binary-files=text "^$1\s*=.*" "${SETTINGSFILE}" | sed -E -e "s/^$1\s*=\s*(.*)/\1/" -e 's/"//g'
-    fi
-}
-setSettingRaw() {
-    if [ -f "/usr/bin/flock" ]; then
-        exec {FD}<"${SETTINGSFILE}"
-        flock -n ${FD} || exit 1
-    fi
-    sed -i -e "/^$1 *= */d" "${SETTINGSFILE}"
-    echo "$1 = \"$2\"" >> "${SETTINGSFILE}"
-    sed -i 's/\x0//g' "${SETTINGSFILE}"
-    if [ -f "/usr/bin/flock" ]; then
-        flock -u ${FD}
-    fi
-}
-if [ "$(getSettingRaw MultiSyncEnabled)" == "1" ]; then
-    if [ "$(getSettingRaw MultiSyncMulticast)" != "1" ] && [ "$(getSettingRaw MultiSyncBroadcast)" != "1" ] && [ "$(getSettingRaw MultiSyncUnicast)" != "1" ]; then
-        setSettingRaw MultiSyncMulticast 1
-        setSettingRaw MultiSyncUnicast 0
-    fi
-fi
 
 #remove files where the binary may not have changed (so rsync won't recopy)
 #but the caps (getcap) might be different
