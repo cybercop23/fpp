@@ -66,6 +66,10 @@ public:
     /// Set volume on a specific slot (0-100). Returns true on success.
     bool SetSlotVolume(int slot, int volume);
 
+    /// Seek a slot to an absolute position in seconds.  Returns false if the
+    /// slot is idle or the seek failed.
+    bool SeekSlot(int slot, float seconds);
+
     /// Get status JSON for all slots (for /api/fppd/status extension).
     Json::Value GetAllSlotsStatus();
 
@@ -80,6 +84,18 @@ public:
     /// Process all active background slots (call from Playlist::Process).
     void ProcessBackgroundSlots();
 
+    /// Mark a slot as following the primary media's clock.  Off by default:
+    /// two unrelated videos on two displays should each run at their own pace,
+    /// and only opting in avoids rate-nudging media that has no relationship
+    /// to the show.
+    void SetSyncToMaster(int slot, bool sync);
+
+    /// Nudge every sync-enabled slot toward masterPos (seconds).  Reuses the
+    /// same rate-convergence AdjustSpeed() that remote-mode MultiSync uses, so
+    /// a slot drifting from the show is pulled back rather than hard-seeked.
+    /// Safe to call every media tick — the rate nudge is throttled internally.
+    void SyncSlotsToMaster(float masterPos);
+
 private:
     StreamSlotManager();
 
@@ -88,7 +104,23 @@ private:
         GStreamerOutput* activeOutput = nullptr;
         std::string mediaFilename;
         bool isBackground = false;  // background slots don't block playlist
+        bool syncToMaster = false;  // follow the primary media's clock
+        long long lastSyncMS = 0;   // last drift check (see SyncSlotsToMaster)
+        long long syncSettleMS = 0; // no drift checks until this time
     };
+
+    /// How often a sync-enabled slot's position is checked against the primary.
+    static constexpr long long SYNC_INTERVAL_MS = 500;
+    /// How far a sync-enabled slot may drift before it is seeked back into
+    /// line.  Well above anything seen in practice (same-box slots measure
+    /// 0.000s), so in normal operation nothing is ever seeked.
+    static constexpr float MAX_DRIFT_SEC = 0.5f;
+    /// Quiet period after a slot starts, before drift is trusted.  A freshly
+    /// built pipeline reports a settling position for about a second, and so
+    /// does the primary it is compared against -- on resume the primary was
+    /// seen reporting 0.486s having just been handed Start(6040).  Correcting
+    /// against either transient produced a pair of pointless, audible seeks.
+    static constexpr long long SYNC_SETTLE_MS = 3000;
 
     std::array<SlotState, MAX_SLOTS> m_slots;
     std::recursive_mutex m_mutex;

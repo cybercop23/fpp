@@ -41,6 +41,11 @@ public:
     virtual int Close(void) override;
     virtual int IsPlaying(void) override;
     virtual int AdjustSpeed(float masterPos) override;
+
+    /// Flush-seek to an absolute position in seconds.  Audible/visible glitch,
+    /// so this is for repairing a stream that has genuinely left the show
+    /// timeline, not for routine correction.  Returns false if the seek failed.
+    bool SeekTo(float seconds);
     virtual void SetVolume(int volume) override;
 
     // Static methods matching SDLOutput interface

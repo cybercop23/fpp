@@ -989,6 +989,15 @@ int Playlist::Process(void) {
     // Process any background stream slots (2-5) — fire-and-forget media on secondary streams
     StreamSlotManager::Instance().ProcessBackgroundSlots();
 
+    // Pull sync-enabled slots toward the primary media's position so extra
+    // streams (a second language on another audio output, a second display)
+    // stay locked to the show rather than free-running.  Hooked here rather
+    // than in ProcessMedia(), which the main loop only calls in REMOTE_MODE.
+    if (mediaOutputStatus.status == MEDIAOUTPUTSTATUS_PLAYING &&
+        mediaOutputStatus.mediaSeconds > 0.0f) {
+        StreamSlotManager::Instance().SyncSlotsToMaster(mediaOutputStatus.mediaSeconds);
+    }
+
     // LogExcess(VB_PLAYLIST, "Playlist::Process: %s, section %s, position: %d\n", m_name.c_str(), m_currentSectionStr.c_str(), m_sectionPosition);
 
     if (!PL_CLEANUPS.empty()) {

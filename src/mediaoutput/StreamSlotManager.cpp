@@ -49,6 +49,8 @@ void StreamSlotManager::SetActiveOutput(int slot, GStreamerOutput* output) {
     if (slot < 1 || slot > MAX_SLOTS) return;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_slots[slot - 1].activeOutput = output;
+    // Every start (including a resume) re-arms the settle window.
+    m_slots[slot - 1].syncSettleMS = GetTimeMS() + SYNC_SETTLE_MS;
 #ifdef HAS_GSTREAMER
     if (output) {
         m_slots[slot - 1].mediaFilename = output->m_mediaFilename;
@@ -70,6 +72,17 @@ void StreamSlotManager::ClearSlot(int slot) {
     m_slots[slot - 1].activeOutput = nullptr;
     m_slots[slot - 1].mediaFilename.clear();
     m_slots[slot - 1].isBackground = false;
+    m_slots[slot - 1].syncToMaster = false;
+    m_slots[slot - 1].lastSyncMS = 0;
+    m_slots[slot - 1].syncSettleMS = 0;
+    // Zero the timing fields, not just the state: GetAllSlotsStatus() reports
+    // them for any slot holding an active output, so leaving the last track's
+    // numbers behind makes a freshly started stream read as though it were
+    // already minutes in until its first Process() lands.  Slot 1 aliases the
+    // global mediaOutputStatus, which is not ours to wipe.
+    if (slot > 1) {
+        m_slots[slot - 1].status = {};
+    }
     m_slots[slot - 1].status.status = MEDIAOUTPUTSTATUS_IDLE;
     // #2713: release the KMS connector gate (mediaOutputStatus.output) when the
     // stream tears down.  Otherwise it stays set to the video's connector (e.g.
@@ -104,6 +117,18 @@ bool StreamSlotManager::SetSlotVolume(int slot, int volume) {
     if (output) {
         output->SetVolume(volume);
         return true;
+    }
+#endif
+    return false;
+}
+
+bool StreamSlotManager::SeekSlot(int slot, float seconds) {
+#ifdef HAS_GSTREAMER
+    if (slot < 1 || slot > MAX_SLOTS) return false;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    GStreamerOutput* output = m_slots[slot - 1].activeOutput;
+    if (output) {
+        return output->SeekTo(seconds);
     }
 #endif
     return false;
@@ -160,8 +185,64 @@ void StreamSlotManager::StopBackgroundSlots() {
             m_slots[i].activeOutput = nullptr;
             m_slots[i].mediaFilename.clear();
             m_slots[i].isBackground = false;
+            m_slots[i].syncToMaster = false;
+            m_slots[i].lastSyncMS = 0;
+            m_slots[i].syncSettleMS = 0;
             m_slots[i].status.status = MEDIAOUTPUTSTATUS_IDLE;
         }
+    }
+#endif
+}
+
+void StreamSlotManager::SetSyncToMaster(int slot, bool sync) {
+    if (slot < 1 || slot > MAX_SLOTS)
+        return;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_slots[slot - 1].syncToMaster = sync;
+    if (sync) {
+        LogInfo(VB_MEDIAOUT, "StreamSlotManager: slot %d will follow the primary media clock\n", slot);
+    }
+}
+
+void StreamSlotManager::SyncSlotsToMaster(float masterPos) {
+#ifdef HAS_GSTREAMER
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    long long now = GetTimeMS();
+    // Slot 1 IS the master (it is the playlist's own media), so start at 2.
+    for (int i = 1; i < MAX_SLOTS; i++) {
+        if (!m_slots[i].activeOutput || !m_slots[i].syncToMaster)
+            continue;
+
+        // Process() first: nothing else drives a non-background slot's status,
+        // so without this its mediaSeconds stays 0 and AdjustSpeed bails out
+        // ("can't adjust speed if not playing yet") having never seen the slot
+        // actually move.
+        m_slots[i].activeOutput->Process();
+
+        if ((now - m_slots[i].lastSyncMS) < SYNC_INTERVAL_MS)
+            continue;
+        m_slots[i].lastSyncMS = now;
+        if (now < m_slots[i].syncSettleMS)
+            continue;
+
+        // Slots started together on this box share the pipeline clock and stay
+        // sample-locked by themselves -- measured 0.000s offset across a whole
+        // track with no correction at all.  So this is a repair path, not a
+        // control loop: it only fires when something has genuinely knocked a
+        // slot off the show timeline (the primary was seeked or restarted, or
+        // MultiSync is rate-adjusting the primary on a remote).
+        //
+        // Correcting by rate is not an option.  These pipelines refuse
+        // GST_SEEK_FLAG_INSTANT_RATE_CHANGE, so ApplyRate() falls back to a
+        // flush seek, which moves the position enough to feed the next
+        // correction -- measured 0.9-2.5s oscillating, never converging, on
+        // streams that were exactly locked before the "sync" was applied.
+        float drift = m_slots[i].status.mediaSeconds - masterPos;
+        if (drift > -MAX_DRIFT_SEC && drift < MAX_DRIFT_SEC)
+            continue;
+        LogInfo(VB_MEDIAOUT, "StreamSlotManager: slot %d drifted %0.3fs from the primary, seeking to %0.3f\n",
+                i + 1, drift, masterPos);
+        m_slots[i].activeOutput->SeekTo(masterPos);
     }
 #endif
 }
@@ -169,18 +250,17 @@ void StreamSlotManager::StopBackgroundSlots() {
 void StreamSlotManager::ProcessBackgroundSlots() {
 #ifdef HAS_GSTREAMER
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    for (int i = 1; i < MAX_SLOTS; i++) {  // skip slot 1 (managed by playlist)
-        if (m_slots[i].activeOutput && m_slots[i].isBackground) {
+    // Slot 1 is pumped by the playlist; slots 2-5 have no other pump, so
+    // without this their status never advances and the UI and status API
+    // report a frozen position for the whole track.
+    //
+    // Teardown is deliberately not done here.  Media started by the "Play
+    // Media" command is owned by runningCommandMedia and freed off the
+    // GStreamer bus when Stopped() fires, so deleting it here would be a
+    // double free.  Close()/ClearSlot() on that path is what clears the slot.
+    for (int i = 1; i < MAX_SLOTS; i++) {
+        if (m_slots[i].activeOutput) {
             m_slots[i].activeOutput->Process();
-            if (!m_slots[i].activeOutput->IsPlaying()) {
-                LogInfo(VB_MEDIAOUT, "StreamSlotManager: background slot %d finished\n", i + 1);
-                m_slots[i].activeOutput->Close();
-                delete m_slots[i].activeOutput;
-                m_slots[i].activeOutput = nullptr;
-                m_slots[i].mediaFilename.clear();
-                m_slots[i].isBackground = false;
-                m_slots[i].status.status = MEDIAOUTPUTSTATUS_IDLE;
-            }
         }
     }
 #endif

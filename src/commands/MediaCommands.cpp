@@ -323,6 +323,10 @@ PlayMediaCommand::PlayMediaCommand() :
     // non-primary slot drive its own display, which is what makes independent
     // video-per-output possible.
     args.push_back(CommandArg("videoOut", "string", "Video Output", true).setContentListUrl("api/options/PlaylistVideoOutput"));
+    // Opt-in: follow the playlist's primary media clock instead of free-running.
+    // Wanted when this stream belongs to the show (a second language feed on
+    // another audio output); not wanted for unrelated media on a second display.
+    args.push_back(CommandArg("sync", "bool", "Sync To Show", true).setDefaultValue("false"));
 }
 std::unique_ptr<Command::Result> PlayMediaCommand::run(const std::vector<std::string>& args) {
     int loop = args.size() > 1 ? std::atoi(args[1].c_str()) : 1;
@@ -341,6 +345,10 @@ std::unique_ptr<Command::Result> PlayMediaCommand::run(const std::vector<std::st
     std::string videoOut;
     if (args.size() > 4) {
         videoOut = args[4];
+    }
+    bool syncToShow = false;
+    if (args.size() > 5) {
+        syncToShow = (args[5] == "true" || args[5] == "1");
     }
 
     MediaOutputBase* out = nullptr;
@@ -378,6 +386,13 @@ std::unique_ptr<Command::Result> PlayMediaCommand::run(const std::vector<std::st
         runningMediaLock.unlock();
         delete out;
         return std::make_unique<Command::ErrorResult>("Could not start media " + args[0]);
+    }
+
+    // Set after a successful Start(): the slot registers its active output
+    // during Start(), so flagging earlier would target a slot that isn't
+    // populated yet.
+    if (syncToShow) {
+        StreamSlotManager::Instance().SetSyncToMaster(slot, true);
     }
 
     std::map<std::string, std::string> keywords;

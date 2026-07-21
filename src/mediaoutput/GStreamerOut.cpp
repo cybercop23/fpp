@@ -2806,6 +2806,17 @@ void GStreamerOutput::pushDiff(int diff, float rate) {
     m_diffs[m_diffIdx].second = rate;
 }
 
+bool GStreamerOutput::SeekTo(float seconds) {
+    if (!m_pipeline)
+        return false;
+    gint64 pos_ns = (gint64)(seconds * GST_SECOND);
+    return gst_element_seek(m_pipeline, 1.0, GST_FORMAT_TIME,
+                            (GstSeekFlags)(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE),
+                            GST_SEEK_TYPE_SET, pos_ns, GST_SEEK_TYPE_NONE, 0)
+               ? true
+               : false;
+}
+
 void GStreamerOutput::ApplyRate(float rate) {
     if (!m_pipeline)
         return;
