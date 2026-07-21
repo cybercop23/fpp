@@ -249,6 +249,14 @@ private:
     int m_streamSlot = 1;  // stream slot number (1-5), determines PipeWire node name
 
     static GStreamerOutput* m_currentInstance;
+
+    // Every output currently driving a PixelOverlay model.  The overlay push
+    // is per-output, unlike the WLED audio tap, so it cannot hang off
+    // m_currentInstance -- slot 1 always claims that, which left a companion
+    // stream's model receiving nothing.
+    static std::mutex m_overlayOutputsLock;
+    static std::vector<GStreamerOutput*> m_overlayOutputs;
+    bool PushVideoOverlayFrame();
 };
 
 #endif

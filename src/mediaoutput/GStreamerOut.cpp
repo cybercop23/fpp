@@ -53,6 +53,8 @@
 
 // Static instance pointer for callbacks
 GStreamerOutput* GStreamerOutput::m_currentInstance = nullptr;
+std::mutex GStreamerOutput::m_overlayOutputsLock;
+std::vector<GStreamerOutput*> GStreamerOutput::m_overlayOutputs;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Wedged-decoder recovery (issue #2695).
@@ -857,6 +859,12 @@ int GStreamerOutput::Start(int msTime) {
             m_videoOverlayModel->getSize(m_videoOverlayWidth, m_videoOverlayHeight);
             LogDebug(VB_MEDIAOUT, "GStreamer video overlay: model=%s size=%dx%d\n",
                     m_videoOut.c_str(), m_videoOverlayWidth, m_videoOverlayHeight);
+            {
+                std::lock_guard<std::mutex> lock(m_overlayOutputsLock);
+                if (std::find(m_overlayOutputs.begin(), m_overlayOutputs.end(), this) == m_overlayOutputs.end()) {
+                    m_overlayOutputs.push_back(this);
+                }
+            }
         } else {
             LogWarn(VB_MEDIAOUT, "GStreamer: PixelOverlay model '%s' not found, skipping video\n",
                     m_videoOut.c_str());
@@ -2577,6 +2585,14 @@ int GStreamerOutput::Close(void) {
     if (!m_videoOut.empty() && m_videoOut != "--Disabled--") {
         PixelOverlayManager::INSTANCE.removeModelListener(m_videoOut, "GStreamerOut");
     }
+    // Deregister before taking m_videoOverlayModelLock: ProcessVideoOverlay()
+    // walks the registry and then takes that lock, so acquiring them in the
+    // other order here would be a lock inversion.
+    {
+        std::lock_guard<std::mutex> lock(m_overlayOutputsLock);
+        m_overlayOutputs.erase(std::remove(m_overlayOutputs.begin(), m_overlayOutputs.end(), this),
+                               m_overlayOutputs.end());
+    }
     {
         std::lock_guard<std::mutex> lock(m_videoOverlayModelLock);
         m_videoOverlayModel = nullptr;
@@ -2859,16 +2875,33 @@ void GStreamerOutput::SetVolumeAdjustment(int volAdj) {
 }
 
 // Static video overlay methods — called from Sequence.cpp and channeloutputthread.cpp
+// These walk every output driving a PixelOverlay model rather than the single
+// m_currentInstance they used to.  m_currentInstance is claimed by slot 1
+// whenever slot 1 is playing, so a companion stream pointed at a model would
+// register the model, receive frames, and then have them go nowhere -- the
+// model simply never updated.  m_currentInstance still selects the WLED audio
+// tap, which genuinely is a single-source thing.
 bool GStreamerOutput::IsOverlayingVideo() {
-    return m_currentInstance && m_currentInstance->m_hasVideoStream &&
-           m_currentInstance->m_playing && m_currentInstance->m_videoOverlayModel;
+    std::lock_guard<std::mutex> lock(m_overlayOutputsLock);
+    for (GStreamerOutput* o : m_overlayOutputs) {
+        if (o->m_hasVideoStream && o->m_playing && o->m_videoOverlayModel)
+            return true;
+    }
+    return false;
 }
 
 bool GStreamerOutput::ProcessVideoOverlay(unsigned int msTimestamp) {
-    if (!m_currentInstance || !m_currentInstance->m_playing || !m_currentInstance->m_hasVideoStream)
-        return false;
+    std::lock_guard<std::mutex> lock(m_overlayOutputsLock);
+    for (GStreamerOutput* o : m_overlayOutputs) {
+        o->PushVideoOverlayFrame();
+    }
+    return false;
+}
 
-    GStreamerOutput* self = m_currentInstance;
+bool GStreamerOutput::PushVideoOverlayFrame() {
+    GStreamerOutput* self = this;
+    if (!self->m_playing || !self->m_hasVideoStream)
+        return false;
 
     // Copy the latest video frame data under lock
     std::vector<uint8_t> frameData;
