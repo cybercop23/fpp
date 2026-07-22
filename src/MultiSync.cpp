@@ -2062,26 +2062,44 @@ void MultiSync::SendControlPacketViaMsgs(std::vector<struct mmsghdr>& msgs, stru
     iovec.iov_base = outBuf;
     iovec.iov_len = len;
 
-    int oc = sendmmsg(m_controlSock, &msgs[0], msgCount, MSG_DONTWAIT);
-    int outputCount = oc;
+    // sendmmsg stops at the first message it cannot send and reports how many
+    // it did send, so each pass simply resumes at the destination that stopped
+    // it.
+    //
+    // This runs on the channel output thread ahead of the frame's channel data,
+    // so the whole call is bounded well inside a frame.  The bound matters more
+    // than it looks: a remote that has dropped off the LAN leaves its neighbour
+    // entry unresolved, and the kernel then answers sends to it with EAGAIN
+    // (not EHOSTUNREACH) for as long as it is gone - measured here at ~97% of
+    // sends.  Retrying that for long turns one dead remote into a per-frame
+    // stall for every controller, which is exactly what the budget prevents.
+    // A skipped sync packet is cheap by comparison: the next frame sends another.
+    constexpr long long SEND_BUDGET_MS = 2;
+    int outputCount = 0;
+    int undelivered = 0;
     long long startTime = GetTimeMS();
-    while (oc >= 0 && outputCount != msgCount) {
-        int oc = sendmmsg(m_controlSock, &msgs[outputCount], msgCount - outputCount, MSG_DONTWAIT);
-        if (oc > 0) {
-            outputCount += oc;
-        } else {
-            long long tm = GetTimeMS();
-            long long totalTime = tm - startTime;
-            if (totalTime < 10) {
-                // we'll keep trying for up to 15ms, but give the network stack some time to flush some buffers
-                std::this_thread::sleep_for(std::chrono::microseconds(250));
-            } else {
-                oc = -1;
-            }
+    while (outputCount < msgCount) {
+        int sent = sendmmsg(m_controlSock, &msgs[outputCount], msgCount - outputCount, MSG_DONTWAIT);
+        if (sent > 0) {
+            outputCount += sent;
+            continue;
         }
+        bool transient = (sent == 0) || errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS;
+        if (transient && (GetTimeMS() - startTime) < SEND_BUDGET_MS) {
+            // Genuine buffer pressure clears in well under the budget.
+            std::this_thread::sleep_for(std::chrono::microseconds(250));
+            continue;
+        }
+        // Either a hard error for this destination, or it is still refusing the
+        // packet after the budget.  Step past it rather than retrying or
+        // bailing out entirely, so the remaining healthy remotes still get this
+        // frame's packet - one unreachable remote must not desync the rest.
+        ++outputCount;
+        ++undelivered;
     }
-    if (outputCount != msgCount) {
-        LogErr(VB_SYNC, "Error: Unable to send multisync packet: %s   (%d/%d)\n", FPPstrerror(errno), outputCount, msgCount);
+    if (undelivered) {
+        LogErr(VB_SYNC, "Error: Unable to send multisync packet: %s   (%d/%d sent, %d undelivered)\n",
+               FPPstrerror(errno), msgCount - undelivered, msgCount, undelivered);
     }
 }
 
