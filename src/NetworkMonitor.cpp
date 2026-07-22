@@ -105,17 +105,25 @@ void NetworkMonitor::Init(std::map<int, std::function<bool(int)>>& callbacks) {
 #endif
 }
 void NetworkMonitor::callCallbacks(NetEventType nl, int up, const std::string& n) {
+    // Held for the whole dispatch: this both keeps the map stable while we walk
+    // it and makes removeCallback() block until an in-flight callback returns,
+    // so a caller that removes its callback (e.g. UDPOutput::Close) can then
+    // safely tear down the state the callback captures.  Callbacks here never
+    // re-enter register/removeCallback, so the single lock cannot self-deadlock.
+    std::lock_guard<std::mutex> lk(callbackLock);
     for (auto& cb : callbacks) {
         cb.second(nl, up, n);
     }
 }
 
 int NetworkMonitor::registerCallback(std::function<void(NetEventType, int, const std::string&)>& callback) {
+    std::lock_guard<std::mutex> lk(callbackLock);
     int id = curId++;
     callbacks[id] = callback;
     return id;
 }
 
 void NetworkMonitor::removeCallback(int id) {
+    std::lock_guard<std::mutex> lk(callbackLock);
     callbacks.erase(id);
 }

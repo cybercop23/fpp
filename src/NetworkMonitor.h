@@ -14,6 +14,7 @@
 #include <functional>
 #include <list>
 #include <map>
+#include <mutex>
 #include <string>
 
 class NetworkMonitor {
@@ -39,6 +40,13 @@ public:
 
 private:
     void callCallbacks(NetEventType, int, const std::string& n);
+    // Guards `callbacks` against concurrent access: register/remove run on the
+    // main thread (channel-output Init/Close, MultiSync setup) while dispatch
+    // runs on the netlink/epoll thread.  Held across dispatch so removeCallback
+    // cannot return (letting the caller destroy the captured object) while a
+    // callback is still executing - an unsynchronized std::map here let a
+    // netlink event during teardown corrupt the tree and crash at a later free.
+    std::mutex callbackLock;
     std::map<int, std::function<void(NetEventType, int, const std::string&)>> callbacks;
     int curId;
 };
