@@ -246,7 +246,10 @@
         // avoid CSP restrictions on external image hosts (raw.githubusercontent.com
         // is only allow-listed in connect-src, not img-src).
         function GetIconUrl(data, installed) {
-            if (installed) return 'api/plugin/' + data.repoName + '/icon?_=' + iconCacheNonce;
+            if (installed) {
+                if (data.hasOwnProperty('hasIcon') && !data.hasIcon) return null;
+                return 'api/plugin/' + data.repoName + '/icon?_=' + iconCacheNonce;
+            }
             if (data.iconURL) return 'api/plugin/fetchImage?url=' + encodeURIComponent(data.iconURL);
             return null;
         }
@@ -1663,7 +1666,7 @@
             $('#pluginTopTabs .nav-link[data-top-tab="' + name + '"]').addClass('active');
             $('#pane-available').toggleClass('d-none', name !== 'available');
             $('#pane-manage').toggleClass('d-none', name === 'available');
-            $('#manageHeading').text(name === 'updates' ? 'Updates Available' : 'Installed Plugins');
+            $('#manageHeading').html(name === 'updates' ? '<i class="fas fa-arrow-alt-circle-up text-secondary"></i> Updates Available' : '<i class="fas fa-check-circle text-secondary"></i> Installed Plugins');
             if (name === 'updates' && !updatesCheckedOnce && installedPlugins.length > 0) {
                 updatesCheckedOnce = true;
                 CheckAllPluginsForUpdates();
@@ -1697,11 +1700,10 @@
             var counts = {}, total = 0, availVisible = 0;
             $('#pluginGrid').children('.pluginCard').each(function () {
                 var slug = $(this).attr('data-category-slug') || 'other';
-                counts[slug] = (counts[slug] || 0) + 1; total++;
                 if (urlLoadedMode) {
                     var show = this === loadedCardEl;
                     $(this).toggleClass('d-none', !show);
-                    if (show) availVisible++;
+                    if (show) { counts[slug] = (counts[slug] || 0) + 1; total++; availVisible++; }
                 } else {
                     var searchText = $('.pluginTitle', this).text().toLowerCase();
                     var authorTxt = $('.pluginAuthor', this).text().toLowerCase();
@@ -1713,6 +1715,7 @@
                     var show = matchesSearch && matchesCat;
                     $(this).toggleClass('d-none', !show);
                     if (show) availVisible++;
+                    if (matchesSearch) { counts[slug] = (counts[slug] || 0) + 1; total++; }
                 }
             });
 
@@ -1751,14 +1754,26 @@
                 $('#noUrlSchemeResults').removeClass('d-none');
             } else if (hasUrlError) {
                 $('#noAvailableResults').addClass('d-none');
-                $('#noUrlResults').removeClass('d-none');
-                $('#noUrlSchemeResults').addClass('d-none');
-            } else {
-                $('#noAvailableResults').toggleClass('d-none', !(searching && activeTopTab === 'available' && availVisible === 0));
                 $('#noUrlResults').addClass('d-none');
                 $('#noUrlSchemeResults').addClass('d-none');
+            } else {
+                var showAvailEmpty = searching && activeTopTab === 'available' && availVisible === 0;
+                $('#noAvailableResults').toggleClass('d-none', !showAvailEmpty);
+                $('#noUrlResults').addClass('d-none');
+                $('#noUrlSchemeResults').addClass('d-none');
+                if (showAvailEmpty && installedVisible > 0) {
+                    $('#noAvailCrossRef').text('Found ' + installedVisible + ' plugin' + (installedVisible === 1 ? '' : 's') + ' that match on the Installed list. ');
+                } else {
+                    $('#noAvailCrossRef').text('');
+                }
             }
-            $('#noInstalledResults').toggleClass('d-none', !(searching && activeTopTab === 'installed' && installedVisible === 0 && installedTotal > 0));
+            var showInstalledEmpty = searching && activeTopTab === 'installed' && installedVisible === 0 && installedTotal > 0;
+            $('#noInstalledResults').toggleClass('d-none', !showInstalledEmpty);
+            if (showInstalledEmpty && availVisible > 0) {
+                $('#noInstalledCrossRef').text('Found ' + availVisible + ' plugin' + (availVisible === 1 ? '' : 's') + ' that match on the Available list.');
+            } else {
+                $('#noInstalledCrossRef').text('');
+            }
             $('.fppNoResultsTerm').text(raw);
             $('.fppUrlErrorTerm').text(raw);
             $('.fppUrlSchemeErrorTerm').text(raw);
@@ -1777,8 +1792,8 @@
                 UpdatePopularStripVisibility();
             }
 
-            $('#topCountAvailable').text(total);
-            $('#topCountInstalled').text($('#installedGrid').children('.pluginCard').length);
+            $('#topCountAvailable').text(availVisible);
+            $('#topCountInstalled').text(installedVisible);
             $('#topCountUpdates').text(updateVisible);
         }
         $(document).ready(function () {
@@ -1900,7 +1915,8 @@
 
                         <div id="pane-available" class="pluginTopPane">
                             <div class="fppPluginAvailableHead">
-                                <ul class="nav nav-pills mb-3 pageContent-tabs flex-nowrap flex-md-wrap overflow-x-auto pb-1" id="pluginCategoryPills" role="tablist"></ul>
+                                <h2 class="h5 mb-2"><i class="fas fa-tags text-secondary"></i> Categories</h2>
+                                <ul class="nav nav-pills mb-3 pageContent-tabs flex-nowrap flex-md-wrap overflow-x-auto gap-1 pb-1" id="pluginCategoryPills" role="tablist"></ul>
                             </div>
 
                             <!-- Lives inside pane-available, below the pills that drive it: the strip
@@ -1928,10 +1944,11 @@
                             </div>
 
                             <div id='pluginTable'>
+                                <h2 class="h5 mb-2"><i class="fas fa-box text-secondary"></i> Available Plugins</h2>
                                 <div id='pluginGrid' class="row row-cols-1 row-cols-md-2 row-cols-xxl-3 g-3"></div>
                                 <div id="noAvailableResults" class="alert alert-info d-none mt-2">
                                     <i class="fas fa-search"></i> No plugins match
-                                    "<b class="fppNoResultsTerm"></b>". Clear the search box to see all plugins.
+                                    "<b class="fppNoResultsTerm"></b>". <span id="noAvailCrossRef"></span>Clear the search box to see all plugins.
                                 </div>
                                 <div id="noUrlResults" class="alert alert-info d-none mt-2">
                                     <i class="fas fa-exclamation-triangle"></i> No valid plugins found on JSON URL:
@@ -1947,7 +1964,7 @@
 
                         <div id="pane-manage" class="pluginTopPane d-none">
                             <div class='pluginsHeader'>
-                                <h2 id="manageHeading">Installed Plugins</h2>
+                                <h2 id="manageHeading"><i class="fas fa-check-circle text-secondary"></i> Installed Plugins</h2>
                                 <div class="d-flex flex-wrap gap-2 align-items-center">
                                     <button id="checkAllUpdatesBtn" class="buttons btn-outline-success"
                                         onClick='CheckAllPluginsForUpdates();'
@@ -1976,7 +1993,7 @@
                             </div>
                             <div id="noInstalledResults" class="alert alert-info d-none mt-2">
                                 <i class="fas fa-search"></i> No installed plugins match
-                                "<b class="fppNoResultsTerm"></b>".
+                                "<b class="fppNoResultsTerm"></b>". <span id="noInstalledCrossRef"></span>
                             </div>
                             <div id="noUpdatesHint" class="text-secondary d-none">No updates found. Use <b>Check All for Updates</b> to refresh.</div>
                         </div>
