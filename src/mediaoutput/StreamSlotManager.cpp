@@ -14,6 +14,7 @@
 
 #include "fpp-json.h"
 #include "log.h"
+#include "common_mini.h"
 
 #include "StreamSlotManager.h"
 #include "GStreamerOut.h"
