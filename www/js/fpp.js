@@ -3779,9 +3779,41 @@ var UNIVERSE_ROW_FIELDS = [
 	'txtSize',
 	'txtPriority',
 	'txtSyncUniverse',
+	'pacingRate',
 	'txtMonitor',
 	'txtDeDuplicate'
 ];
+
+// Per-controller pacing override options for the advanced universe table.
+// -1 = "Default" (use the global Pacing setting); 0 = Disabled (line rate);
+// any positive value is a Mbps cap.  Kept aligned with the global #E131PacingRate
+// options, plus a 30Mbps step for ESP32-class controllers.
+var PACING_RATE_OPTIONS = [
+	{ value: -1, label: 'Default' },
+	{ value: 0, label: 'Disabled' },
+	{ value: 30, label: '30 Mbps' },
+	{ value: 45, label: '45 Mbps' },
+	{ value: 90, label: '90 Mbps' },
+	{ value: 200, label: '200 Mbps' },
+	{ value: 450, label: '450 Mbps' },
+	{ value: 900, label: '900 Mbps' }
+];
+
+function PacingRateOptionsHTML (selectedVal) {
+	var html = '';
+	for (var i = 0; i < PACING_RATE_OPTIONS.length; i++) {
+		var o = PACING_RATE_OPTIONS[i];
+		html +=
+			"<option value='" +
+			o.value +
+			"'" +
+			(o.value == selectedVal ? ' selected' : '') +
+			'>' +
+			o.label +
+			'</option>';
+	}
+	return html;
+}
 
 function SetUniverseCount (input) {
 	var txtCount = document.getElementById('txtUniverseCount');
@@ -3978,6 +4010,11 @@ function IPOutputTypeChanged (item, input) {
 	} else {
 		syncUniv.prop('hidden', false);
 	}
+
+	// Pacing only applies to unicast destinations; multicast/broadcast share a
+	// socket carrying the aggregate of all their controllers and aren't paced.
+	var pacing = $(item).parent().parent().find('select.pacingRate');
+	pacing.prop('disabled', type == 0 || type == 2);
 }
 
 function updateUniverseEndChannel (row) {
@@ -4064,6 +4101,8 @@ function populateUniverseData (data, reload, input) {
 		if (universe.deDuplicate != null) {
 			deDuplicate = universe.deDuplicate;
 		}
+		// per-controller pacing override; absent means "Default" (global rate)
+		var pacingRateVal = universe.pacingRate != null ? universe.pacingRate : -1;
 
 		var universeSize = 512;
 		var universeCountDisable = '';
@@ -4217,6 +4256,20 @@ function populateUniverseData (data, reload, input) {
 			bodyHTML += ' disabled';
 		}
 		bodyHTML += '/></td>';
+		// Per-controller pacing override (advanced, output-only). Disabled for
+		// multicast/broadcast types since only unicast destinations are paced.
+		var pacingStyle =
+			input || settings['uiLevel'] < 1
+				? "style='display: none;'"
+				: inputStyle;
+		bodyHTML +=
+			'<td ' +
+			pacingStyle +
+			"><select class='form-select pacingRate'" +
+			ipDisabled +
+			'>' +
+			PacingRateOptionsHTML(pacingRateVal) +
+			'</select></td>';
 		bodyHTML +=
 			'<td ' +
 			inputStyle +
@@ -4446,15 +4499,17 @@ function CalculatePacingMaxFPS () {
 	if (el.length == 0 || $('#E131PacingRate').length == 0) {
 		return;
 	}
-	var pacing = parseInt($('#E131PacingRate').val());
-	if (!(pacing > 0) || UniverseCount == 0) {
+	var globalPacing = parseInt($('#E131PacingRate').val());
+	if (UniverseCount == 0) {
 		el.html('');
 		return;
 	}
-	// Pacing is applied per unicast destination, so the slowest controller is
-	// the one with the most wire bytes per frame.  42 = IP+UDP+ethernet
-	// framing per packet; the rest is each protocol's own header.
-	var perDest = {};
+	// Pacing is applied per unicast destination.  Sum the wire bytes per frame
+	// for each controller and track its effective rate (per-controller override,
+	// else the global rate), then report the destination with the lowest fps.
+	// 42 = IP+UDP+ethernet framing per packet; the rest is each protocol header.
+	var perDest = {}; // addr -> bytes/frame
+	var perDestRate = {}; // addr -> effective Mbps (0 = unpaced)
 	for (var i = 0; i < UniverseCount; i++) {
 		var activeEl = document.getElementById('chkActive[' + i + ']');
 		var typeEl = document.getElementById('universeType[' + i + ']');
@@ -4492,24 +4547,43 @@ function CalculatePacingMaxFPS () {
 			continue;
 		}
 		perDest[addr] = (perDest[addr] || 0) + bytes;
+		var rateEl = document.getElementById('pacingRate[' + i + ']');
+		var rowRate = rateEl ? parseInt(rateEl.value) : -1;
+		var effRate = rowRate >= 0 ? rowRate : globalPacing;
+		// most conservative rate wins for a shared destination; 0 = unpaced,
+		// treated as unlimited so any positive rate on the same IP takes over
+		if (!(addr in perDestRate)) {
+			perDestRate[addr] = effRate;
+		} else {
+			var curInf = perDestRate[addr] == 0 ? Infinity : perDestRate[addr];
+			var newInf = effRate == 0 ? Infinity : effRate;
+			perDestRate[addr] = newInf < curInf ? effRate : perDestRate[addr];
+		}
 	}
 	var worstAddr = '';
-	var worstBytes = 0;
+	var worstFps = Infinity;
 	for (var a in perDest) {
-		if (perDest[a] > worstBytes) {
-			worstBytes = perDest[a];
+		var rate = perDestRate[a];
+		if (!(rate > 0)) {
+			// disabled/unpaced destination isn't limited by pacing
+			continue;
+		}
+		var fps = Math.floor((rate * 1000000) / (perDest[a] * 8));
+		if (fps < worstFps) {
+			worstFps = fps;
 			worstAddr = a;
 		}
 	}
-	if (worstBytes == 0) {
+	if (worstAddr == '') {
 		el.html('');
 		return;
 	}
-	var fps = Math.floor((pacing * 1000000) / (worstBytes * 8));
-	if (fps > 999) {
+	if (worstFps > 999) {
 		el.html('Supports &gt;999 fps');
 	} else {
-		el.html('Supports &asymp;' + fps + ' fps max (limited by ' + worstAddr + ')');
+		el.html(
+			'Supports &asymp;' + worstFps + ' fps max (limited by ' + worstAddr + ')'
+		);
 	}
 }
 
@@ -4582,6 +4656,13 @@ function postUniverseJSON (input) {
 			).checked
 				? 1
 				: 0;
+			// only persist a pacing override when it differs from Default (-1),
+			// so unchanged configs stay clean and fall back to the global rate
+			var pacingEl = document.getElementById('pacingRate[' + i + ']');
+			var pacingVal = pacingEl ? parseInt(pacingEl.value) : -1;
+			if (pacingVal >= 0) {
+				universe.pacingRate = pacingVal;
+			}
 		}
 		output.universes.push(universe);
 	}

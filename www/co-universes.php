@@ -172,6 +172,7 @@ if (file_exists(__DIR__ . "/fppdefines.php")) {
 								<select class='form-select' id="E131PacingRate" onchange="PacingRateChanged();"
 									title="Maximum rate data is sent to each unicast controller. Pacing to what the controller's port can absorb prevents switch buffer overruns and silently dropped packets. Most pixel controllers have 100Mbps ports, so 90Mbps is recommended. Multicast/broadcast are not paced; Disabled sends at full line rate.">
 									<option value="0">Disabled</option>
+									<option value="30">30 Mbps</option>
 									<option value="45">45 Mbps</option>
 									<option value="90" selected>90 Mbps</option>
 									<option value="200">200 Mbps</option>
@@ -229,6 +230,11 @@ if (file_exists(__DIR__ . "/fppdefines.php")) {
 											data-bs-html='true' data-bs-placement='auto'
 											data-bs-title='Optional E1.31 sync universe. When set, data packets reference this sync universe and a sync packet is sent on it at the end of each frame. Set to 0 to disable.'><i
 												class="fas fa-clock"></i></span></th>
+									<th aria-label='Per-controller pacing rate override' <? if ($uiLevel < 1) { ?>
+											style="display:none;" <? } ?>>Pacing <span data-bs-toggle='tooltip'
+											data-bs-html='true' data-bs-placement='auto'
+											data-bs-title='Maximum rate data is sent to this unicast controller. Default uses the global Pacing setting above; override it for a mix of controllers (e.g. a slower ESP32 vs. a gigabit FPP instance). Only applies to unicast outputs on an interface with the fq qdisc.'><i
+												class="fas fa-gauge-high"></i></span></th>
 									<th aria-label='Monitor controller'>Monitor <span data-bs-toggle='tooltip'
 											data-bs-html='true' data-bs-placement='auto'
 											data-bs-title='Monitor incoming data for this controller/universe. Useful for debugging and verifying that data is being received.'><i

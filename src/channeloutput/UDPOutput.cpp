@@ -272,6 +272,10 @@ UDPOutputData::UDPOutputData(const Json::Value& config) :
     if (config.isMember("deDuplicate")) {
         deDuplicate = config["deDuplicate"].asInt() ? true : false;
     }
+    // per-destination pacing override; absent (or -1) keeps the global rate
+    if (config.isMember("pacingRate")) {
+        pacingRateMbps = config["pacingRate"].asInt();
+    }
 }
 UDPOutputData::~UDPOutputData() {
     if (lastData) {
@@ -465,6 +469,27 @@ int UDPOutput::Init(Json::Value config) {
         outInterface = "eth0";
     }
 
+    // Build the per-destination pacing overrides keyed by controller IP.  The
+    // send socket is shared per destination IP, so when multiple outputs target
+    // the same controller with different overrides we keep the most conservative
+    // (lowest) cap; an explicit "unpaced" (0 Mbps) is stored as ~0U so any real
+    // rate on the same IP wins over it.
+    for (auto o : outputs) {
+        if (o->pacingRateMbps < 0 || o->ipAddress.empty()) {
+            continue;
+        }
+        bool valid = false;
+        in_addr_t addr = UDPOutputData::toInetAddr(o->ipAddress, valid);
+        if (!valid) {
+            continue;
+        }
+        unsigned int rate = o->pacingRateMbps == 0 ? ~0U : (unsigned int)(o->pacingRateMbps * 1000000ULL / 8);
+        auto it = perDestPacingRate.find(addr);
+        if (it == perDestPacingRate.end() || rate < it->second) {
+            perDestPacingRate[addr] = rate;
+        }
+    }
+
 #ifndef PLATFORM_OSX
     // Kernel-level packet pacing.  Bursting a full frame at line rate overruns
     // switch buffers on the 1G->100M speed mismatch to most pixel controllers
@@ -475,7 +500,17 @@ int UDPOutput::Init(Json::Value config) {
     // of it); fall back to the old global setting for configs saved before
     // the UI moved, then to the 90Mbps default
     int pacingMbps = config.isMember("pacingRate") ? config["pacingRate"].asInt() : getSettingInt("UDPPacingRate", 90);
-    if (pacingMbps > 0) {
+    // per-output overrides can request pacing even when the global rate is
+    // Disabled (e.g. only a single ESP32 needs a cap); install fq and arm the
+    // machinery if either the global rate or any override wants it
+    bool anyPerDestPacing = false;
+    for (const auto& e : perDestPacingRate) {
+        if (e.second != ~0U) {
+            anyPerDestPacing = true;
+            break;
+        }
+    }
+    if (pacingMbps > 0 || anyPerDestPacing) {
         if (!anyEthernetHasFQ(outInterface)) {
             // fppinit only installs fq at boot; if the user enabled pacing
             // since then, install it now so the setting takes effect on the
@@ -492,8 +527,23 @@ int UDPOutput::Init(Json::Value config) {
         }
         if (anyEthernetHasFQ(outInterface)) {
             pacingEnabled = true;
-            pacingRate = (unsigned int)(pacingMbps * 1000000ULL / 8);
-            LogInfo(VB_CHANNELOUT, "UDP output pacing enabled at %d Mbps per destination\n", pacingMbps);
+            // 0 when the global rate is Disabled: destinations without an
+            // override then stay unpaced while overridden ones still get capped
+            pacingRate = pacingMbps > 0 ? (unsigned int)(pacingMbps * 1000000ULL / 8) : 0;
+            // slowest positive rate in play, for the drain-sleep math below
+            pacingDrainRate = pacingRate;
+            for (const auto& e : perDestPacingRate) {
+                if (e.second != ~0U && (pacingDrainRate == 0 || e.second < pacingDrainRate)) {
+                    pacingDrainRate = e.second;
+                }
+            }
+            if (pacingMbps > 0) {
+                LogInfo(VB_CHANNELOUT, "UDP output pacing enabled at %d Mbps per destination (%d per-destination override(s))\n",
+                        pacingMbps, (int)perDestPacingRate.size());
+            } else {
+                LogInfo(VB_CHANNELOUT, "UDP output pacing enabled for %d per-destination override(s), global rate disabled\n",
+                        (int)perDestPacingRate.size());
+            }
         } else {
             LogInfo(VB_CHANNELOUT, "UDP output pacing requested but %s does not have the fq qdisc, using buffer drain pacing\n",
                     outInterface.c_str());
@@ -998,8 +1048,8 @@ int UDPOutput::SendData(unsigned char* channelData) {
                         break;
                     }
                     int us = 100;
-                    if (anyPaced) {
-                        us = std::clamp((int)(((uint64_t)maxBytes * 8000000ULL) / pacingRate), 100, 2000);
+                    if (anyPaced && pacingDrainRate > 0) {
+                        us = std::clamp((int)(((uint64_t)maxBytes * 8000000ULL) / pacingDrainRate), 100, 2000);
                     }
                     us = std::min(us, totalBudget - waited);
                     std::this_thread::sleep_for(std::chrono::microseconds(us));
@@ -1285,10 +1335,19 @@ std::shared_ptr<SendSocketInfo> UDPOutput::findOrCreateSocket(unsigned int socke
                 // startup the route may not exist yet (interface waiting on
                 // DHCP) and we want to try again later or on an address change
                 info->pacedChecked = true;
-                // if per-output-line rates are ever added (e.g. slower caps
-                // for ESP32-class controllers), an IP->rate map built in
-                // Init() would replace pacingRate right here
-                bool shouldPace = interfaceHasFQ(iface);
+                // per-destination rate override (e.g. a slower cap for an
+                // ESP32-class controller, or a faster one for a gigabit FPP
+                // instance) falls back to the global pacingRate.  ~0U in the
+                // map means the controller was explicitly set to unpaced.
+                unsigned int destRate = pacingRate;
+                auto rit = perDestPacingRate.find((in_addr_t)socketKey);
+                if (rit != perDestPacingRate.end()) {
+                    destRate = rit->second;
+                }
+                // pace only if this destination actually has a rate cap (a
+                // global/override rate that isn't 0 or explicitly-unpaced) AND
+                // the route egresses an fq interface
+                bool shouldPace = destRate != 0 && destRate != ~0U && interfaceHasFQ(iface);
                 if (shouldPace != info->paced) {
                     LogInfo(VB_CHANNELOUT, "UDP output to %s via %s is %s\n",
                             HexToIP(socketKey).c_str(), iface.c_str(),
@@ -1296,7 +1355,7 @@ std::shared_ptr<SendSocketInfo> UDPOutput::findOrCreateSocket(unsigned int socke
                     info->paced = shouldPace;
                     // ~0 = unlimited; used when un-pacing after the route
                     // moved to a non-fq interface (e.g. eth -> wifi failover)
-                    unsigned int rate = shouldPace ? pacingRate : ~0U;
+                    unsigned int rate = shouldPace ? destRate : ~0U;
                     // paced sockets need the buffer to hold a full frame for
                     // the qdisc to clock out; unpaced revert to the small
                     // buffer the drain-based pacing depends on

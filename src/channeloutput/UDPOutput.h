@@ -95,6 +95,12 @@ public:
     bool valid;
     bool monitor;
 
+    // per-destination pacing override in Mbps; -1 means "use the global rate".
+    // 0 means this controller is explicitly unpaced (line rate).  A mix of a
+    // gigabit FPP instance and a 30Mbps-class ESP32 controller can each get an
+    // appropriate cap instead of one global setting for all of them.
+    int pacingRateMbps = -1;
+
     int failCount;
 
     UDPOutputData(UDPOutputData const&) = delete;
@@ -195,7 +201,21 @@ private:
     // fq/SO_MAX_PACING_RATE based pacing; when active the kernel clocks packets
     // out at pacingRate per socket and the SIOCOUTQ drain waits are skipped
     bool pacingEnabled = false;
-    unsigned int pacingRate = 0; // bytes per second
+    unsigned int pacingRate = 0; // bytes per second (global default)
+
+    // rate (bytes/sec) used only for the pre-sync drain-sleep estimate; the
+    // smallest positive rate among the global rate and all per-destination
+    // overrides, so a mixed set sleeps long enough for the slowest queue and we
+    // never divide by a zero global rate when only overrides are paced.
+    unsigned int pacingDrainRate = 0;
+
+    // per-destination-IP pacing rate in bytes/sec, built in Init() from the
+    // per-output pacingRate overrides.  A destination not present here uses the
+    // global pacingRate; a value of ~0U means the controller was explicitly set
+    // to unpaced.  The socket is shared per destination IP, so when several
+    // outputs target the same controller with differing overrides the most
+    // conservative (lowest) rate wins.
+    std::map<in_addr_t, unsigned int> perDestPacingRate;
 
     // local drop diagnostics; the check runs on a short detached thread since
     // reading qdisc stats forks tc, which is too slow for the frame path
