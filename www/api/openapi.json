@@ -6651,6 +6651,7 @@
                   "author": "Chris Pinkham (CaptainMurdoch)",
                   "srcURL": "https://github.com/cpinkham/fpp-matrixtools.git",
                   "updatesAvailable": 0,
+                  "hasIcon": true,
                   "versions": [
                     {
                       "minFPPVersion": 0,

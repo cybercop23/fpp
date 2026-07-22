@@ -751,6 +751,9 @@ function GetPluginInfo()
 		$result['Status'] = 'OK';
 		$result['updatesAvailable'] = PluginHasUpdates($plugin);
 
+		$iconFile = $settings['pluginDirectory'] . '/' . $plugin . '/icon.png';
+		$result['hasIcon'] = file_exists($iconFile) || !empty($result['iconURL']);
+
 		return json($result);
 	}
 
