@@ -379,10 +379,21 @@
                                 </div>
                                 <div>
                                     <div class="labelAction">
-                                        <button class='buttons wideButton btn-outline-light'
-                                            onClick='PreviewSchedule();'>
-                                            <i class="fas fa-fw fa-calendar-alt"></i>Preview
-                                        </button>
+                                        <div class="dropdown d-inline-block">
+                                            <button class="buttons wideButton btn-outline-light dropdown-toggle"
+                                                type="button" id="statusPreviewActions" data-bs-toggle="dropdown"
+                                                aria-haspopup="true" aria-expanded="false">
+                                                <i class="fas fa-fw fa-calendar-alt"></i>Preview
+                                            </button>
+                                            <div class="dropdown-menu" aria-labelledby="statusPreviewActions">
+                                                <button type='button' class='dropdown-item'
+                                                    onClick='PreviewSchedule();' value='Nested Table View'><i
+                                                        class="fas fa-fw fa-list"></i> Nested Table View</button>
+                                                <button type='button' class='dropdown-item'
+                                                    onClick='ScheduleCalendar();' value='Calendar View'><i
+                                                        class="fas fa-fw fa-calendar-days"></i> Calendar View</button>
+                                            </div>
+                                        </div>
                                         <button class='buttons wideButton btn-outline-light'
                                             onClick='StartNextScheduledItemNow();'>
                                             <i class="fas fa-fw fa-running"></i>Start Next
