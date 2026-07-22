@@ -1092,6 +1092,227 @@ Json::Value Scheduler::GetSchedule() {
     return result;
 }
 
+/*
+ * Expand the configured schedule across an arbitrary date range.
+ *
+ * GetSchedule() can only report the rolling window fppd actually schedules out
+ * (ScheduleDistance days, minus anything already run), which is enough for the
+ * list preview but not for a calendar the user can page through.  This walks
+ * the range a day at a time and asks each entry which occurrences land on it,
+ * so any month - past or future - can be rendered from the real schedule rules.
+ *
+ * Occurrences are advisory: they describe what the schedule says should happen,
+ * not what fppd has committed to running.
+ */
+Json::Value Scheduler::BuildScheduleRangeItem(const ScheduleEntry& entry,
+                                             const Occurrence& occurrence,
+                                             const std::string& timeFmt) {
+    struct tm timeStruct;
+    char timeStr[32];
+    Json::Value item;
+
+    item["id"] = occurrence.entryIndex;
+    item["priority"] = occurrence.entryIndex; // priority is entry index for now
+    item["enabled"] = entry.enabled;
+    item["overridden"] = occurrence.overridden;
+    item["type"] = entry.playlist.empty() ? "command" : (entry.sequence ? "sequence" : "playlist");
+
+    item["startTime"] = (Json::UInt64)occurrence.start;
+    item["endTime"] = (Json::UInt64)occurrence.end;
+
+    localtime_r(&occurrence.start, &timeStruct);
+    strftime(timeStr, 32, timeFmt.c_str(), &timeStruct);
+    item["startTimeStr"] = timeStr;
+    strftime(timeStr, 32, "%Y%m%d", &timeStruct);
+    item["startDateStr"] = timeStr;
+    item["startDateInt"] = atoi(timeStr);
+
+    localtime_r(&occurrence.end, &timeStruct);
+    strftime(timeStr, 32, timeFmt.c_str(), &timeStruct);
+    item["endTimeStr"] = timeStr;
+    strftime(timeStr, 32, "%Y%m%d", &timeStruct);
+    item["endDateStr"] = timeStr;
+    item["endDateInt"] = atoi(timeStr);
+
+    if (entry.playlist.empty()) {
+        item["command"] = entry.command;
+        item["args"] = entry.args;
+    } else {
+        Json::Value args(Json::arrayValue);
+        args.append(entry.playlist);
+        args.append(entry.repeat ? "true" : "false");
+        args.append("false");
+
+        item["command"] = "Start Playlist";
+        item["args"] = args;
+        item["playlist"] = entry.playlist;
+    }
+
+    item["multisyncCommand"] = entry.multisyncCommand;
+    item["multisyncHosts"] = entry.multisyncHosts;
+    item["stopTypeStr"] = entry.stopType == 0 ? "Graceful" : (entry.stopType == 1 ? "Hard" : "Graceful Loop");
+    item["repeat"] = entry.repeat;
+    item["repeatInterval"] = entry.repeatInterval;
+
+    return item;
+}
+
+Json::Value Scheduler::GetScheduleRange(time_t rangeStart, time_t rangeEnd,
+                                        bool includeDisabled, bool daySummary) {
+    std::string timeFmt = getSetting("DateFormat") + " @ " + getSetting("TimeFormat");
+    Json::Value result;
+    Json::Value entries(Json::arrayValue);
+    Json::Value items(Json::arrayValue);
+    std::vector<Occurrence> expanded;
+
+    // Work from a copy of the schedule so the expansion below never holds the
+    // scheduler lock.  ScheduleProc() takes the same lock to start and stop
+    // playlists, and expanding a large range takes long enough that holding it
+    // throughout would delay a show.  Copying a handful of entries is cheap.
+    std::vector<ScheduleEntry> schedule;
+    {
+        std::unique_lock<std::recursive_mutex> lock(m_scheduleLock);
+
+        result["enabled"] = m_schedulerDisabled ? 0 : 1;
+        schedule = m_Schedule;
+    }
+
+    for (int i = 0; i < schedule.size(); i++) {
+        Json::Value entry = schedule[i].GetJson();
+        entry["id"] = i;
+        entry["type"] = schedule[i].playlist.empty() ? "command" : "playlist";
+        entry["dayStr"] = GetDayTextFromDayIndex(schedule[i].dayIndex);
+        entries.append(entry);
+    }
+    result["entries"] = entries;
+
+    struct tm timeStruct;
+    char timeStr[32];
+
+    // An entry starting late in the day can run past midnight, so start a day
+    // early to catch occurrences that overlap into the requested range.  Walk
+    // the range from midday to midday: a 23 or 25 hour DST day would otherwise
+    // let a fixed 86400s step skip or repeat a calendar date.
+    localtime_r(&rangeStart, &timeStruct);
+    timeStruct.tm_hour = 12;
+    timeStruct.tm_min = 0;
+    timeStruct.tm_sec = 0;
+    timeStruct.tm_isdst = -1;
+    timeStruct.tm_mday -= 1;
+    time_t cursor = mktime(&timeStruct);
+
+    for (; cursor <= (rangeEnd + SECONDS_PER_DAY); cursor += SECONDS_PER_DAY) {
+        localtime_r(&cursor, &timeStruct);
+        int year = timeStruct.tm_year + 1900;
+        int month = timeStruct.tm_mon + 1;
+        int mday = timeStruct.tm_mday;
+
+        for (int i = 0; i < m_Schedule.size(); i++) {
+            ScheduleEntry& entry = schedule[i];
+
+            if (!entry.enabled && !includeDisabled)
+                continue;
+
+            std::vector<std::pair<time_t, time_t>> occurrences;
+            entry.GetOccurrencesOnDate(year, month, mday, occurrences);
+
+            int dayKey = (year * 10000) + (month * 100) + mday;
+
+            for (auto& occurrence : occurrences) {
+                // A command fires at a point in time - only playlists occupy the
+                // window up to their end time.  AddScheduledItems() makes the
+                // same distinction, so match it or the calendar would draw a
+                // repeating command as a block instead of a marker.
+                if (entry.playlist.empty())
+                    occurrence.second = occurrence.first;
+
+                if ((occurrence.second < rangeStart) || (occurrence.first > rangeEnd))
+                    continue;
+
+                expanded.push_back({ .entryIndex = i,
+                                     .dayKey = dayKey,
+                                     .start = occurrence.first,
+                                     .end = occurrence.second,
+                                     .overridden = false });
+            }
+        }
+    }
+
+    // Flag playlist occurrences the scheduler would skip because a
+    // higher-priority (lower index) playlist is already running at that point.
+    // Only playlists can override, and a schedule of repeating commands can run
+    // to tens of thousands of occurrences, so collect the playlist windows once
+    // rather than rescanning everything for every occurrence.
+    std::vector<Occurrence> playlistWindows;
+    for (const auto& occurrence : expanded) {
+        if (!schedule[occurrence.entryIndex].playlist.empty())
+            playlistWindows.push_back(occurrence);
+    }
+
+    for (auto& occurrence : expanded) {
+        if (schedule[occurrence.entryIndex].playlist.empty())
+            continue;
+
+        for (const auto& window : playlistWindows) {
+            if (window.entryIndex >= occurrence.entryIndex)
+                continue;
+
+            if ((window.start <= occurrence.start) && (window.end > occurrence.start)) {
+                occurrence.overridden = true;
+                break;
+            }
+        }
+    }
+
+    if (daySummary) {
+        // Coarse views cannot show hundreds of occurrences per cell and do not
+        // need to: what matters there is which entries are active on a day.
+        // Collapse to one item per entry per day and carry the occurrence count
+        // so the caller can label it; the detail views ask for the full list.
+        std::map<std::pair<int, int>, Occurrence> byDay;
+        std::map<std::pair<int, int>, int> counts;
+
+        for (const auto& occurrence : expanded) {
+            auto key = std::make_pair(occurrence.dayKey, occurrence.entryIndex);
+            counts[key]++;
+
+            auto it = byDay.find(key);
+            if (it == byDay.end()) {
+                byDay[key] = occurrence;
+            } else {
+                // Span the whole day's activity for this entry
+                it->second.start = std::min(it->second.start, occurrence.start);
+                it->second.end = std::max(it->second.end, occurrence.end);
+                it->second.overridden = it->second.overridden && occurrence.overridden;
+            }
+        }
+
+        for (const auto& [key, occurrence] : byDay) {
+            Json::Value item = BuildScheduleRangeItem(schedule[occurrence.entryIndex],
+                                                      occurrence, timeFmt);
+            item["count"] = counts[key];
+            item["summary"] = true;
+            items.append(item);
+        }
+    } else {
+        for (const auto& occurrence : expanded) {
+            Json::Value item = BuildScheduleRangeItem(schedule[occurrence.entryIndex],
+                                                      occurrence, timeFmt);
+            item["count"] = 1;
+            item["summary"] = false;
+            items.append(item);
+        }
+    }
+
+    result["items"] = items;
+    result["rangeStart"] = (Json::UInt64)rangeStart;
+    result["rangeEnd"] = (Json::UInt64)rangeEnd;
+    result["daySummary"] = daySummary;
+    result["scheduleDistance"] = getSettingInt("ScheduleDistance");
+
+    return result;
+}
+
 void Scheduler::SetTimeDelta(int delta, int timeLimit) {
     m_timeDelta = m_timeDelta + delta;
     m_timeDeltaThreshold = time(NULL) + timeLimit;

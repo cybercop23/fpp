@@ -9767,7 +9767,7 @@ function PreviewSchedule () {
 
 	var options = {
 		id: 'schedulePreview',
-		title: 'Schedule Preview',
+		title: 'Schedule Preview: Nested Table View',
 		body: "<div id='schedulePreviewDiv'> " + response + '</div>',
 		class: 'modal-xl',
 		keyboard: true,
@@ -9775,6 +9775,302 @@ function PreviewSchedule () {
 	};
 
 	DoModalDialog(options);
+}
+
+var gblScheduleCalendar = null;
+
+/**
+ * Calendar preview of the schedule - month, week, day and list views over any
+ * date range, alongside the existing flat list preview.
+ *
+ * Events come from /api/fppd/schedule/range, which expands the schedule rules
+ * across whatever range the user has paged to. That is deliberately a different
+ * endpoint from the one the list preview uses: /api/fppd/schedule can only
+ * report the rolling window fppd has actually queued up.
+ */
+function ScheduleCalendar () {
+	// FullCalendar is a chunky bundle and most visits to the scheduler never
+	// open it, so pull it in on first use. jQuery caches the fetch.
+	if (typeof FullCalendar === 'undefined') {
+		$.ajax({
+			url: 'js/fullcalendar/index.global.min.js',
+			dataType: 'script',
+			cache: true
+		})
+			.done(ScheduleCalendar)
+			.fail(function () {
+				$.jGrowl('Unable to load the calendar library.', {
+					themeState: 'danger'
+				});
+			});
+		return;
+	}
+
+	$.get('scheduleCalendar.php', function (response) {
+		DoModalDialog({
+			id: 'scheduleCalendarModal',
+			title: 'Schedule Preview: Calendar View',
+			body: response,
+			class: 'modal-xl',
+			keyboard: true,
+			backdrop: true,
+			close: function () {
+				// Drop the instance so a reopen rebuilds against the current
+				// schedule rather than redisplaying a stale render.
+				if (gblScheduleCalendar) {
+					gblScheduleCalendar.destroy();
+					gblScheduleCalendar = null;
+				}
+			}
+		});
+
+		// Build only once Bootstrap has laid the modal out; FullCalendar sizes
+		// itself on init and would measure a zero-width hidden container.
+		$('#scheduleCalendarModal')
+			.off('shown.bs.modal.fppSchCal')
+			.on('shown.bs.modal.fppSchCal', function () {
+				InitScheduleCalendar();
+			});
+	});
+}
+
+function InitScheduleCalendar () {
+	var el = document.getElementById('scheduleCalendar');
+	if (!el || gblScheduleCalendar) return;
+
+	var use12Hour =
+		!settings.hasOwnProperty('TimeFormat') || settings['TimeFormat'] != '%H:%M';
+
+	gblScheduleCalendar = new FullCalendar.Calendar(el, {
+		initialView: 'dayGridMonth',
+		headerToolbar: {
+			left: 'prev,next today',
+			center: 'title',
+			right: 'dayGridMonth,timeGridWeek,timeGridDay,listWeek'
+		},
+		buttonText: {
+			today: 'Today',
+			month: 'Month',
+			week: 'Week',
+			day: 'Day',
+			list: 'List'
+		},
+		// Sized against the viewport rather than the parent: the modal body has
+		// no resolved height when the calendar initialises, so a percentage
+		// height would collapse the grid to nothing.
+		height: '68vh',
+		nowIndicator: true,
+		eventTimeFormat: {
+			hour: 'numeric',
+			minute: '2-digit',
+			hour12: use12Hour
+		},
+		slotLabelFormat: {
+			hour: 'numeric',
+			minute: '2-digit',
+			hour12: use12Hour
+		},
+		// Playlists that run past midnight are one occurrence, not two, so keep
+		// them as a single bar rather than letting the month grid split them.
+		displayEventEnd: true,
+		// Day numbers become links through to the detail views, which is the
+		// natural way out of the summarised month grid.
+		navLinks: true,
+		// Whether a request is summarised depends on the view, not just the
+		// dates. Left to its own devices FullCalendar would reuse the month's
+		// summarised events for a week inside that month, so make every date
+		// change refetch. The requests are small and quick.
+		lazyFetching: false,
+		// A busy show can put several entries on one day. Let FullCalendar fit
+		// as many as the row height allows and collapse the rest behind a
+		// "+N more" popover - a fixed cap would overflow the grid instead.
+		dayMaxEvents: true,
+		// Likewise in the time grid: a schedule that repeats a command every few
+		// minutes would otherwise squeeze each of a week's seven columns too
+		// narrow to read. Cap how many sit side by side and link to the rest.
+		eventMaxStack: 3,
+		views: {
+			// A single day has the whole width to itself, so it can afford to
+			// show everything side by side without becoming unreadable.
+			timeGridDay: { eventMaxStack: -1 }
+		},
+		eventOrder: 'schedRank,start,title',
+		events: FetchScheduleCalendarEvents,
+		eventDidMount: function (info) {
+			$(info.el).attr({
+				'data-bs-toggle': 'tooltip',
+				'data-bs-html': 'true',
+				'data-bs-placement': 'auto',
+				'data-bs-title': ScheduleCalendarItemInfo(info.event.extendedProps)
+			});
+			new bootstrap.Tooltip(info.el);
+		}
+	});
+
+	gblScheduleCalendar.render();
+
+	$('#schCalShowDisabled, #schCalHideOverridden').on('change', function () {
+		gblScheduleCalendar.refetchEvents();
+	});
+}
+
+/**
+ * Only the detail views can meaningfully show individual occurrences. A month of
+ * a schedule that repeats a command every 20 minutes is thousands of items, none
+ * of which fit in a day cell, so wide spans ask the backend to collapse to one
+ * entry per day and just report what is active.
+ *
+ * This keys off how much time is on screen rather than the view name. The events
+ * function runs mid-transition, when the calendar still reports the view being
+ * navigated away from, so the requested span is the only reliable signal - and
+ * it is the one that actually matters.
+ */
+function ScheduleCalendarWantsSummary (startDate, endDate) {
+	var days = (endDate.getTime() - startDate.getTime()) / 86400000;
+
+	// Week and day views span at most a week; a month grid always spans four
+	// weeks or more once its leading and trailing days are included.
+	return days > 14;
+}
+
+function FetchScheduleCalendarEvents (fetchInfo, successCallback, failureCallback) {
+	// fetchInfo covers exactly the span the active view is showing, so a request
+	// never pulls back more of the schedule than is on screen.
+	var summary = ScheduleCalendarWantsSummary(fetchInfo.start, fetchInfo.end);
+
+	var params = {
+		start: Math.floor(fetchInfo.start.getTime() / 1000),
+		end: Math.floor(fetchInfo.end.getTime() / 1000)
+	};
+
+	if (summary) params.summary = 1;
+	if ($('#schCalShowDisabled').is(':checked')) params.includeDisabled = 1;
+
+	$.get('api/fppd/schedule/range', params)
+		.done(function (data) {
+			var items =
+				data && data.schedule && data.schedule.items
+					? data.schedule.items
+					: [];
+
+			// Overridden occurrences are the ones a higher priority playlist
+			// will stop from running. Hidden by default so the calendar shows
+			// what will actually play; turn the switch off to see them and
+			// find where the schedule conflicts.
+			if ($('#schCalHideOverridden').is(':checked')) {
+				items = items.filter(function (item) {
+					return !item.overridden;
+				});
+			}
+
+			successCallback(
+				items.map(function (item) {
+					return {
+						title: ScheduleCalendarItemTitle(item),
+						start: new Date(item.startTime * 1000),
+						end: new Date(item.endTime * 1000),
+						// A summarised item stands for everything that entry does
+						// that day, so show it as a plain all-day chip rather than
+						// implying it runs only for the span it happens to cover.
+						allDay: summary,
+						// What is playing matters more than the housekeeping
+						// commands around it, so when a day has more entries than
+						// fit, the commands are the ones that collapse away.
+						schedRank: ScheduleCalendarItemRank(item),
+						classNames: ScheduleCalendarItemClasses(item),
+						extendedProps: item
+					};
+				})
+			);
+		})
+		.fail(function () {
+			$.jGrowl('Unable to load the schedule for this range.', {
+				themeState: 'danger'
+			});
+			failureCallback(new Error('schedule range request failed'));
+		});
+}
+
+function ScheduleCalendarItemTitle (item) {
+	var title;
+
+	if (item.command == 'Start Playlist') {
+		title = item.playlist;
+	} else if (item.args && item.args.length) {
+		// Commands carry their arguments; show the first one for context since
+		// it is usually the thing being acted on.
+		title = item.command + ': ' + item.args[0];
+	} else {
+		title = item.command;
+	}
+
+	// In summary mode one item stands for a whole day of occurrences - say how
+	// many, otherwise a 20-minute repeat looks identical to a one-off.
+	if (item.summary && item.count > 1) title += ' ×' + item.count;
+
+	return title;
+}
+
+function ScheduleCalendarItemRank (item) {
+	if (item.type == 'playlist') return 0;
+	if (item.type == 'sequence') return 1;
+	return 2;
+}
+
+function ScheduleCalendarItemClasses (item) {
+	var classes = ['sch-cal-event'];
+
+	if (item.type == 'command') classes.push('sch-cal-event-command');
+	else if (item.type == 'sequence') classes.push('sch-cal-event-sequence');
+
+	if (item.overridden) classes.push('sch-cal-event-overridden');
+	if (!item.enabled) classes.push('sch-cal-event-disabled');
+
+	return classes;
+}
+
+function ScheduleCalendarItemInfo (item) {
+	var info = '';
+
+	if (item.summary && item.count > 1) {
+		info +=
+			'<b>' +
+			item.count +
+			' occurrences</b> this day, ' +
+			item.startTimeStr +
+			' to ' +
+			item.endTimeStr +
+			'.<br>Open the day or week view for each one.<br>';
+	} else {
+		info += '<b>Start:</b> ' + item.startTimeStr + '<br>';
+		info += '<b>End:</b> ' + item.endTimeStr + '<br>';
+	}
+
+	info += '<b>Action:</b> ' + item.command + '<br>';
+
+	if (item.args && item.args.length && item.command != 'Start Playlist')
+		info += '<b>Args:</b> ' + item.args.join(' | ') + '<br>';
+
+	if (item.command == 'Start Playlist') {
+		info += '<b>Stop:</b> ' + item.stopTypeStr + '<br>';
+		info += '<b>Repeat:</b> ' + (item.repeat ? 'Immediate' : 'None') + '<br>';
+	}
+
+	if (item.repeatInterval)
+		info += '<b>Every:</b> ' + item.repeatInterval / 60 + ' minutes<br>';
+
+	if (item.multisyncCommand)
+		info +=
+			'<b>Multisync:</b> ' + (item.multisyncHosts || 'all remotes') + '<br>';
+
+	if (item.overridden)
+		info +=
+			'<span class="text-danger">Skipped - a higher priority playlist is already running.</span><br>';
+
+	if (!item.enabled)
+		info += '<span class="text-muted">Entry is disabled.</span><br>';
+
+	return info;
 }
 
 function ToggleMenu () {

@@ -1054,9 +1054,14 @@ error_reporting(E_ALL);
                                             <i class="fas fa-ellipsis-h"></i>
                                         </button>
                                         <div class="dropdown-menu" aria-labelledby="schedulerMobileActions">
+                                            <h6 class="dropdown-header">Preview</h6>
                                             <button type='button' class='buttons' onClick='PreviewSchedule();'
-                                                value='View Schedule'><i
-                                                    class="fas fa-fw fa-calendar-alt"></i>Preview</button>
+                                                value='Nested Table View'><i class="fas fa-fw fa-list"></i>Nested Table
+                                                View</button>
+                                            <button type='button' class='buttons' onClick='ScheduleCalendar();'
+                                                value='Calendar View'><i
+                                                    class="fas fa-fw fa-calendar-days"></i>Calendar View</button>
+                                            <div class="dropdown-divider"></div>
                                             <button type='button' class='buttons' onClick='OpenHolidayEditor();'
                                                 value='Edit Holidays'><i class="fas fa-fw fa-gift"></i>Edit
                                                 Holidays</button>
@@ -1073,9 +1078,21 @@ error_reporting(E_ALL);
                                     </div>
                                 </div>
 
-                                <div class='largeonly'><button type='button' class='buttons wideButton'
-                                        onClick='PreviewSchedule();' value='View Schedule'><i
-                                            class="fas fa-fw fa-calendar-alt"></i>Preview</button></div>
+                                <div class='largeonly'>
+                                    <div class="dropdown">
+                                        <button class="buttons wideButton dropdown-toggle" type="button"
+                                            id="schedulerPreviewActions" data-bs-toggle="dropdown" aria-haspopup="true"
+                                            aria-expanded="false"><i class="fas fa-fw fa-calendar-alt"></i>Preview</button>
+                                        <div class="dropdown-menu" aria-labelledby="schedulerPreviewActions">
+                                            <button type='button' class='dropdown-item' onClick='PreviewSchedule();'
+                                                value='Nested Table View'><i class="fas fa-fw fa-list"></i> Nested Table
+                                                View</button>
+                                            <button type='button' class='dropdown-item' onClick='ScheduleCalendar();'
+                                                value='Calendar View'><i class="fas fa-fw fa-calendar-days"></i> Calendar
+                                                View</button>
+                                        </div>
+                                    </div>
+                                </div>
                                 <div class='largeonly'><button type='button' class='buttons wideButton'
                                         onClick='OpenHolidayEditor();' value='Edit Holidays'><i
                                             class="fas fa-fw fa-gift"></i>Edit Holidays</button></div>

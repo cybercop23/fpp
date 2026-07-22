@@ -52,6 +52,44 @@ static time_t GetTimeOnDOW(int day, int hour, int minute, int second) {
     return result;
 }
 
+/*
+ * Build a time_t for an absolute calendar date rather than an offset from the
+ * current week.  Used by the arbitrary-range expansion behind the calendar view.
+ */
+static time_t GetTimeOnDate(int year, int month, int mday,
+                            int hour, int minute, int second) {
+    struct tm when = {};
+
+    when.tm_year = year - 1900;
+    when.tm_mon = month - 1;
+    when.tm_mday = mday;
+    when.tm_hour = hour;
+    when.tm_min = minute;
+    when.tm_sec = second;
+    when.tm_isdst = -1; // take Daylight Saving Time into account on new date
+
+    return mktime(&when);
+}
+
+/*
+ * Day of week (0 == Sunday) for an absolute calendar date.
+ */
+static int GetDOWOnDate(int year, int month, int mday) {
+    struct tm when = {};
+
+    when.tm_year = year - 1900;
+    when.tm_mon = month - 1;
+    when.tm_mday = mday;
+    when.tm_hour = 12; // midday avoids DST edges shifting the date
+    when.tm_isdst = -1;
+
+    time_t t = mktime(&when);
+    struct tm result;
+    localtime_r(&t, &result);
+
+    return result.tm_wday;
+}
+
 ScheduleEntry::ScheduleEntry() :
     enabled(false),
     playlist(""),
@@ -231,13 +269,18 @@ void ScheduleEntry::CalculateHinduDiwali(int year, int& month, int& day) {
     day = 1;
 }
 
-std::string ScheduleEntry::DateFromLocaleHoliday(Json::Value& holiday) {
+std::string ScheduleEntry::DateFromLocaleHoliday(Json::Value& holiday, int refYear) {
     int year = 0;
     int month = 0;
     int day = 0;
     time_t currTime = time(NULL);
     struct tm now;
     localtime_r(&currTime, &now);
+
+    // When a reference year is supplied we resolve the holiday strictly within
+    // that year.  The roll-forward heuristics below only make sense for "the
+    // next occurrence from today" and would skew a date asked for explicitly.
+    bool rollForward = (refYear == 0);
 
     if (holiday.isMember("calc")) {
         // We need to calculate the month/day of the holiday since it changes yearly
@@ -247,11 +290,11 @@ std::string ScheduleEntry::DateFromLocaleHoliday(Json::Value& holiday) {
         int dow = c["dow"].asInt();
         int offset = c["offset"].asInt();
 
-        year = now.tm_year + 1900;
+        year = rollForward ? (now.tm_year + 1900) : refYear;
 
         if ((type == "head") || (type == "tail")) {
             month = c["month"].asInt();
-            if (month < (now.tm_mon + 1))
+            if (rollForward && (month < (now.tm_mon + 1)))
                 year++;
         }
 
@@ -272,7 +315,7 @@ std::string ScheduleEntry::DateFromLocaleHoliday(Json::Value& holiday) {
             // Check if Easter was more than 4 months ago.  We do this since some Easter-related
             // special days are 2 months after Easter so we want to calculate those based on the
             // current year.
-            if ((month + 3) < now.tm_mon) {
+            if (rollForward && ((month + 3) < now.tm_mon)) {
                 year++;
                 CalculateEaster(year, month, day);
             }
@@ -335,8 +378,9 @@ std::string ScheduleEntry::DateFromLocaleHoliday(Json::Value& holiday) {
             }
             
             // Check if the calculated date has passed this year
-            if ((month < (now.tm_mon + 1)) || 
-                (month == (now.tm_mon + 1) && day < now.tm_mday)) {
+            if (rollForward &&
+                ((month < (now.tm_mon + 1)) ||
+                 (month == (now.tm_mon + 1) && day < now.tm_mday))) {
                 year++;
                 // Recalculate for next year
                 if (calendar == "chinese") {
@@ -374,7 +418,7 @@ std::string ScheduleEntry::DateFromLocaleHoliday(Json::Value& holiday) {
     return result;
 }
 
-std::string ScheduleEntry::CheckHoliday(std::string date) {
+std::string ScheduleEntry::CheckHoliday(std::string date, int refYear) {
     Json::Value locale = LocaleHolder::GetLocale();
     std::string result;
 
@@ -386,7 +430,7 @@ std::string ScheduleEntry::CheckHoliday(std::string date) {
 
     for (int i = 0; i < locale["holidays"].size(); i++) {
         if (date == locale["holidays"][i]["shortName"].asString())
-            return DateFromLocaleHoliday(locale["holidays"][i]);
+            return DateFromLocaleHoliday(locale["holidays"][i], refYear);
     }
 
     return date;
@@ -502,6 +546,159 @@ void ScheduleEntry::pushStartEndTimes(int dow, int& delta, int deltaThreshold) {
         }
     } else {
         startEndTimes.push_back(std::pair<int, int>(startTime, endTime));
+    }
+}
+
+/*
+ * Resolve this entry's start/end date range as it applies to a given year.
+ *
+ * startDate/endDate are resolved once at load time, so a holiday-anchored range
+ * carries whichever date the holiday fell on for the year FPP was started in.
+ * Floating holidays (Easter, Thanksgiving, the lunar calendars) move year to
+ * year, so re-resolve them against the year actually being expanded.
+ */
+void ScheduleEntry::GetDateRangeForYear(int year, int& sDate, int& eDate) {
+    sDate = startDate;
+    eDate = endDate;
+
+    if (!startDateStr.empty() && !isdigit(startDateStr[0])) {
+        std::string resolved = CheckHoliday(startDateStr, year);
+        if (resolved.length() == 10)
+            sDate = DateStrToInt(resolved.c_str());
+    }
+
+    if (!endDateStr.empty() && !isdigit(endDateStr[0])) {
+        std::string resolved = CheckHoliday(endDateStr, year);
+        if (resolved.length() == 10)
+            eDate = DateStrToInt(resolved.c_str());
+    }
+}
+
+/*
+ * Does this entry's day selection include the given absolute date?
+ */
+bool ScheduleEntry::OccursOnDate(int year, int month, int mday) {
+    if ((dayIndex == INX_ODD_DAY) || (dayIndex == INX_EVEN_DAY)) {
+        // Odd/Even is based on the FPP 'epoch', the date of the first
+        // commit to the FPP repository on github, July 15, 2013
+        struct std::tm FPPEpoch = { 0, 0, 0, 15, 6, 113 };
+        std::time_t FPPEpochTimeT = std::mktime(&FPPEpoch);
+        std::time_t dayTime = GetTimeOnDate(year, month, mday, 12, 0, 0);
+        int daysSince = (int)std::difftime(dayTime, FPPEpochTimeT) / SECONDS_PER_DAY;
+
+        if (daysSince % 2)
+            return dayIndex == INX_ODD_DAY;
+
+        return dayIndex == INX_EVEN_DAY;
+    }
+
+    int mask = dayIndex;
+    switch (dayIndex) {
+    case INX_SUN:
+        mask = INX_DAY_MASK_SUNDAY;
+        break;
+    case INX_MON:
+        mask = INX_DAY_MASK_MONDAY;
+        break;
+    case INX_TUE:
+        mask = INX_DAY_MASK_TUESDAY;
+        break;
+    case INX_WED:
+        mask = INX_DAY_MASK_WEDNESDAY;
+        break;
+    case INX_THU:
+        mask = INX_DAY_MASK_THURSDAY;
+        break;
+    case INX_FRI:
+        mask = INX_DAY_MASK_FRIDAY;
+        break;
+    case INX_SAT:
+        mask = INX_DAY_MASK_SATURDAY;
+        break;
+    case INX_EVERYDAY:
+        mask = INX_DAY_MASK_EVERYDAY;
+        break;
+    case INX_WKDAYS:
+        mask = INX_DAY_MASK_WEEKDAYS;
+        break;
+    case INX_WKEND:
+        mask = INX_DAY_MASK_WEEKEND;
+        break;
+    case INX_M_W_F:
+        mask = INX_DAY_MASK_M_W_F;
+        break;
+    case INX_T_TH:
+        mask = INX_DAY_MASK_T_TH;
+        break;
+    case INX_SUN_TO_THURS:
+        mask = INX_DAY_MASK_SUN_TO_THURS;
+        break;
+    case INX_FRI_SAT:
+        mask = INX_DAY_MASK_FRI_SAT;
+        break;
+    }
+
+    // Day masks run Sunday (0x04000) through Saturday (0x00100)
+    int dowBit = INX_DAY_MASK_SUNDAY >> GetDOWOnDate(year, month, mday);
+
+    return (mask & dowBit) != 0;
+}
+
+/*
+ * Expand this entry into the occurrences that fall on a given absolute date.
+ *
+ * This mirrors pushStartEndTimes() but is anchored to a real date instead of an
+ * offset from the current week, and keeps occurrences that are already in the
+ * past, so the calendar view can show any range the user navigates to.  The
+ * scheduler's time delta is deliberately not applied - it is a transient
+ * adjustment to the running schedule, not part of the configured schedule.
+ *
+ * The entry's enabled flag is not consulted here so callers can choose to show
+ * disabled entries; filter on it yourself if you only want live occurrences.
+ */
+void ScheduleEntry::GetOccurrencesOnDate(int year, int month, int mday,
+                                         std::vector<std::pair<time_t, time_t>>& occurrences) {
+    if (!OccursOnDate(year, month, mday))
+        return;
+
+    time_t startTime = GetTimeOnDate(year, month, mday, startHour, startMinute, startSecond);
+    time_t endTime = GetTimeOnDate(year, month, mday, endHour, endMinute, endSecond);
+
+    if (startTimeStr.find(":") == std::string::npos) {
+        int h = startHour, m = startMinute, s = startSecond;
+        GetTimeFromSun(startTime, startTimeStr, startTimeOffset, h, m, s);
+    }
+    if (endTimeStr.find(":") == std::string::npos) {
+        int h = endHour, m = endMinute, s = endSecond;
+        GetTimeFromSun(endTime, endTimeStr, endTimeOffset, h, m, s);
+    }
+    if (endTime < startTime) {
+        endTime += SECONDS_PER_DAY;
+        if (endTimeStr.find(":") == std::string::npos) {
+            int h = endHour, m = endMinute, s = endSecond;
+            GetTimeFromSun(endTime, endTimeStr, endTimeOffset, h, m, s);
+        }
+    }
+
+    int sDate = 0;
+    int eDate = 0;
+    GetDateRangeForYear(year, sDate, eDate);
+
+    if (!DateInRange(startTime, sDate, eDate))
+        return;
+
+    if ((repeatInterval) && (startTime != endTime)) {
+        time_t newEnd = startTime + repeatInterval - 1;
+        while (startTime < endTime) {
+            occurrences.push_back(std::pair<time_t, time_t>(startTime, newEnd));
+            newEnd += repeatInterval;
+            if (newEnd > endTime) {
+                newEnd = endTime;
+            }
+            startTime += repeatInterval;
+        }
+    } else {
+        occurrences.push_back(std::pair<time_t, time_t>(startTime, endTime));
     }
 }
 

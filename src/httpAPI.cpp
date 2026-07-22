@@ -622,6 +622,24 @@ PlayerResource::~PlayerResource() {
  */
 
 /**
+ * Expand the schedule over an arbitrary date range.
+ *
+ * Unlike `/api/fppd/schedule`, which reports only the rolling window fppd has
+ * actually scheduled out, this expands the configured schedule rules across any
+ * requested range so past and future dates can be previewed. Occurrences are
+ * advisory - they describe what the schedule says should happen, not what fppd
+ * has committed to running.
+ *
+ * @route GET /api/fppd/schedule/range
+ * @param int start Range start as epoch seconds.
+ * @param int end Range end as epoch seconds. Must be after `start` and no more than 420 days later.
+ * @param boolean includeDisabled Set to `1` to also expand disabled schedule entries.
+ * @param boolean summary Set to `1` to collapse to one item per schedule entry per day, each carrying a `count` of that day's occurrences. Intended for month and other coarse views, where a repeating entry would otherwise return thousands of items.
+ * @response 200 Object with a `schedule` member containing `entries`, `items`, `rangeStart` and `rangeEnd`.
+ * @response 400 Missing, malformed, or excessively large range.
+ */
+
+/**
  * Get FPP version information.
  *
  * @route GET /api/fppd/version
@@ -712,6 +730,27 @@ HttpResponsePtr PlayerResource::render_GET(const HttpRequestPtr& req) {
     } else if (url == "schedule") {
         result["schedule"] = scheduler->GetSchedule();
         SetOKResult(result, "");
+    } else if (url == "schedule/range") {
+        // Expanding the schedule costs time proportional to the range, so cap
+        // what a single request can ask for rather than letting a stray query
+        // hold the scheduler lock.
+        constexpr int MAX_SCHEDULE_RANGE_DAYS = 420;
+
+        time_t rangeStart = (time_t)std::atoll(getRequestArg(req, "start").c_str());
+        time_t rangeEnd = (time_t)std::atoll(getRequestArg(req, "end").c_str());
+
+        if ((rangeStart <= 0) || (rangeEnd <= rangeStart)) {
+            SetErrorResult(result, 400, "start and end must be epoch seconds with end after start");
+        } else if ((rangeEnd - rangeStart) > ((time_t)MAX_SCHEDULE_RANGE_DAYS * 86400)) {
+            SetErrorResult(result, 400, "range may not exceed " + std::to_string(MAX_SCHEDULE_RANGE_DAYS) + " days");
+        } else {
+            bool includeDisabled = getRequestArg(req, "includeDisabled") == "1";
+            bool daySummary = getRequestArg(req, "summary") == "1";
+
+            result["schedule"] = scheduler->GetScheduleRange(rangeStart, rangeEnd,
+                                                             includeDisabled, daySummary);
+            SetOKResult(result, "");
+        }
     } else if (url == "version") {
         result["version"] = getFPPVersion();
         result["majorVersion"] = getFPPMajorVersion();

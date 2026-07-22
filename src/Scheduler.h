@@ -23,40 +23,9 @@
 
 #define SCHEDULE_INDEX_INVALID -1
 
-#define INX_SUN 0
-#define INX_MON 1
-#define INX_TUE 2
-#define INX_WED 3
-#define INX_THU 4
-#define INX_FRI 5
-#define INX_SAT 6
-#define INX_EVERYDAY 7
-#define INX_WKDAYS 8
-#define INX_WKEND 9
-#define INX_M_W_F 10
-#define INX_T_TH 11
-#define INX_SUN_TO_THURS 12
-#define INX_FRI_SAT 13
-#define INX_ODD_DAY 14
-#define INX_EVEN_DAY 15
-#define INX_DAY_MASK 0x10000
-#define INX_DAY_MASK_SUNDAY 0x04000
-#define INX_DAY_MASK_MONDAY 0x02000
-#define INX_DAY_MASK_TUESDAY 0x01000
-#define INX_DAY_MASK_WEDNESDAY 0x00800
-#define INX_DAY_MASK_THURSDAY 0x00400
-#define INX_DAY_MASK_FRIDAY 0x00200
-#define INX_DAY_MASK_SATURDAY 0x00100
-// The masks below are for internal use only, not in UI
-#define INX_DAY_MASK_EVERYDAY 0x07F00
-#define INX_DAY_MASK_WEEKDAYS 0x03E00
-#define INX_DAY_MASK_WEEKEND 0x04100
-#define INX_DAY_MASK_M_W_F 0x02A00
-#define INX_DAY_MASK_T_TH 0x01400
-#define INX_DAY_MASK_SUN_TO_THURS 0x07C00
-#define INX_DAY_MASK_FRI_SAT 0x00300
-#define INX_DAY_MASK_START_ODD 0x05500
-#define INX_DAY_MASK_START_EVEN 0x02A00
+// The INX_* day index and day mask defines now live in ScheduleEntry.h, which
+// is included above, since they describe a ScheduleEntry's dayIndex field.
+// They remain visible to anything including this header.
 
 class ScheduledItem {
 public:
@@ -88,7 +57,26 @@ public:
     Json::Value GetInfo(void);
     Json::Value GetSchedule(void);
 
+    // One expanded occurrence of a schedule entry, used while building the
+    // calendar range response.  Kept lightweight so a range holding tens of
+    // thousands of occurrences can be collected and aggregated before any of
+    // the much more expensive JSON is built.
+    struct Occurrence {
+        int entryIndex;
+        int dayKey; // YYYYMMDD of the local day the occurrence starts on
+        time_t start;
+        time_t end;
+        bool overridden;
+    };
+
+    Json::Value GetScheduleRange(time_t rangeStart, time_t rangeEnd,
+                                 bool includeDisabled, bool daySummary);
+
 private:
+    Json::Value BuildScheduleRangeItem(const ScheduleEntry& entry,
+                                       const Occurrence& occurrence,
+                                       const std::string& timeFmt);
+
     void AddScheduledItems(ScheduleEntry* entry, int index);
     void DumpScheduledItem(const std::time_t itemTime, const ScheduledItem& item);
     void DumpScheduledItems();
