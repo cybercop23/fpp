@@ -182,7 +182,8 @@ function channel_get_output()
         if (!filter_var($ip, FILTER_VALIDATE_IP)) {
             return json(array("status" => "ERROR: Invalid IP address"));
         }
-        $curl = curl_init("http://" . $ip . "/api/channel/output/" . urlencode($file));
+        //IPv6 literals must be bracketed to be usable in a URL
+        $curl = curl_init("http://" . fppUrlHost($ip) . "/api/channel/output/" . urlencode($file));
         curl_setopt($curl, CURLOPT_FAILONERROR, true);
         curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true);
         curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);

@@ -411,10 +411,12 @@ function addMultiSyncUUID(&$data)
         $curlmulti = curl_multi_init();
         $curls = array();
         foreach ($missing as $ip => $tid) {
+            //IPv6 literals must be bracketed to be usable in a URL
+            $urlHost = fppUrlHost($ip);
             if ($tid >= 160 && $tid < 170) {
-                $curl = curl_init("http://" . $ip . "/update/identity");
+                $curl = curl_init("http://" . $urlHost . "/update/identity");
             } else {
-                $curl = curl_init("http://" . $ip . "/api/fppd/status");
+                $curl = curl_init("http://" . $urlHost . "/api/fppd/status");
             }
             curl_setopt($curl, CURLOPT_FAILONERROR, true);
             curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true);

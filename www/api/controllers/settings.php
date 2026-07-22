@@ -92,7 +92,8 @@ function GetSetting()
         if (preg_match('/^\//', $sInfo['optionsURL'])) {
             $json = file_get_contents($sInfo['optionsURL']);
         } else {
-            $json = file_get_contents("http://" . $_SERVER['SERVER_ADDR'] . "/" . $sInfo['optionsURL']);
+            //SERVER_ADDR is an IPv6 literal when the browser reached us over IPv6, which must be bracketed
+            $json = file_get_contents("http://" . fppUrlHost($_SERVER['SERVER_ADDR']) . "/" . $sInfo['optionsURL']);
         }
 
         $sInfo['options'] = json_decode($json, true);

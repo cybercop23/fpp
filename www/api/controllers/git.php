@@ -191,7 +191,7 @@ function GitOSReleases()
     $upgradeSource = isset($settings['UpgradeSource']) ? $settings['UpgradeSource'] : 'github.com';
     if ($upgradeSource != '' && $upgradeSource != 'github.com') {
         $srcCurl = curl_init();
-        curl_setopt($srcCurl, CURLOPT_URL, "http://" . $upgradeSource . "/api/files/uploads");
+        curl_setopt($srcCurl, CURLOPT_URL, "http://" . fppUrlHost($upgradeSource) . "/api/files/uploads");
         curl_setopt($srcCurl, CURLOPT_FAILONERROR, true);
         curl_setopt($srcCurl, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($srcCurl, CURLOPT_CONNECTTIMEOUT_MS, 4000);
@@ -214,7 +214,7 @@ function GitOSReleases()
                 if ($platforms != "all" && !MatchesDeviceOSImage($name, $settings)) {
                     continue;
                 }
-                $srcUrl = "http://" . $upgradeSource . "/api/file/uploads/" . $name;
+                $srcUrl = "http://" . fppUrlHost($upgradeSource) . "/api/file/uploads/" . $name;
                 if (isset($indexByName[$name])) {
                     // Available from the source too -- pull it from the LAN and
                     // flag the origin so the UI can label it.

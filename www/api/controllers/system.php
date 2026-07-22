@@ -565,35 +565,37 @@ function SystemGetStatus()
         $curlmulti = curl_multi_init();
         $curls = array();
         foreach ($ipAddresses as $ip) {
-            //validate IP address is a valid IPv4 address - possibly overkill but have seen IPv6 addresses polled
+            //validate IP address is a valid IPv4 or IPv6 address - possibly overkill but have seen IPv6 addresses polled
             if (filter_var($ip, FILTER_VALIDATE_IP)) {
+                //IPv6 literals must be bracketed to be usable in a URL
+                $urlHost = fppUrlHost($ip);
                 if ($type == "Genius") {
-                    $curl = curl_init("http://" . $ip . "/api/state");
+                    $curl = curl_init("http://" . $urlHost . "/api/state");
                 } else if ($type == "WLED") {
-                    $curl = curl_init("http://" . $ip . "/json/info");
+                    $curl = curl_init("http://" . $urlHost . "/json/info");
                 } else if ($type == "Baldrick") {
-                    $curl = curl_init("http://" . $ip . "/system_state");
+                    $curl = curl_init("http://" . $urlHost . "/system_state");
                 } else if ($type == "FV3") {
-                    $curl = curl_init("http://" . $ip . "/status.xml");
+                    $curl = curl_init("http://" . $urlHost . "/status.xml");
                 } else if ($type == "FV4") {
-                    $curl = curl_init("http://" . $ip . "/api");
+                    $curl = curl_init("http://" . $urlHost . "/api");
                     $data = '{"T":"Q","M":"ST","B":0,"E":0,"I":0,"P":{}}';
                     curl_setopt($curl, CURLOPT_POSTFIELDS, $data);
                     curl_setopt($curl, CURLOPT_HTTPHEADER, array('Content-Type:application/json'));
                 } else if ($type == "ESPixelStick") {
-                    $curl = curl_init("http://$ip/ws"); // WebSocket URL (use wss:// for secure connections)
-                    curl_setopt($curl, CURLOPT_URL, "http://$ip/ws");
+                    $curl = curl_init("http://$urlHost/ws"); // WebSocket URL (use wss:// for secure connections)
+                    curl_setopt($curl, CURLOPT_URL, "http://$urlHost/ws");
                     curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
                     curl_setopt($curl, CURLOPT_HTTPHEADER, [
                         "Connection: Upgrade",
                         "Upgrade: websocket",
-                        "Host: $ip",
-                        "Origin: http://$ip",
+                        "Host: $urlHost",
+                        "Origin: http://$urlHost",
                         "Sec-WebSocket-Key: " . base64_encode(random_bytes(16)),
                         "Sec-WebSocket-Version: 13"
                     ]);
                 } else {
-                    $curl = curl_init("http://" . $ip . "/api/system/status");
+                    $curl = curl_init("http://" . $urlHost . "/api/system/status");
                 }
                 curl_setopt($curl, CURLOPT_FAILONERROR, true);
                 curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true);
@@ -621,7 +623,7 @@ function SystemGetStatus()
                     $result[$ip]["status_name"] = "password";
                 } else if ($responseCode == 404 && $type == "FPP") {
                     // old device, possibly ESPixelStick, maybe FPP4
-                    $curl = curl_init("http://" . $ip . "/fppjson.php?command=getFPPstatus&advancedView=true");
+                    $curl = curl_init("http://" . fppUrlHost($ip) . "/fppjson.php?command=getFPPstatus&advancedView=true");
                     curl_setopt($curl, CURLOPT_FAILONERROR, true);
                     curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true);
                     curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);

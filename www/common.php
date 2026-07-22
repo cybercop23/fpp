@@ -3833,5 +3833,40 @@ function fetch_api_with_limit(string $url, int $max_size_bytes = 1024 * 50): str
     return file_get_contents($url);
 }
 
+/**
+ * Returns a host suitable for embedding in a URL.
+ *
+ * MultiSync discovery reports every address a remote advertises, which on
+ * residential networks includes globally-routable IPv6 addresses (e.g.
+ * 2a06:61c1:4b2a:0:da3a:ddff:fe34:f1be). Concatenating one of those straight
+ * into "http://$ip/..." produces a URL neither curl nor a browser can parse,
+ * since the address colons are indistinguishable from a port separator, so the
+ * literal has to be bracketed. IPv4 addresses and hostnames pass through
+ * unchanged, as do hosts that are already bracketed.
+ *
+ * @param string $host An IP address or hostname.
+ * @return string The host, bracketed if it is an IPv6 literal.
+ */
+function fppUrlHost(string $host): string
+{
+    if ($host === "" || $host[0] === '[') {
+        return $host;
+    }
+
+    // A zone id (fe80::1%eth0) isn't usable in a URL, but validate the address
+    // portion so such a host is still bracketed rather than mangled.
+    $address = $host;
+    $percent = strpos($address, '%');
+    if ($percent !== false) {
+        $address = substr($address, 0, $percent);
+    }
+
+    if (filter_var($address, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+        return '[' . $host . ']';
+    }
+
+    return $host;
+}
+
 
 ?>

@@ -124,7 +124,7 @@ if (preg_match('/^https?:/', $_GET['os'])) {
     if ($upgradeSource != '' && $upgradeSource != 'github.com'
         && preg_match('#^https?://github\.com/#i', $_GET['os'])) {
         // $baseFile is the whitelist-validated basename() from above, safe to interpolate.
-        array_unshift($urls, "http://" . $upgradeSource . "/api/file/uploads/" . $baseFile);
+        array_unshift($urls, "http://" . fppUrlHost($upgradeSource) . "/api/file/uploads/" . $baseFile);
     }
 
     logStage("Downloading OS image");

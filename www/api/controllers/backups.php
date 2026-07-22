@@ -27,8 +27,7 @@ function ProxyBackupToRemote($remotePath, $method = 'GET')
 	}
 
 	// IPv6 literals must be bracketed in a URL.
-	$hostForUrl = (strpos($ip, ':') !== false) ? '[' . $ip . ']' : $ip;
-	$url = 'http://' . $hostForUrl . '/api/backups/' . $remotePath;
+	$url = 'http://' . fppUrlHost($ip) . '/api/backups/' . $remotePath;
 
 	$curl = curl_init($url);
 	curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true);
