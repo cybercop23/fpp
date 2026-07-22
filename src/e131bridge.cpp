@@ -176,6 +176,40 @@ int Bridge_GetIndexFromUniverseNumber(int universe);
 void InputUniversesPrint();
 inline void SetBridgeData(uint8_t* data, int startChannel, int len, long long packetTime);
 
+// Size the receive buffer on a bridge input socket. A show pushing several
+// hundred universes delivers a full frame as one back-to-back burst (hundreds
+// of packets), and the main loop can stall for a frame or two doing output
+// processing before it drains the socket. If the receive buffer is too small
+// the kernel tail-drops that burst. A plain SO_RCVBUF request is silently
+// clamped to net.core.rmem_max, so scale the request to the configured universe
+// count and try SO_RCVBUFFORCE first (fppd runs as root, so CAP_NET_ADMIN lets
+// it bypass rmem_max); fall back to the clamped SO_RCVBUF otherwise.
+static void SetBridgeReceiveBufferSize(int sock) {
+    // ~4KB/universe leaves several frames of burst headroom even after the
+    // kernel's per-packet accounting overhead; clamp to a floor and ceiling.
+    long desired = (long)InputUniverseCount * 4096;
+    if (desired < 512 * 1024) {
+        desired = 512 * 1024;
+    } else if (desired > 16 * 1024 * 1024) {
+        desired = 16 * 1024 * 1024;
+    }
+    int bufSize = (int)desired;
+    bool forced = false;
+#ifdef SO_RCVBUFFORCE
+    forced = setsockopt(sock, SOL_SOCKET, SO_RCVBUFFORCE, &bufSize, sizeof(bufSize)) == 0;
+#endif
+    if (!forced) {
+        // Not privileged (or unsupported): plain request, clamped to rmem_max.
+        setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
+    }
+    int actual = 0;
+    socklen_t len = sizeof(actual);
+    if (getsockopt(sock, SOL_SOCKET, SO_RCVBUF, &actual, &len) == 0) {
+        LogDebug(VB_E131BRIDGE, "Bridge socket %d recv buffer: requested %d, granted %d\n",
+                 sock, bufSize, actual);
+    }
+}
+
 int CreateArtNetSocket(uint32_t sourceAddr, bool allowPortChange) {
     static std::mutex artnetSocketMutex;
     std::lock_guard<std::mutex> lock(artnetSocketMutex);
@@ -195,9 +229,8 @@ int CreateArtNetSocket(uint32_t sourceAddr, bool allowPortChange) {
 #else
         setsockopt(artnetSockT, SOL_SOCKET, SO_NO_CHECK, (void*)&enable, sizeof enable);
 #endif
+        SetBridgeReceiveBufferSize(artnetSockT);
         int bufSize = 512 * 1024;
-        setsockopt(artnetSockT, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
-        bufSize = 512 * 1024;
         setsockopt(artnetSockT, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
 
         memset((char*)&addr, 0, sizeof(addr));
@@ -471,8 +504,7 @@ bool Bridge_Initialize_Internal(bool& hasArtNet) {
             LogErr(VB_E131BRIDGE, "e131bridge DDP bind failed: %s", FPPstrerror(errno));
             exit(1);
         }
-        int bufSize = 512 * 1024;
-        setsockopt(ddpSock, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
+        SetBridgeReceiveBufferSize(ddpSock);
     }
 
     hasArtNet = false;
@@ -498,10 +530,7 @@ bool Bridge_Initialize_Internal(bool& hasArtNet) {
             exit(1);
         }
 
-        // FIXME, move this to /etc/sysctl.conf or our startup script
-#ifndef PLATFORM_OSX
-        system("sudo sysctl net/ipv4/igmp_max_memberships=512");
-#endif
+        // net.ipv4.igmp_max_memberships is raised at boot by FPPINIT_Network.
 
         memset((char*)&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
@@ -514,8 +543,7 @@ bool Bridge_Initialize_Internal(bool& hasArtNet) {
             exit(1);
         }
 
-        int bufSize = 512 * 1024;
-        setsockopt(bridgeSock, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
+        SetBridgeReceiveBufferSize(bridgeSock);
 
         // get all the addresses
         struct ifaddrs *interfaces, *tmp;

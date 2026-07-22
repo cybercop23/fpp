@@ -507,7 +507,11 @@ void setupNetwork(bool fullReload) {
     }
 
     printf("FPP - Setting max IGMP memberships\n");
-    exec("/usr/sbin/sysctl -w net/core/rmem_max=393216 net/core/wmem_max=393216 net/ipv4/igmp_max_memberships=512  > /dev/null 2>&1");
+    // rmem_max is the ceiling a plain SO_RCVBUF request is clamped to. The e131
+    // bridge input sockets ask for far more than the old 384KB when many
+    // universes are configured (and use SO_RCVBUFFORCE where possible), so raise
+    // the ceiling to 8MB to cover the burst of a several-hundred-universe frame.
+    exec("/usr/sbin/sysctl -w net/core/rmem_max=8388608 net/core/wmem_max=393216 net/ipv4/igmp_max_memberships=512  > /dev/null 2>&1");
 
     printf("FPP - Configuring ethernet interfaces for show traffic\n");
     for (const auto& entry : std::filesystem::directory_iterator("/sys/class/net/")) {
